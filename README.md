@@ -239,6 +239,16 @@ in the plots. The pass band is sampled uniformly on $[0, 1]$. Following the arti
 samples are $x_t = 1 + \tau - \ln\frac{N - t}{N}$ for $t = 0 \dots N-1$: dense near the edge,
 sparse far out.
 
+**Negative values.** Negative kernel values look like cheap sharpening. The "Negative-value
+weight" $w$ multiplies the error wherever the kernel is negative:
+$\max_j |K(x_j) - \mathrm{target}_j| \cdot (w \text{ if } K(x_j) < 0 \text{ else } 1)$, in the
+differential evolution, the fine-tuning loss, and the displayed ripple alike. The presets include
+the article's two "almost no negative values" sets, which it gives in the separable form
+$(c + d i)^2 e^{(a + bi)s}$; in this app's parameters that is $b \leftarrow -a$, $c \leftarrow b$,
+$r = c^2 - d^2$, $i = -2cd$. They load with $w = 100$, at which the 1-component set is about
+equiripple, and without the per-slot frequency bands, which they don't follow (one of the
+2-component set's rates is almost real).
+
 **Differential evolution** ([`src/de.js`](src/de.js)) is generation-synchronous, so that each
 generation is one jitted GPU call with no data read back:
 

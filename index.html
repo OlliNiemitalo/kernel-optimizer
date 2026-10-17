@@ -87,6 +87,8 @@
         <label>Pass-band samples <input id="passSamples" type="number" min="10" max="5000" step="10" value="200" /></label>
         <label>Stop-band samples <input id="stopSamples" type="number" min="10" max="5000" step="10" value="200" /></label>
         <label class="check"><input id="frequencyBands" type="checkbox" checked /> <span>Keep component <var>u</var> near frequency (1.14<var>u</var> + 0.5)π ± 0.4π</span></label>
+        <label>Negative-value weight <input id="negWeight" type="number" min="1" max="1000" step="1" value="1" /></label>
+        <p class="note">Errors where the kernel is negative count this many times. Above 1, the optimizers trade ripple for fewer negative values, which look like cheap sharpening (as in the article's non-negative sets).</p>
         <p id="ranges" class="note"></p>
 
         <h2>Differential evolution</h2>
@@ -104,6 +106,7 @@
           <select id="preset">
             <option value="">—</option>
             <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
+            <option value="nn1">1, non-negative</option><option value="nn2">2, non-negative</option>
           </select>
         </label>
 

@@ -46,6 +46,21 @@ export function presetParams(n) {
   return Array.from({ length: n }, (_, u) => [...p.slice(u * 4, u * 4 + 4), 0, 0]).flat();
 }
 
+// The article's "almost no negative values" sets, in its separable form (a, b, c, d): 1-D kernel
+// (c + d i) e^{(a + b i) x²}, i.e. 2-D component (c + d i)² e^{(a + b i) s}.
+export const NONNEGATIVE_PRESETS = {
+  1: [[-2.0126256644, 1.0462519386, 1.7772360464, -1.5705215513]],
+  2: [
+    [-1.875593446, 5.686828181, -1.134115425, -0.4727562391],
+    [-3.0859247607, 0.0311853116, 14.9843211153, -14.9911604837],
+  ],
+};
+
+// Re[(c + d i)² e^{(a + b i) s}] = (c² − d²) cos(bs) e^{as} − 2cd sin(bs) e^{as}.
+export function nonnegativePresetParams(n) {
+  return NONNEGATIVE_PRESETS[n].flatMap(([a, b, c, d]) => [-a, b, c * c - d * d, -2 * c * d, 0, 0]);
+}
+
 // The kernel doesn't depend on component order; ascending frequency matches the search's
 // per-slot frequency bands, so a seeded kernel isn't distorted by the bound reflection.
 export function sortByFrequency(params) {
@@ -62,6 +77,7 @@ export function defaultProblem() {
     passSamples: 200,
     stopSamples: 200,
     frequencyBands: true,
+    negativeWeight: 1,
   };
 }
 
@@ -89,6 +105,7 @@ export function frequencyBands(multiplicity) {
 }
 
 // Pass band x ∈ [0, 1] uniform; stop band from 1 + transition outwards with log spacing.
+// negativeWeight multiplies the error wherever the kernel is negative.
 export function sampleGrid(problem, passSamples = problem.passSamples, stopSamples = problem.stopSamples) {
   const n = passSamples + stopSamples;
   const x = new Float64Array(n);
@@ -100,7 +117,7 @@ export function sampleGrid(problem, passSamples = problem.passSamples, stopSampl
   for (let t = 0; t < stopSamples; t++) {
     x[passSamples + t] = 1 + problem.transition - Math.log((stopSamples - t) / stopSamples);
   }
-  return { x, target, passSamples };
+  return { x, target, passSamples, negativeWeight: problem.negativeWeight ?? 1 };
 }
 
 // Reflection bounds keep the search in a sensible region; initial ranges seed the population.
@@ -126,7 +143,7 @@ export function bounds(problem) {
       [foldLo[k + 1], foldHi[k + 1]] = bands[u];
       [initLo[k + 1], initHi[k + 1]] = bands[u];
     } else {
-      foldLo[k + 1] = 0.2;
+      foldLo[k + 1] = 0; // c = 0 is a plain Gaussian, as in the article's non-negative 2-component set
       foldHi[k + 1] = 4 * topFrequency;
       initLo[k + 1] = 0.2;
       initHi[k + 1] = topFrequency;
@@ -155,10 +172,13 @@ export function profile(params, x) {
   return sum;
 }
 
+// Max |K(x) − target|, weighted by grid.negativeWeight where K(x) < 0.
 export function maxError(params, grid) {
+  const w = grid.negativeWeight ?? 1;
   let worst = 0;
   for (let t = 0; t < grid.x.length; t++) {
-    worst = Math.max(worst, Math.abs(profile(params, grid.x[t]) - grid.target[t]));
+    const k = profile(params, grid.x[t]);
+    worst = Math.max(worst, Math.abs(k - grid.target[t]) * (k < 0 ? w : 1));
   }
   return worst;
 }

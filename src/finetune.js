@@ -27,10 +27,12 @@ export class FineTuner {
     this.minTheta = np.array(minTheta);
     this.theta = np.array(Float32Array.from(params, (v, j) => (scale[j] ? v / scale[j] : 0)));
 
+    const negativeWeight = grid.negativeWeight ?? 1;
     const loss = (theta, beta, s2, target, scaleArr) => {
       const prof = profileBatch(theta.mul(scaleArr), s2, components).reshape([-1]);
       const e = prof.sub(target);
-      const a = np.sqrt(e.mul(e).add(1e-12));
+      let a = np.sqrt(e.mul(e).add(1e-12));
+      if (negativeWeight !== 1) a = np.where(np.less(prof, 0), a.mul(negativeWeight), a);
       const m = lax.stopGradient(a.max());
       return np.log(np.exp(a.sub(m).mul(beta)).sum()).div(beta).add(m);
     };

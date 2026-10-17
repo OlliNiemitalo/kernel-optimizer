@@ -3,7 +3,8 @@ import { defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
 import { DifferentialEvolution } from "../src/de.js";
 import { FineTuner } from "../src/finetune.js";
 import {
-  bounds, defaultProblem, maxError, multiplicities, parseParams, presetParams, profile, sampleGrid, separableChannels,
+  bounds, defaultProblem, maxError, multiplicities, nonnegativePresetParams, parseParams, presetParams, profile, sampleGrid,
+  separableChannels,
 } from "../src/problem.js";
 
 const devices = await init();
@@ -69,6 +70,27 @@ const problemFor = (multiplicity) => ({ ...defaultProblem(), components: multipl
   });
   const snap = await de.snapshot();
   check("jax-js cost of preset 5 vs JS", Math.abs(snap.costs[0] - maxError(presetParams(5), grid)), 2e-5);
+  de.dispose();
+}
+
+// The article's non-negative sets: converted from its (a, b, c, d) form, they match its stated
+// stop-band maxima, and the weighted jax-js cost matches the JS one.
+{
+  const nnProblem = { ...problemFor([1, 1]), frequencyBands: false, negativeWeight: 100 };
+  const grid = sampleGrid(nnProblem);
+  for (const [n, stated] of [[1, 0.3079699786], [2, 0.1422940279]]) {
+    const p = nonnegativePresetParams(n);
+    let stop = 0;
+    for (let x = 1.2; x < 4; x += 0.001) stop = Math.max(stop, Math.abs(profile(p, x)));
+    check(`non-negative preset ${n}: stop-band maximum vs article`, Math.abs(stop - stated) / stated, 0.01);
+  }
+  const p = nonnegativePresetParams(2);
+  const de = new DifferentialEvolution({
+    components: 2, grid, bounds: bounds(nnProblem), populationSize: 8, F: 0.76, CR: 0.999, seed: 1,
+    startingPoint: Float32Array.from(p),
+  });
+  const snap = await de.snapshot();
+  check("jax-js negative-weighted cost vs JS", Math.abs(snap.costs[0] - maxError(p, grid)), 2e-5);
   de.dispose();
 }
 

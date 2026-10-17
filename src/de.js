@@ -11,10 +11,13 @@ import { jit, numpy as np, random } from "@hamk-uas/jax-js-nonconsuming";
 import { profileBatch } from "./model.js";
 import { PARAMS_PER_COMPONENT } from "./problem.js";
 
-// Max |profile − target| over the sample grid for each parameter vector in a batch.
-export function batchCost(params, s2, target, components) {
-  const err = np.abs(profileBatch(params, s2, components).sub(target.reshape([1, -1])));
-  return err.max(1);
+// Max |profile − target| over the sample grid for each parameter vector in a batch, weighted by
+// negativeWeight where the profile is negative.
+export function batchCost(params, s2, target, components, negativeWeight = 1) {
+  const prof = profileBatch(params, s2, components);
+  const err = np.abs(prof.sub(target.reshape([1, -1])));
+  if (negativeWeight === 1) return err.max(1);
+  return np.where(np.less(prof, 0), err.mul(negativeWeight), err).max(1);
 }
 
 // Reflect once at each bound, then clamp (the article's constraint handling).
@@ -46,6 +49,7 @@ export class DifferentialEvolution {
     this.generation = 0;
 
     const s2 = Float32Array.from(grid.x, (x) => x * x);
+    const negativeWeight = grid.negativeWeight ?? 1;
     this.s2 = np.array(s2);
     this.target = np.array(Float32Array.from(grid.target));
     this.lo = np.array(Float32Array.from(bounds.foldLo)).reshape([1, D]);
@@ -63,7 +67,7 @@ export class DifferentialEvolution {
     }
     if (startingPoint && startingPoint.length === D) init.set(startingPoint, 0);
 
-    this.costFn = jit((pop, s2v, tv) => batchCost(pop, s2v, tv, components));
+    this.costFn = jit((pop, s2v, tv) => batchCost(pop, s2v, tv, components, negativeWeight));
     {
       using foldFn = jit(fold);
       using raw = np.array(init).reshape([P, D]);
@@ -97,7 +101,7 @@ export class DifferentialEvolution {
       const offset = np.remainder(positions.sub(start).add(D), D);
       const trial = fold(np.where(np.less(offset, length), mutant, targets), lo, hi);
 
-      const trialCost = batchCost(trial, s2v, tv, components);
+      const trialCost = batchCost(trial, s2v, tv, components, negativeWeight);
       const better = np.less(trialCost, targetCost);
       const nextPop = np.where(better.reshape([P, 1]), trial, targets);
       const nextCost = np.where(better, trialCost, targetCost);
@@ -108,7 +112,7 @@ export class DifferentialEvolution {
     this.injectFn = jit((pop, cost, row, s2v, tv, lo, hi, index) => {
       const r = fold(row.reshape([1, D]), lo, hi);
       const hit = np.equal(index, np.argmax(cost));
-      return [np.where(hit.reshape([P, 1]), r, pop), np.where(hit, batchCost(r, s2v, tv, components), cost)];
+      return [np.where(hit.reshape([P, 1]), r, pop), np.where(hit, batchCost(r, s2v, tv, components, negativeWeight), cost)];
     });
   }
 

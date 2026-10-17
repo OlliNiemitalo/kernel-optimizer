@@ -9,12 +9,15 @@ import { FineTuner } from "./finetune.js";
 import { drawConvergence, drawDisc, drawError, drawProfile } from "./plots.js";
 import {
   PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, maxError, multiplicities, parseParams,
-  presetParams, sampleGrid, sortByFrequency,
+  presetParams, nonnegativePresetParams, sampleGrid, sortByFrequency,
 } from "./problem.js";
 import { loadImage, proceduralScene } from "./scene.js";
 
 const $ = (id) => document.getElementById(id);
 const num = (id) => Number($(id).value);
+// With this weight the article's 1-component non-negative set is about equiripple (its negative
+// lobe × 100 ≈ its ripple), so further optimization keeps the presets' character.
+const NONNEGATIVE_WEIGHT = 100;
 
 const state = {
   backend: null,
@@ -54,6 +57,7 @@ function readProblem() {
     passSamples: Math.max(2, Math.round(num("passSamples"))),
     stopSamples: Math.max(2, Math.round(num("stopSamples"))),
     frequencyBands: $("frequencyBands").checked,
+    negativeWeight: Math.max(1, num("negWeight") || 1),
   };
 }
 
@@ -518,7 +522,7 @@ function wire() {
     observe(performance.now(), 0);
     if (wasRunning) setRunning(true);
   };
-  for (const id of ["components", "multiplicity", "transition", "passSamples", "stopSamples", "frequencyBands", "population", "F", "CR", "seed"]) {
+  for (const id of ["components", "multiplicity", "transition", "passSamples", "stopSamples", "frequencyBands", "negWeight", "population", "F", "CR", "seed"]) {
     $(id).addEventListener("change", () => {
       setRunning(false);
       if (id === "multiplicity") {
@@ -532,13 +536,19 @@ function wire() {
   }
   $("denseSamples").addEventListener("change", () => state.current && setCurrent(state.current.params, state.current.source));
   $("preset").onchange = () => {
-    const n = Number($("preset").value);
-    if (!n) return;
+    const value = $("preset").value;
+    if (!value) return;
+    const nonnegative = value.startsWith("nn");
+    const n = Number(value.replace("nn", ""));
     setRunning(false);
     $("components").value = n;
     setMultiplicity(Array(n).fill(1));
     $("transition").value = 0.2;
-    setCurrent(sortByFrequency(presetParams(n)), `article preset (${n} components)`);
+    $("negWeight").value = nonnegative ? NONNEGATIVE_WEIGHT : 1;
+    // The non-negative sets don't follow the frequency-band heuristic (one is almost a plain Gaussian).
+    $("frequencyBands").checked = !nonnegative;
+    const params = nonnegative ? nonnegativePresetParams(n) : presetParams(n);
+    setCurrent(sortByFrequency(params), `article ${nonnegative ? "non-negative " : ""}preset (${n} components)`);
     discardDE({ include: state.current.params });
     $("preset").value = "";
   };
