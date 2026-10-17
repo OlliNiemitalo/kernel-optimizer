@@ -226,12 +226,43 @@ sharper pixels: those pixels neither look far enough nor use the highlight's ker
    adjustable threshold of blur behind it (default one octave, i.e. twice the radius), beyond its own blur radius, so background highlights do not bleed over
    sharp foreground edges. Blurry foreground pixels hide nothing, because they cover only part of the
    lens aperture. Light hidden behind a small blurry foreground object is missing from the image, so
-   such objects' discs come out somewhat brighter in the middle; avoiding that would need separate
-   near and far layers, doubling the intermediate memory.
+   such objects' discs come out somewhat brighter in the middle (see depth layers below).
 
-The extra memory is the radius map (4 bytes per pixel) and two level maps (1 byte per pixel each).
+The extra memory is the radius map (4 bytes per pixel) and three level maps (1 byte per pixel each).
 Each prepass step runs in its own compute pass: on the tested Intel GPU, dependent dispatches within
 one compute pass were not reliably ordered, which made the output vary from frame to frame.
+
+#### Depth layers
+
+With one layer, a blurry object in front of the focus (a person, with the focus behind them) keeps
+a sharp silhouette: in-focus background pixels have the identity kernel, so nothing spreads into
+the object, and the normalization rescales the object's half discs at its edge back to full
+strength. With **depth layers** (z-buffer only, 1–4), near layers are blurred separately and
+composited over the farther ones, so the silhouette spreads over the background, and the
+background shows through the object's semi-transparent edge, as in a real lens.
+
+- **Local splits.** Which depths need separating varies across the image, so the splits are chosen
+  per 16×16 tile from a histogram of signed blur levels over the surrounding 5×5 tiles. A greedy
+  Otsu threshold splits it where the nearer part lies in front of the focus and is at least an
+  octave blurrier than the farther part (a sharper part in front is already handled by occlusion).
+  Elsewhere the tile needs fewer layers, and the unused near layers are empty there, so one layer
+  in memory serves different depths in different places.
+- **Membership depends only on the source.** Each pixel's weight in each layer comes from the splits
+  of the four nearest tile centers, bilinearly interpolated, with a soft step of ±1.5 levels.
+  Because it is a function of the source pixel alone, each layer is a linear image and the
+  separable passes stay exact.
+- **Front to back.** Layers run one after another, nearest first, through the same passes, buffers
+  and accumulator. After each layer but the last, its coverage-premultiplied result is composited:
+  $C \mathrel{+}= T\,c$, $T \mathrel{\times}= 1 - \alpha$. The memory for any number of layers is one
+  extra buffer (color and transmittance $T$, 16 bytes per pixel) plus the hole-filling pyramid
+  below, about a third more.
+- **Hole filling.** The last layer lacks the sources that nearer layers took. Where its coverage
+  approaches 0, it is completed by pull-push: a pyramid of coverage-weighted averages built by
+  halving, then filled from coarse to fine with bilinear upsampling. The display shows
+  $C + T \cdot \text{last layer}$.
+
+On the Intel GPU, two layers took 1.0–1.7× the GPU time of one on the Video Depth Anything clip of a
+woman in a field.
 
 #### Truncation and corners
 

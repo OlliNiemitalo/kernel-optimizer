@@ -456,7 +456,7 @@ function download(url, name) {
 }
 
 const VIEW_CONTROLS = [
-  "blurOn", "radius", "blurMode", "focus", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels",
+  "blurOn", "radius", "blurMode", "focus", "layers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels",
   "exposure", "tonemap", "precision", "transition",
 ];
 
@@ -537,6 +537,7 @@ async function renderBlur() {
       else state.blur.setRadiusMap(mode === "tiltShift" ? tiltShiftRadiusMap(width, height, radius) : null);
       $("varyingControls").disabled = mode === "uniform";
       $("occlusion").disabled = !depth;
+      $("layers").disabled = !depth;
       updateVaryingControls();
       blurKernelDirty = false;
     }
@@ -558,6 +559,7 @@ async function renderBlur() {
       invFocus: num("focus") ** 2,
       sizeBlur: $("sizeBlur").checked ? num("sizeBrightness") : null,
       occlusion: $("occlusion").checked ? num("occlusionLevels") / 6 : 0,
+      layers: num("layers"),
       capture,
     });
     const prefix = { world: "street", video: "video" }[state.source];
@@ -576,6 +578,7 @@ async function renderBlur() {
       `GPU memory ${mib(total)} MiB (intermediate ${mib(m.intermediate)}, accumulator ${mib(m.accumulator)}, ` +
       `source ${mib(m.source)}` +
       (m.radiusMap ? `, radius ${mib(m.radiusMap)}, level maps ${mib(m.levelMaps)}` : "") +
+      (m.layers ? `, layers ${mib(m.layers)}` : "") +
       `) · ${gpu}`;
   } catch (e) {
     console.error(e);
@@ -779,7 +782,7 @@ function wire() {
     $("exposureOut").textContent = `${Math.pow(2, num("exposure")).toFixed(2)}×`;
     requestBlur();
   });
-  for (const id of ["blurOn", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels"]) {
+  for (const id of ["blurOn", "layers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels"]) {
     $(id).addEventListener("input", () => {
       updateVaryingControls();
       requestBlur();
