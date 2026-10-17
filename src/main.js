@@ -379,6 +379,75 @@ function setFocusSlider(value) {
   $("focus").dispatchEvent(new Event("input"));
 }
 
+// Hovering (or holding a touch) on the canvas eases the focus to the nearest depth around the
+// pointer, and restores it afterwards; a click or tap keeps the picked focus.
+const PICK_RADIUS = 8; // image pixels
+const FOCUS_EASE = 0.12; // time constant, s
+const hover = { active: false, x: 0, y: 0, saved: 0, target: 0, value: 0, picking: false, easing: false };
+
+const canPick = () => state.blur && $("blurMode").value === "depth" && hasDepth();
+
+function canvasPixel(e) {
+  const rect = $("blurCanvas").getBoundingClientRect();
+  return [
+    Math.floor(((e.clientX - rect.left) / rect.width) * state.blur.width),
+    Math.floor(((e.clientY - rect.top) / rect.height) * state.blur.height),
+  ];
+}
+
+// Focus slider position (its square is 1 / distance) for the nearest depth around a pixel.
+async function pickFocus(x, y) {
+  const inv = await state.blur.pickInverseDepth(x, y, PICK_RADIUS);
+  return inv === null ? null : Math.sqrt(Math.min(1, Math.max(0, inv)));
+}
+
+async function easeFocus() {
+  if (hover.easing) return;
+  hover.easing = true;
+  hover.value = num("focus");
+  let last = performance.now();
+  while (hover.active || hover.value !== hover.target) {
+    await nextFrame();
+    if (hover.active && !hover.picking) {
+      hover.picking = true;
+      pickFocus(hover.x, hover.y)
+        .then((v) => { if (v !== null && hover.active) hover.target = v; })
+        .finally(() => (hover.picking = false));
+    }
+    const now = performance.now();
+    const step = 1 - Math.exp(-(now - last) / 1000 / FOCUS_EASE);
+    last = now;
+    const next = Math.abs(hover.target - hover.value) < 1e-4 ? hover.target : hover.value + (hover.target - hover.value) * step;
+    if (next !== hover.value) setFocusSlider((hover.value = next));
+  }
+  hover.easing = false;
+}
+
+function startHover(e) {
+  if (!canPick()) return;
+  [hover.x, hover.y] = canvasPixel(e);
+  if (!hover.active) {
+    hover.active = true;
+    hover.saved = hover.target = num("focus");
+  }
+  easeFocus();
+}
+
+function endHover() {
+  if (!hover.active) return;
+  hover.active = false;
+  hover.target = hover.saved;
+  easeFocus();
+}
+
+async function clickFocus(e) {
+  if (!canPick()) return;
+  const v = await pickFocus(...canvasPixel(e));
+  if (v === null) return;
+  hover.saved = hover.target = v;
+  easeFocus();
+}
+
 function download(url, name) {
   const link = document.createElement("a");
   link.href = url;
@@ -455,7 +524,7 @@ async function renderBlur() {
     requestBlur();
     return;
   }
-  if (!state.blur || !state.current) return;
+  if (!state.blur || !state.current || !state.source) return;
   blurRendering = true;
   try {
     const radius = num("radius");
@@ -509,6 +578,7 @@ async function renderBlur() {
       (m.radiusMap ? `, radius ${mib(m.radiusMap)}, level maps ${mib(m.levelMaps)}` : "") +
       `) · ${gpu}`;
   } catch (e) {
+    console.error(e);
     $("blurStats").textContent = `Blur failed: ${e.message}`;
   } finally {
     blurRendering = false;
@@ -517,6 +587,7 @@ async function renderBlur() {
 }
 
 function stopVideo() {
+  state.scene = (state.scene ?? 0) + 1; // invalidates video loads in progress
   if (!state.video) return;
   for (const element of [state.video.element, state.video.depth]) {
     if (!element) continue;
@@ -561,8 +632,13 @@ async function loadVideo(url) {
 // video with a separate depth video.
 async function useVideo(sample) {
   stopVideo();
+  const scene = state.scene;
   $("blurStats").textContent = `Loading ${sample.label}…`;
   const [element, depth] = await Promise.all([loadVideo(sample.color), sample.depth ? loadVideo(sample.depth) : null]);
+  if (scene !== state.scene) {
+    for (const e of [element, depth]) e?.removeAttribute("src");
+    return;
+  }
   const source = new VideoSource(state.blur.device, element, depth);
   source.boost = num("boost");
   state.video = { element, depth, source, name: sample.label, fps: sample.fps ?? 30 };
@@ -593,7 +669,7 @@ async function initBlur() {
     return;
   }
   // The default video is loaded from another site; without it, start with the 3D world.
-  await useVideo(VIDEO_SAMPLES[0]).catch(() => useWorld());
+  await useVideo(VIDEO_SAMPLES[0]).catch(() => state.source || useWorld());
 }
 
 // ---- wiring ---------------------------------------------------------------------------------
@@ -696,6 +772,9 @@ function wire() {
     $("focusOut").textContent = inv > 0 ? `${(1 / inv).toPrecision(2)} m` : "∞";
     requestBlur();
   });
+  for (const type of ["pointerdown", "pointermove"]) $("blurCanvas").addEventListener(type, startHover);
+  for (const type of ["pointerleave", "pointercancel"]) $("blurCanvas").addEventListener(type, endHover);
+  $("blurCanvas").addEventListener("click", clickFocus);
   $("exposure").addEventListener("input", () => {
     $("exposureOut").textContent = `${Math.pow(2, num("exposure")).toFixed(2)}×`;
     requestBlur();

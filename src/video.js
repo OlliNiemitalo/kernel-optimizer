@@ -42,7 +42,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   var c = toLinear(clamp(textureSampleBaseClampToEdge(colorFrame, linearSampler, colorUv).rgb, vec3f(0.0), vec3f(1.0)));
   let lum = dot(c, vec3f(0.2126, 0.7152, 0.0722));
   c *= 1.0 + V.boost * pow(min(lum, 1.0), 8.0);
-  color[i] = vec4f(c, 1.0);
+  color[i] = vec4f(c, 0.0);
   if (V.dof == 1u) {
     var v: f32;
     if (V.pair == 1u) {
@@ -51,6 +51,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     } else {
       v = textureSampleBaseClampToEdge(depthFrame, linearSampler, vec2f(uv.x, 0.5 + 0.5 * uv.y)).r;
     }
+    color[i].w = v * V.invDepthScale; // 1 / depth, for focus picking
     coc[i] = clamp(V.aperture * Z_REF * (V.invFocus - v * V.invDepthScale), -V.aperture, V.aperture);
   }
 }

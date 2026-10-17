@@ -258,6 +258,8 @@ textarea {
   max-width: 100%;
   border-radius: 6px;
   background: #000;
+  cursor: crosshair;
+  touch-action: none; /* holding a touch previews focus instead of scrolling */
 }
 
 #shaderPanel {

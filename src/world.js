@@ -404,7 +404,7 @@ fn refine(@builtin(global_invocation_id) id: vec3u) {
 fn resolve(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= W.width * W.height) { return; }
   let s = scratch[id.x];
-  color[id.x] = vec4f(s.rgb, 1.0);
+  color[id.x] = s; // alpha: 1 / depth, for focus picking
   if (W.dof == 1u) { coc[id.x] = clamp(W.aperture * Z_REF * (W.invFocus - s.w), -W.aperture, W.aperture); }
 }
 `;

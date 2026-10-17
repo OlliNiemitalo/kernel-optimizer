@@ -11,9 +11,11 @@ pass, at a cost proportional to the blur radius rather than its area.
   convergence, and the 2-D kernel.
 - **Blur demo**: hand-written WGSL compute shaders processing one channel at a time, so memory
   doesn't grow with the channel count. Uniform or spatially varying disc radius: tilt-shift, or
-  depth of field from the z-buffer of an animated 3D night street ray-cast on the GPU, with an
-  adjustable focus distance, or from an RGB-D video: Video Depth Anything's comparison clips (loaded
-  from its project page) or two people talking at a desk with measured depth (included). f32 or
+  depth of field from the z-buffer of an animated 3D night street ray-cast on the GPU, or from an
+  RGB-D video: Video Depth Anything's comparison clips (loaded from its project page) or two people
+  talking at a desk with measured depth (included). Hovering over the picture (or holding a touch)
+  eases the focus to the nearest depth within 8 pixels of the pointer, and restores it afterwards;
+  a click or tap keeps it. f32 or
   packed 16-bit intermediates, and GPU timings and memory use per
   buffer. The "Shader code (WGSL)" panel shows the shaders, with copy and download buttons. Their
   header comments document the buffers, tap tables, and dispatch order, so you can use them
