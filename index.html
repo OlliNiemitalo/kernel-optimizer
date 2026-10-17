@@ -115,8 +115,17 @@
           <label>Highlight boost <input id="boost" type="number" min="0" max="100" step="1" value="8" /></label>
           <button id="worldButton">3D world</button>
           <button id="sceneButton">Procedural scene</button>
-          <label class="check"><input id="animate" type="checkbox" checked /> Animate</label>
+          <span class="playback" aria-label="Animation playback">
+            <button id="stepBack" title="Previous frame (1/30 s)">⏮</button>
+            <button id="playPause" title="Play or pause the animation">Pause</button>
+            <button id="stepForward" title="Next frame (1/30 s)">⏭</button>
+            <label>t <input id="sceneTime" type="number" min="0" step="0.0333333" value="0" /> s</label>
+            <button id="saveFrame" title="Save the displayed frame as PNG">Save PNG</button>
+            <button id="copyView" title="Copy the scene time, blur settings, kernel and GPU as JSON, to reproduce this view">Copy view state</button>
+            <button id="applyView" title="Restore a view from copied JSON">Apply view state…</button>
+          </span>
         </div>
+        <textarea id="viewState" rows="4" placeholder="Paste a view state (JSON), then press Apply view state again" spellcheck="false" hidden></textarea>
         <p id="blurStats" class="status"></p>
         <canvas id="blurCanvas"></canvas>
         <details id="shaderPanel">

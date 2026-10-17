@@ -408,7 +408,10 @@ export class BlurRenderer {
     const device = await adapter.requestDevice({
       requiredFeatures: supportsTimestamps ? ["timestamp-query"] : [],
     });
-    return new BlurRenderer(canvas, device, supportsTimestamps);
+    const blur = new BlurRenderer(canvas, device, supportsTimestamps);
+    const { vendor, architecture, device: name, description } = adapter.info ?? {};
+    blur.adapterInfo = { vendor, architecture, device: name, description };
+    return blur;
   }
 
   constructor(canvas, device, supportsTimestamps) {
@@ -636,8 +639,9 @@ export class BlurRenderer {
   }
 
   // Runs the passes and draws; resolves with timings once the GPU has finished. `time` and
-  // `invFocus` (1 / focus distance in 1/m) drive the 3D world.
-  async render({ exposure = 1, tonemap = 1, precision = "f32", showSource = false, time = 0, invFocus = 0 } = {}) {
+  // `invFocus` (1 / focus distance in 1/m) drive the 3D world. `capture` returns the frame as a
+  // PNG data URL.
+  async render({ exposure = 1, tonemap = 1, precision = "f32", showSource = false, time = 0, invFocus = 0, capture = false } = {}) {
     if (this.tablesDirty) this.buildTables();
     const packed = precision === "f16";
     const { width, height, device } = this;
@@ -750,8 +754,10 @@ export class BlurRenderer {
       encoder.copyBufferToBuffer(this.queryResolve, 0, this.queryRead, 0, queries * 8);
     }
     device.queue.submit([encoder.finish()]);
+    // Must be read in the same task: the canvas texture is discarded once presented.
+    const png = capture ? this.canvas.toDataURL("image/png") : undefined;
     await device.queue.onSubmittedWorkDone();
-    const result = { ms: performance.now() - t0, taps: this.taps, levels: this.levels, varying, packed, memory: this.memory(packed) };
+    const result = { ms: performance.now() - t0, taps: this.taps, levels: this.levels, varying, packed, memory: this.memory(packed), png };
     if (timed) {
       await this.queryRead.mapAsync(GPUMapMode.READ, 0, queries * 8);
       const ns = new BigUint64Array(this.queryRead.getMappedRange(0, queries * 8).slice(0));

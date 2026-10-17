@@ -134,6 +134,16 @@ button:disabled {
   align-items: center;
 }
 
+.playback {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.playback input[type="number"] {
+  width: 6em;
+}
+
 .grid {
   display: grid;
   grid-template-columns: 1fr 340px;

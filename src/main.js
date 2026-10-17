@@ -26,6 +26,8 @@ const state = {
   world: null,
   worldActive: false,
   sceneTime: 0,
+  playing: true,
+  captureNext: false,
   imageFile: null,
 };
 
@@ -274,7 +276,76 @@ let blurKernelDirty = true;
 let blurRendering = false;
 let lastBlurTime = 0;
 
-const animating = () => state.worldActive && $("animate").checked && !document.hidden;
+const FRAME = 1 / 30; // seconds per step
+const animating = () => state.worldActive && state.playing && !document.hidden;
+
+function showSceneTime() {
+  if (document.activeElement !== $("sceneTime")) $("sceneTime").value = state.sceneTime.toFixed(4);
+}
+
+function setPlaying(playing) {
+  state.playing = playing;
+  $("playPause").textContent = playing ? "Pause" : "Play";
+  lastBlurTime = 0;
+  requestBlur();
+}
+
+function stepScene(frames) {
+  state.playing = false;
+  $("playPause").textContent = "Play";
+  state.sceneTime = Math.max(0, Math.round(state.sceneTime / FRAME + frames) * FRAME);
+  showSceneTime();
+  requestBlur();
+}
+
+function download(url, name) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+}
+
+const VIEW_CONTROLS = ["radius", "blurMode", "focus", "exposure", "tonemap", "precision", "showSource", "transition"];
+
+// Everything needed to re-render the displayed frame, plus context for bug reports.
+function viewState() {
+  const controls = Object.fromEntries(VIEW_CONTROLS.map((id) => [id, $(id).type === "checkbox" ? $(id).checked : $(id).value]));
+  return {
+    scene: state.worldActive ? "world" : state.imageFile ? `image: ${state.imageFile.name}` : "procedural",
+    time: state.sceneTime,
+    playing: state.playing,
+    controls,
+    kernel: state.current?.params,
+    size: state.blur && [state.blur.width, state.blur.height],
+    gpu: state.blur?.adapterInfo,
+    stats: $("blurStats").textContent,
+    userAgent: navigator.userAgent,
+  };
+}
+
+function applyViewState(view) {
+  if (view.scene === "world" && !state.worldActive) useWorld();
+  if (view.scene === "procedural") useImage(proceduralScene());
+  for (const [id, value] of Object.entries(view.controls ?? {})) {
+    if (!VIEW_CONTROLS.includes(id)) continue;
+    if ($(id).type === "checkbox") $(id).checked = value;
+    else $(id).value = value;
+    $(id).dispatchEvent(new Event("input"));
+  }
+  if (Array.isArray(view.kernel) && view.kernel.length % PARAMS_PER_COMPONENT === 0) {
+    setRunning(false);
+    $("components").value = view.kernel.length / PARAMS_PER_COMPONENT;
+    setMultiplicity(multiplicities(view.kernel));
+    setCurrent(view.kernel, "view state");
+    discardDE({ include: state.current.params });
+  }
+  state.playing = !!view.playing;
+  $("playPause").textContent = state.playing ? "Pause" : "Play";
+  state.sceneTime = Math.max(0, Number(view.time) || 0);
+  showSceneTime();
+  lastBlurTime = 0;
+  requestBlur(true);
+}
 
 function requestBlur(kernelChanged = false) {
   blurKernelDirty ||= kernelChanged;
@@ -304,6 +375,9 @@ async function renderBlur() {
     }
     const now = performance.now();
     if (animating() && lastBlurTime) state.sceneTime += Math.min(0.1, (now - lastBlurTime) / 1000);
+    showSceneTime();
+    const capture = state.captureNext;
+    state.captureNext = false;
     const r = await state.blur.render({
       exposure: Math.pow(2, num("exposure")),
       tonemap: Number($("tonemap").value),
@@ -311,7 +385,9 @@ async function renderBlur() {
       showSource: $("showSource").checked,
       time: state.sceneTime,
       invFocus: num("focus") ** 2,
+      capture,
     });
+    if (r.png) download(r.png, state.worldActive ? `street-t${state.sceneTime.toFixed(4)}s.png` : "blur.png");
     lastBlurTime = now;
     const gpu = r.gpuMs
       ? "GPU time: " + Object.entries(r.gpuMs).map(([k, ms]) => `${k} ${ms.toFixed(2)} ms`).join(" + ")
@@ -473,10 +549,36 @@ function wire() {
     $("imageFile").value = "";
     if (state.blur) useWorld();
   };
-  $("animate").addEventListener("change", () => {
-    lastBlurTime = 0;
+  $("playPause").onclick = () => setPlaying(!state.playing);
+  $("stepBack").onclick = () => stepScene(-1);
+  $("stepForward").onclick = () => stepScene(1);
+  $("sceneTime").addEventListener("change", () => {
+    state.sceneTime = Math.max(0, num("sceneTime") || 0);
     requestBlur();
   });
+  $("saveFrame").onclick = () => {
+    state.captureNext = true;
+    requestBlur();
+  };
+  $("copyView").onclick = () => {
+    navigator.clipboard.writeText(JSON.stringify(viewState(), null, 1));
+    $("copyView").textContent = "Copied";
+    setTimeout(() => ($("copyView").textContent = "Copy view state"), 1500);
+  };
+  $("applyView").onclick = () => {
+    const box = $("viewState");
+    if (box.hidden) {
+      box.hidden = false;
+      box.focus();
+      return;
+    }
+    try {
+      applyViewState(JSON.parse(box.value));
+      box.hidden = true;
+    } catch (e) {
+      setStatus(`Could not apply view state: ${e.message}`);
+    }
+  };
   document.addEventListener("visibilitychange", () => {
     lastBlurTime = 0;
     if (animating()) requestBlur();
