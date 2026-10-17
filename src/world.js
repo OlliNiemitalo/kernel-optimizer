@@ -47,7 +47,38 @@ fn camera(time: f32) -> Camera {
   return Camera(pos, fwd, right, cross(fwd, right));
 }
 
-struct Hit { t: f32, albedo: vec3f, emission: vec3f, normal: vec3f }
+// spec: Fresnel reflectance at normal incidence of a glossy coat (0 = matte), gloss: its Phong
+// exponent for lamp highlights, mirror: weight of a traced mirror reflection (puddles).
+struct Hit { t: f32, albedo: vec3f, emission: vec3f, normal: vec3f, spec: f32, gloss: f32, mirror: f32 }
+
+fn matte(t: f32, albedo: vec3f, emission: vec3f, normal: vec3f) -> Hit {
+  return Hit(t, albedo, emission, normal, 0.0, 1.0, 0.0);
+}
+
+// Value noise with period 256, so hash inputs stay small however far the camera travels.
+fn lattice(i: vec2f) -> f32 {
+  return hash(i - 256.0 * floor(i / 256.0));
+}
+
+fn vnoise(p: vec2f) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(lattice(i), lattice(i + vec2f(1.0, 0.0)), u.x), mix(lattice(i + vec2f(0.0, 1.0)), lattice(i + vec2f(1.0, 1.0)), u.x), u.y);
+}
+
+// Four octaves; octaves finer than the footprint (in units of p) fade to their mean, like mip levels.
+fn fbm(p: vec2f, foot: f32) -> f32 {
+  var sum = 0.0;
+  var amp = 0.5;
+  var freq = 1.0;
+  for (var k = 0; k < 4; k++) {
+    sum += amp * mix(vnoise(p * freq + f32(k) * 17.0), 0.5, smoothstep(0.25, 0.5, foot * freq));
+    amp *= 0.5;
+    freq *= 2.0;
+  }
+  return sum / 0.9375;
+}
 
 fn sphere(o: vec3f, d: vec3f, c: vec3f, r: f32) -> f32 {
   let oc = o - c;
@@ -133,17 +164,21 @@ fn building(o: vec3f, d: vec3f, t: f32, n: vec3f, block: f32, s: f32, time: f32,
   let u = select(abs(p.x) - STREET, p.z - block * BLOCK, street);
   let footU = t * px / max(abs(select(d.z, d.x, street)), 1e-3);
   let footY = t * px;
-  let wall = mix(vec3f(0.07, 0.06, 0.055), vec3f(0.05, 0.06, 0.08), hash(vec2f(block, s + 7.0)));
+  let stain = fbm(vec2f(u, p.y) * 0.4 + vec2f(block * 7.3, s * 3.1), max(footU, footY) * 0.4);
+  let floors = stripes(p.y / 3.2, footY / 3.2, 0.05); // darker floor slabs
+  let wall = mix(vec3f(0.07, 0.06, 0.055), vec3f(0.05, 0.06, 0.08), hash(vec2f(block, s + 7.0))) *
+    (0.6 + 0.8 * stain) * (1.0 - 0.4 * floors);
   var albedo = wall;
   var emission = vec3f(0.0);
+  var glass = 0.0;
   let cell = floor(vec2f(u / 2.5, p.y / 3.2)) + select(vec2f(50.0, 0.0), vec2f(0.0), street);
   let f = fract(vec2f(u / 2.5, p.y / 3.2));
   if (p.y > 3.5 && f.x > 0.2 && f.x < 0.8 && f.y > 0.3 && f.y < 0.8) {
     let r = hash(cell + vec2f(block * 13.0, s * 71.0));
     let warm = hash(cell + vec2f(5.0, block)) < 0.75;
-    let on = r < 0.35 && fract(time * 0.05 + r * 37.0) > 0.03;
     albedo = vec3f(0.02);
-    emission = select(vec3f(0.0), select(vec3f(0.6, 0.8, 1.2), vec3f(1.4, 0.9, 0.45), warm) * (1.0 + 12.0 * r), on);
+    emission = select(vec3f(0.0), select(vec3f(0.6, 0.8, 1.2), vec3f(1.4, 0.9, 0.45), warm) * (1.0 + 12.0 * r), r < 0.35);
+    glass = 1.0;
   }
   // Beyond about one window per pixel, fade to the windows' average (30% glass, 34% lit).
   let blend = smoothstep(0.3, 1.0, max(footU / 2.5, footY / 3.2)) * inside(p.y, footY, 3.5, 1e9);
@@ -152,28 +187,37 @@ fn building(o: vec3f, d: vec3f, t: f32, n: vec3f, block: f32, s: f32, time: f32,
   let shop = hash(vec2f(block, s + 3.0));
   if (street && shop < 0.6) {
     let hue = shop * 10.0;
-    let neon = (0.5 + 0.5 * cos(hue + vec3f(0.0, 2.1, 4.2))) * 6.0 * (0.8 + 0.2 * sin(time * 9.0 + hue));
+    let neon = (0.5 + 0.5 * cos(hue + vec3f(0.0, 2.1, 4.2))) * 6.0;
     emission += neon * inside(p.y, footY, 2.6, 2.85) * inside(u, footU, 3.0, 13.0);
   }
-  return Hit(t, albedo, emission, n);
+  return Hit(t, albedo, emission, n, 0.04 * glass * (1.0 - blend), 3000.0, 0.0);
 }
 
 // px: pixel footprint in radians, for prefiltering.
-fn trace(o: vec3f, d: vec3f, time: f32, px: f32) -> Hit {  var hit = Hit(FAR, vec3f(0.0), vec3f(0.0), vec3f(0.0, 1.0, 0.0));
+fn trace(o: vec3f, d: vec3f, time: f32, px: f32) -> Hit {
+  var hit = matte(FAR, vec3f(0.0), vec3f(0.0), vec3f(0.0, 1.0, 0.0));
 
-  // Street, curbs, lane markings, and sidewalks.
+  // Street, curbs, lane markings, sidewalks, and puddles.
   if (d.y < 0.0) {
     let t = -o.y / d.y;
     let p = o + t * d;
     let ax = abs(p.x);
     let footX = t * px;
     let footZ = t * px / max(-d.y, 1e-3); // stretched along the view direction at grazing angles
+    let foot = max(footX, footZ);
+    let grain = fbm(p.xz * 2.0, foot * 2.0);
+    let tile = 0.85 + 0.3 * mix(lattice(floor(p.xz * 0.5)), 0.5, smoothstep(0.5, 1.0, foot * 0.5));
     let tiles = 1.0 - (1.0 - stripes(p.z * 0.5, footZ * 0.5, 0.04)) * (1.0 - stripes(ax * 0.5, footX * 0.5, 0.04));
-    var albedo = vec3f(0.035);
-    albedo = mix(albedo, mix(vec3f(0.09), vec3f(0.05), tiles), inside(ax, footX, 5.0, 1e9));
+    var albedo = vec3f(0.035) * (0.8 + 0.4 * vnoise(p.xz * 0.15 + 17.0));
+    albedo = mix(albedo, mix(vec3f(0.09) * tile, vec3f(0.05), tiles), inside(ax, footX, 5.0, 1e9));
     albedo = mix(albedo, vec3f(0.5), inside(ax, footX, 4.75, 4.9));
     albedo = mix(albedo, vec3f(0.55, 0.45, 0.15), inside(p.x, footX, -0.08, 0.08) * stripes(p.z / 6.0, footZ / 6.0, 0.5));
-    hit = Hit(t, albedo, vec3f(0.0), vec3f(0.0, 1.0, 0.0));
+    albedo *= 0.7 + 0.6 * grain;
+    // Puddles in the road's low spots, with edges widened to the footprint.
+    let low = fbm(p.xz * 0.12 + vec2f(31.0, 7.0), foot * 0.12);
+    let edge = 0.02 + foot * 0.1;
+    let wet = smoothstep(0.66 - edge, 0.66 + edge, low) * inside(ax, footX, 0.4, 4.5);
+    hit = Hit(t, albedo * (1.0 - 0.6 * wet), vec3f(0.0), vec3f(0.0, 1.0, 0.0), 0.0, 1.0, wet);
   }
 
   // Buildings: one box per block and side, 16 m along the street with a 4 m alley to the next,
@@ -201,7 +245,7 @@ fn trace(o: vec3f, d: vec3f, time: f32, px: f32) -> Hit {  var hit = Hit(FAR, ve
     // The next street over, seen through the alleys.
     if (abs(d.x) > 1e-4) {
       let t = (side * BACK - o.x) / d.x;
-      if (t > 0.0 && t < hit.t && o.y + t * d.y < 14.0) { hit = Hit(t, vec3f(0.012), vec3f(0.0), vec3f(-side, 0.0, 0.0)); }
+      if (t > 0.0 && t < hit.t && o.y + t * d.y < 14.0) { hit = matte(t, vec3f(0.012), vec3f(0.0), vec3f(-side, 0.0, 0.0)); }
     }
   }
 
@@ -212,7 +256,7 @@ fn trace(o: vec3f, d: vec3f, time: f32, px: f32) -> Hit {  var hit = Hit(FAR, ve
       let ks = lampRange(o, d, lamps, s);
       for (var k = ks.x; k <= min(ks.y, ks.x + 32.0); k += 1.0) {
         let tl = sphere(o, d, lampPos(k, s), 0.22);
-        if (tl < hit.t) { hit = Hit(tl, vec3f(0.0), LAMP_LIGHT, vec3f(0.0, 1.0, 0.0)); }
+        if (tl < hit.t) { hit = matte(tl, vec3f(0.0), LAMP_LIGHT, vec3f(0.0, 1.0, 0.0)); }
       }
     }
     let poles = slab(o.y, d.y, 0.0, 5.2, slab(o.x, d.x, s * 5.7 - 0.07, s * 5.7 + 0.07, vec2f(0.0, hit.t)));
@@ -223,7 +267,7 @@ fn trace(o: vec3f, d: vec3f, time: f32, px: f32) -> Hit {  var hit = Hit(FAR, ve
         let tp = pole(o, d, s * 5.7, cz, 0.07, 5.2);
         if (tp < hit.t) {
           let p = o + tp * d;
-          hit = Hit(tp, vec3f(0.15), vec3f(0.0), normalize(vec3f(p.x - s * 5.7, 0.0, p.z - cz)));
+          hit = Hit(tp, vec3f(0.12), vec3f(0.0), normalize(vec3f(p.x - s * 5.7, 0.0, p.z - cz)), 0.08, 300.0, 0.0);
         }
       }
     }
@@ -239,30 +283,14 @@ fn trace(o: vec3f, d: vec3f, time: f32, px: f32) -> Hit {  var hit = Hit(FAR, ve
     let lane = -2.4 * dir;
     let paint = 0.5 + 0.5 * cos(hash(vec2f(fi, 9.0)) * 6.28 + vec3f(0.0, 2.1, 4.2));
     let body = box(o, d, vec3f(lane, 0.7, z), vec3f(0.95, 0.45, 2.1));
-    if (body.x < hit.t) { hit = Hit(body.x, paint * 0.4, vec3f(0.0), body.yzw); }
+    if (body.x < hit.t) { hit = Hit(body.x, paint * 0.4, vec3f(0.0), body.yzw, 0.04, 800.0, 0.0); }
     let cabin = box(o, d, vec3f(lane, 1.4, z - 0.2 * dir), vec3f(0.85, 0.3, 1.1));
-    if (cabin.x < hit.t) { hit = Hit(cabin.x, vec3f(0.02), vec3f(0.0), cabin.yzw); }
+    if (cabin.x < hit.t) { hit = Hit(cabin.x, vec3f(0.02), vec3f(0.0), cabin.yzw, 0.05, 3000.0, 0.0); }
     for (var s = -1.0; s <= 1.0; s += 2.0) {
       let th = sphere(o, d, vec3f(lane + 0.6 * s, 0.75, z + 2.1 * dir), 0.13);
-      if (th < hit.t) { hit = Hit(th, vec3f(0.0), vec3f(60.0, 55.0, 45.0), vec3f(0.0, 0.0, dir)); }
+      if (th < hit.t) { hit = matte(th, vec3f(0.0), vec3f(60.0, 55.0, 45.0), vec3f(0.0, 0.0, dir)); }
       let tt = sphere(o, d, vec3f(lane + 0.65 * s, 0.8, z - 2.1 * dir), 0.1);
-      if (tt < hit.t) { hit = Hit(tt, vec3f(0.0), vec3f(25.0, 1.0, 0.5), vec3f(0.0, 0.0, -dir)); }
-    }
-  }
-
-  // Glowing orbs drifting past the camera: near-field blur.
-  for (var i = 0; i < 7; i++) {
-    let fi = f32(i);
-    let span = 30.0;
-    let zr = 0.8 + wrap(hash(vec2f(fi, 1.0)) * span - time * 1.5, span);
-    let c = vec3f(
-      (hash(vec2f(fi, 2.0)) * 2.0 - 1.0) * 3.0 + 0.5 * sin(time * 0.7 + fi),
-      1.0 + 1.4 * hash(vec2f(fi, 4.0)) + 0.3 * sin(time * 1.3 + fi * 2.0),
-      time * SPEED + zr,
-    );
-    let to = sphere(o, d, c, 0.05);
-    if (to < hit.t) {
-      hit = Hit(to, vec3f(0.0), (0.55 + 0.45 * cos(fi * 2.4 + vec3f(0.0, 2.1, 4.2))) * 30.0, vec3f(0.0, 1.0, 0.0));
+      if (tt < hit.t) { hit = matte(tt, vec3f(0.0), vec3f(25.0, 1.0, 0.5), vec3f(0.0, 0.0, -dir)); }
     }
   }
   return hit;
@@ -275,6 +303,31 @@ fn skyColor(d: vec3f) -> vec3f {
   return sky;
 }
 
+// Light from the nearest street lamps: diffuse, plus Fresnel-weighted normalized Phong highlights
+// on glossy coats (small bright glints that show off the blur).
+fn direct(hit: Hit, p: vec3f, d: vec3f) -> vec3f {
+  var light = vec3f(0.015, 0.018, 0.03);
+  var glint = vec3f(0.0);
+  let r = reflect(d, hit.normal);
+  let kc = floor(p.z / LAMP_SPACING);
+  for (var k = -2.0; k <= 2.0; k += 1.0) {
+    for (var s = -1.0; s <= 1.0; s += 2.0) {
+      let l = lampPos(kc + k, s) - p;
+      let r2 = dot(l, l);
+      let ld = l * inverseSqrt(r2);
+      let e = LAMP_LIGHT * 0.6 * max(dot(hit.normal, ld), 0.0) / r2;
+      light += e;
+      glint += e * (0.5 * hit.gloss + 1.0) * pow(max(dot(r, ld), 0.0), hit.gloss);
+    }
+  }
+  let fresnel = hit.spec + (1.0 - hit.spec) * pow(1.0 - max(dot(-d, hit.normal), 0.0), 5.0);
+  return hit.albedo * light + hit.emission + select(vec3f(0.0), fresnel * glint, hit.spec > 0.0);
+}
+
+fn fogged(c: vec3f, t: f32) -> vec3f {
+  return mix(vec3f(0.02, 0.02, 0.035), c, exp(-t * 0.012));
+}
+
 // Linear radiance and inverse view depth through image position pos (pixels).
 fn shade(cam: Camera, pos: vec2f, px: f32) -> vec4f {
   let u = (pos.x - 0.5 * f32(W.width)) * PIXEL / f32(W.height);
@@ -283,17 +336,21 @@ fn shade(cam: Camera, pos: vec2f, px: f32) -> vec4f {
   let hit = trace(cam.pos, d, W.time, px);
   if (hit.t >= FAR) { return vec4f(skyColor(d), 0.0); }
   let p = cam.pos + hit.t * d;
-  var light = vec3f(0.015, 0.018, 0.03);
-  let kc = floor(p.z / LAMP_SPACING);
-  for (var k = -2.0; k <= 2.0; k += 1.0) {
-    for (var s = -1.0; s <= 1.0; s += 2.0) {
-      let l = lampPos(kc + k, s) - p;
-      let r2 = dot(l, l);
-      light += LAMP_LIGHT * 0.6 * max(dot(hit.normal, l * inverseSqrt(r2)), 0.0) / r2;
-    }
+  var c = direct(hit, p, d);
+  var invDepth = 1.0 / (hit.t * dot(d, cam.fwd));
+  if (hit.mirror > 0.0) {
+    // Puddle: a traced mirror reflection with the Fresnel reflectance of water. The reflection is
+    // the bright content, and its virtual image lies behind the surface by the reflected distance.
+    let rd = reflect(d, hit.normal);
+    let o2 = p + 0.001 * hit.normal;
+    let h2 = trace(o2, rd, W.time, px);
+    var rc = skyColor(rd);
+    if (h2.t < FAR) { rc = fogged(direct(h2, o2 + h2.t * rd, rd), h2.t); }
+    let f = hit.mirror * (0.02 + 0.98 * pow(1.0 - max(-d.y, 0.0), 5.0));
+    c = mix(c, rc, f);
+    invDepth = mix(invDepth, 1.0 / ((hit.t + h2.t) * dot(d, cam.fwd)), hit.mirror);
   }
-  let c = mix(vec3f(0.02, 0.02, 0.035), hit.albedo * light + hit.emission, exp(-hit.t * 0.012));
-  return vec4f(c, 1.0 / (hit.t * dot(d, cam.fwd)));
+  return vec4f(fogged(c, hit.t), invDepth);
 }
 
 const PIXEL = 0.9; // 2 tan(half vertical field of view)
