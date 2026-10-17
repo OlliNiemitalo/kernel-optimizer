@@ -93,8 +93,14 @@ export function drawProfile(canvas, { best, label, population = [], transition, 
   const n = 600;
   const xs = Array.from({ length: n }, (_, k) => (k / (n - 1)) * xmax);
   const bestY = best ? xs.map((x) => profile(best, x)) : [];
-  const lo = Math.min(-0.15, ...bestY);
-  const hi = Math.max(1.15, ...bestY);
+  const nc = best ? best.length / PARAMS_PER_COMPONENT : 0;
+  const componentYs = best && showComponents
+    ? Array.from({ length: nc }, (_, u) => xs.map((x) => componentProfile(best, u, x)))
+    : [];
+  // Components can be much larger than the sum, so the y range grows to show them in full.
+  const all = bestY.concat(...componentYs);
+  const lo = Math.min(-0.15, ...all) * (componentYs.length ? 1.05 : 1);
+  const hi = Math.max(1.15, ...all) * (componentYs.length ? 1.05 : 1);
   const { X, Y, m } = frame(ctx, w, h, [0, xmax], [lo, hi], {
     title: `Radial cross-section K(r)${label ? ` — ${label}` : ""}`,
     xlabel: "r (disc radius = 1)",
@@ -109,12 +115,7 @@ export function drawProfile(canvas, { best, label, population = [], transition, 
   ctx.fillRect(X(1 + transition), Y(tol), X(xmax) - X(1 + transition), Y(-tol) - Y(tol));
   line(ctx, X, Y, [0, 1, 1, 1 + transition, 1 + transition, xmax], [1, 1, 0, 0, 0, 0], "#5c677d", 1);
   for (const p of population) line(ctx, X, Y, xs, xs.map((x) => profile(p, x)), "#8b93a7", 1, 0.25);
-  if (best && showComponents) {
-    const nc = best.length / PARAMS_PER_COMPONENT;
-    for (let u = 0; u < nc; u++) {
-      line(ctx, X, Y, xs, xs.map((x) => componentProfile(best, u, x)), COLORS[u % COLORS.length], 1, 0.8);
-    }
-  }
+  componentYs.forEach((ys, u) => line(ctx, X, Y, xs, ys, COLORS[u % COLORS.length], 1, 0.8));
   if (best) line(ctx, X, Y, xs, bestY, "#ffffff", 2);
   ctx.restore();
 }
