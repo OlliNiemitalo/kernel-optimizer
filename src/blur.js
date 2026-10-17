@@ -218,6 +218,41 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 }
 `;
 
+// Standalone WGSL with the host-side protocol, for use outside this app.
+export function shaderSource(kind, packed) {
+  if (kind === "display") {
+    return `// Display pass of the separable circular blur: draws acc.rgb / acc.w as one fullscreen triangle
+// (draw(3), no vertex buffers). View (32 bytes): width u32 @0, height u32 @4, exposure f32 @8,
+// tonemap u32 @12, showSource u32 @16. blurred = the compute passes' acc buffer.
+${displayShader}`;
+  }
+  return `// Separable circular blur from complex Gaussian channels: compute passes,
+// ${packed ? "packed 16-bit float" : "f32"} intermediate.
+//
+// Per frame, for each separable channel n = 0 .. channels - 1 (Params block n, e.g. at a
+// 256-byte dynamic uniform offset), dispatch in order:
+//   uniform radius:  horizontal  ceil(ceil(width / ${ROWS}) / 64) x height workgroups
+//                    vertical    ceil(width / 64) x ceil(height / ${ROWS}) workgroups
+//   varying radius:  horizontalVarying, verticalVarying, ceil(width / 64) x height each
+// then draw with the display shader (acc.rgb / acc.w).
+//
+// Params (48 bytes): width u32 @0, height u32 @4, halfTaps i32 @8 (K of level 0), channel u32 @12,
+// channels u32 @16, stride u32 @20, levels u32 @24, first u32 @28 (1 for channel 0, else 0),
+// radiusMin f32 @32, levelsPerOctave f32 @36.
+//
+// Buffers (one entry per pixel, row-major): src vec4f linear RGB (alpha unused); acc vec4f;
+// mid ${packed ? "16" : "32"} bytes; radius f32 in pixels (varying only, else any 4-byte buffer).
+// levelHalf[level] = K, taps -K..K. kern: vec2f (re, im), layout [level][dir][channel][stride],
+// dir 0 = horizontal, 1 = vertical, stride = 2 max(K) + 1 + ${2 * PAD}. Entries ${PAD} + t, t = 0..2K, hold
+//   (k0 + k2 s) exp((-b + i c) s),  s = ((t - K) / R)^2,  K = ceil(R (1 + transition bandwidth)),
+// with b, c, k0, k2 from the kernel's separable channels (b = -a; k0, k2 = h0, h2 horizontally
+// and v0, v2 vertically; single components have k2 = 0 and v0 = h0); all other entries are 0.
+// Uniform radius: one level, R = disc radius. Varying radius: level 0 is the identity (K = 0,
+// tap 1 + 0i in channel 0, both directions), level l >= 1 has R = radiusMin 2^((l - 1) / levelsPerOctave)
+// up to the largest radius in the map.
+${computeShader(packed)}`;
+}
+
 export class BlurRenderer {
   static async create(canvas) {
     if (!navigator.gpu) throw new Error("WebGPU is not available in this browser.");

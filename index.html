@@ -112,6 +112,16 @@
         </div>
         <p id="blurStats" class="status"></p>
         <canvas id="blurCanvas"></canvas>
+        <details id="shaderPanel">
+          <summary>Shader code (WGSL)</summary>
+          <div class="buttons">
+            <select id="shaderKind" aria-label="Shader"><option value="compute">Compute passes</option><option value="display">Display pass</option></select>
+            <button id="copyShader">Copy</button>
+            <button id="downloadShader">Download</button>
+          </div>
+          <p class="note">The compute shader follows the intermediate storage setting. Its header comment describes the buffers, the tap tables (computed from the separable channels under "Current kernel"), and the dispatch order.</p>
+          <textarea id="shaderCode" rows="24" readonly spellcheck="false"></textarea>
+        </details>
       </section>
     </main>
     <script type="module" src="./src/main.js"></script>

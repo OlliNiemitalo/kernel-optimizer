@@ -1,5 +1,5 @@
 import { _setCalibrationState, defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
-import { BlurRenderer, tiltShiftRadiusMap } from "./blur.js";
+import { BlurRenderer, shaderSource, tiltShiftRadiusMap } from "./blur.js";
 import { DifferentialEvolution } from "./de.js";
 import { FineTuner } from "./finetune.js";
 import { drawConvergence, drawDisc, drawError, drawProfile } from "./plots.js";
@@ -336,6 +336,16 @@ async function initBlur() {
 
 // ---- wiring ---------------------------------------------------------------------------------
 
+const shaderPacked = () => $("precision").value === "f16";
+
+function shaderFileName() {
+  return $("shaderKind").value === "display" ? "blur-display.wgsl" : `blur-compute-${shaderPacked() ? "packed" : "f32"}.wgsl`;
+}
+
+function showShader() {
+  $("shaderCode").value = shaderSource($("shaderKind").value, shaderPacked());
+}
+
 function wire() {
   $("run").onclick = () => {
     if (!state.running && !state.de && !createDE()) return;
@@ -405,6 +415,15 @@ function wire() {
     requestBlur();
   });
   for (const id of ["tonemap", "precision", "showSource"]) $(id).addEventListener("change", () => requestBlur());
+  for (const id of ["precision", "shaderKind"]) $(id).addEventListener("change", showShader);
+  $("copyShader").onclick = () => navigator.clipboard.writeText($("shaderCode").value);
+  $("downloadShader").onclick = () => {
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([$("shaderCode").value], { type: "text/plain" }));
+    link.download = shaderFileName();
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
   $("blurMode").addEventListener("change", () => requestBlur(true));
   $("follow").addEventListener("change", () => requestBlur(true));
   $("imageFile").addEventListener("change", async () => {
@@ -430,6 +449,7 @@ async function main() {
     $("repoLinks").hidden = false;
   }
   wire();
+  showShader();
   describeRanges(readProblem());
   initBlur();
   // jax-js otherwise benchmarks the GPU at startup (~128 MB of buffers plus saturating

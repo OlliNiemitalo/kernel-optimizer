@@ -187,6 +187,14 @@ textarea {
   border-radius: 6px;
 }
 
+#shaderPanel {
+  margin-top: 10px;
+}
+
+#shaderPanel summary {
+  cursor: pointer;
+}
+
 @media (max-width: 1000px) {
   main {
     grid-template-columns: 1fr;

@@ -11,7 +11,9 @@ pass, at a cost proportional to the blur radius rather than its area.
   convergence, and the 2-D kernel.
 - **Blur demo**: hand-written WGSL compute shaders processing one channel at a time, so memory
   doesn't grow with the channel count. Uniform or spatially varying (tilt-shift) disc radius,
-  f32 or packed 16-bit intermediates, and GPU timings and memory use per buffer.
+  f32 or packed 16-bit intermediates, and GPU timings and memory use per buffer. The "Shader code
+  (WGSL)" panel shows the shaders, with copy and download buttons. Their header comments document
+  the buffers, tap tables, and dispatch order, so you can use them elsewhere.
 
 Based on Olli Niemitalo,
 [Circularly symmetric convolution and lens blur](https://yehar.com/blog/?p=1495) (2010), extended
