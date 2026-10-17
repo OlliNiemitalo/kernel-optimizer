@@ -548,7 +548,7 @@ async function loadVideo(url) {
   const element = document.createElement("video");
   Object.assign(element, { crossOrigin: "anonymous", muted: true, loop: true, playsInline: true, preload: "auto", src: url });
   await new Promise((resolve, reject) => {
-    element.onloadeddata = resolve;
+    element.onloadeddata = () => (element.videoWidth ? resolve() : reject(new Error(`The video ${url} has no picture.`)));
     element.onerror = () => reject(new Error(`Could not load the video ${url}.`));
   });
   element.addEventListener("seeked", () => requestBlur());

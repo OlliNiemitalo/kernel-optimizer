@@ -339,7 +339,7 @@ candidates per second.
 | `test/smoke.js` | Checks the math and runs the optimizer and fine-tuner in Node |
 | `test/merged-de.js` | Experiment: DE convergence with and without merged pairs |
 | `vendor/jax-js-nonconsuming/` | jax-js-nonconsuming v0.12.14 TypeScript sources (MIT), compiled by Vite |
-| `public/coi-serviceworker.js` | coi-serviceworker v0.1.7 (MIT), served unbundled at the site root |
+| `public/coi-serviceworker.js` | coi-serviceworker v0.1.7 (MIT), served unbundled at the site root; modified to let cross-origin requests bypass it, as proxied video range requests were aborted |
 | `public/favicon.png`, `public/apple-touch-icon.png` | Center of the article's [5-component square-wave kernel image](https://yehar.com/blog/wp-content/uploads/2010/09/squarewave5componentreal.png) |
 
 jax-js-nonconsuming is vendored because it is not published on npm, and its Git install

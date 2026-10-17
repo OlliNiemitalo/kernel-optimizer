@@ -1,4 +1,5 @@
 /*! coi-serviceworker v0.1.7 - Guido Zuidhof and contributors, licensed under MIT */
+// Modified for kernel-optimizer: cross-origin requests are not proxied (see the fetch handler).
 let coepCredentialless = false;
 if (typeof window === 'undefined') {
     self.addEventListener("install", () => self.skipWaiting());
@@ -24,6 +25,11 @@ if (typeof window === 'undefined') {
     self.addEventListener("fetch", function (event) {
         const r = event.request;
         if (r.cache === "only-if-cached" && r.mode !== "same-origin") {
+            return;
+        }
+        // kernel-optimizer: let cross-origin requests bypass the worker. Proxied media range
+        // responses were aborted, and only this origin's documents and scripts need the headers.
+        if (new URL(r.url).origin !== self.location.origin) {
             return;
         }
 
