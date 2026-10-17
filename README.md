@@ -75,7 +75,7 @@ A **single component** has four parameters $(b, c, r_w, i_w)$:
 
 $$
 K(s) = \bigl(r_w \cos(cs) + i_w \sin(cs)\bigr)\, e^{-bs}
-     = \operatorname{Re}\bigl[B\, e^{\lambda s}\bigr], \qquad B = r_w - i\, i_w .
+     = \mathrm{Re}\,\bigl[B\, e^{\lambda s}\bigr], \qquad B = r_w - i\, i_w .
 $$
 
 This matches the article's format `(cos(x*x*c) * r + sin(x*x*c) * i) * exp(-b*x*x)`.
@@ -83,7 +83,7 @@ This matches the article's format `(cos(x*x*c) * r + sin(x*x*c) * i) * exp(-b*x*
 A **merged pair** adds two parameters $(r_1, i_1)$ and a factor of $s$:
 
 $$
-K(s) = \operatorname{Re}\bigl[(B + A s)\, e^{\lambda s}\bigr], \qquad A = r_1 - i\, i_1 .
+K(s) = \mathrm{Re}\,\bigl[(B + A s)\, e^{\lambda s}\bigr], \qquad A = r_1 - i\, i_1 .
 $$
 
 It is the limit of two components whose rates coincide:
@@ -112,11 +112,11 @@ $$
 and the 2-D kernel is
 
 $$
-K(x, y) = \sum_n \operatorname{Re}\bigl[h_n(x)\, v_n(y)\bigr].
+K(x, y) = \sum_n \mathrm{Re}\,\bigl[h_n(x)\, v_n(y)\bigr].
 $$
 
 The real part is taken only at the very end, so per channel the output is
-$\operatorname{Re}[hv] = h_\mathrm{re} v_\mathrm{re} - h_\mathrm{im} v_\mathrm{im}$.
+$\mathrm{Re}\,[hv] = h_\mathrm{re} v_\mathrm{re} - h_\mathrm{im} v_\mathrm{im}$.
 
 - **Single component → one channel.** Absorb the weight as a square root, as in the article's
   update: $h_n(t) = v_n(t) = \sqrt{B}\, e^{\lambda t^2}$. Then
@@ -143,13 +143,13 @@ See [`src/blur.js`](src/blur.js). For a disc radius of $R$ pixels:
    $(t/R)^2$. Compute tap values in double precision on the CPU and upload them as complex f32
    pairs (separate tables for $h$ and $v$).
 2. **Normalization.** The 2-D kernel's sum factorizes, so it costs only $O(\text{taps})$ to compute:
-   $$S = \sum_n \operatorname{Re}\Bigl[\bigl(\textstyle\sum_t h_n(t)\bigr)\bigl(\textstyle\sum_t v_n(t)\bigr)\Bigr].$$
+   $$S = \sum_n \mathrm{Re}\,\Bigl[\bigl(\textstyle\sum_t h_n(t)\bigr)\bigl(\textstyle\sum_t v_n(t)\bigr)\Bigr].$$
    Divide the output by $S$ to preserve brightness.
 3. **Horizontal pass.** For each channel and color, compute the complex intermediate
    $m_n(x, y) = \sum_t I(x + t, y)\, h_n(t)$. That is two real multiply-adds per tap, since the
    input is real.
 4. **Vertical pass.** Compute
-   $J(x, y) = \frac{1}{S} \sum_n \sum_t \operatorname{Re}\bigl[m_n(x, y + t)\, v_n(t)\bigr]$.
+   $J(x, y) = \frac{1}{S} \sum_n \sum_t \mathrm{Re}\,\bigl[m_n(x, y + t)\, v_n(t)\bigr]$.
    Only the real part is formed. Each thread computes 8 consecutive rows, so every input row it
    reads feeds up to 8 outputs. The tap table is zero-padded, so taps outside a row's window
    contribute nothing and the loop has no bounds checks.
