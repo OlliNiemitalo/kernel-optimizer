@@ -326,7 +326,7 @@ function download(url, name) {
   link.click();
 }
 
-const VIEW_CONTROLS = ["radius", "blurMode", "focus", "exposure", "tonemap", "precision", "showSource", "transition"];
+const VIEW_CONTROLS = ["radius", "blurMode", "focus", "exposure", "tonemap", "precision", "transition"];
 
 // Everything needed to re-render the displayed frame, plus context for bug reports.
 function viewState() {
@@ -406,7 +406,6 @@ async function renderBlur() {
       exposure: Math.pow(2, num("exposure")),
       tonemap: Number($("tonemap").value),
       precision: $("precision").value,
-      showSource: $("showSource").checked,
       time: state.sceneTime,
       invFocus: num("focus") ** 2,
       capture,
@@ -458,7 +457,7 @@ function useWorld() {
   state.blur.setAnimated(state.world, 960, 600);
   state.source = "world";
   $("blurMode").value = "depth";
-  setFocusSlider(0);
+  setFocusSlider(Math.sqrt(0.1)); // 10 m
   requestBlur(true);
 }
 
@@ -580,7 +579,7 @@ function wire() {
     $("exposureOut").textContent = `${Math.pow(2, num("exposure")).toFixed(2)}×`;
     requestBlur();
   });
-  for (const id of ["tonemap", "precision", "showSource"]) $(id).addEventListener("change", () => requestBlur());
+  for (const id of ["tonemap", "precision"]) $(id).addEventListener("change", () => requestBlur());
   for (const id of ["precision", "shaderKind"]) $(id).addEventListener("change", showShader);
   $("copyShader").onclick = () => navigator.clipboard.writeText($("shaderCode").value);
   $("downloadShader").onclick = () => {

@@ -26,6 +26,57 @@
     </header>
 
     <main>
+      <section class="panel blur" aria-label="WebGPU blur demo">
+        <h2>WebGPU blur demo</h2>
+        <div class="blur-controls">
+          <label>Disc radius (px) <input id="radius" type="range" min="2" max="120" step="1" value="24" /> <output id="radiusOut">24</output></label>
+          <label>Blur
+            <select id="blurMode">
+              <option value="uniform">Uniform</option>
+              <option value="tiltShift">Tilt-shift (varying radius, max = disc radius)</option>
+              <option value="depth">Depth of field from the z-buffer (3D world; disc radius = blur at 2 m with focus at infinity)</option>
+            </select>
+          </label>
+          <label>Focus distance <input id="focus" type="range" min="0" max="1" step="0.005" value="0.316" /> <output id="focusOut">10 m</output></label>
+          <label>Exposure <input id="exposure" type="range" min="-4" max="4" step="0.1" value="0" /> <output id="exposureOut">1.0×</output></label>
+          <label>Tone map
+            <select id="tonemap"><option value="1">Reinhard</option><option value="0">Clip</option></select>
+          </label>
+          <label>Intermediate storage
+            <select id="precision"><option value="f32">f32</option><option value="f16">16-bit float (packed)</option></select>
+          </label>
+          <label class="check"><input id="follow" type="checkbox" checked /> Follow optimizer</label>
+          <label title="An image, or an RGB-D video: color on top, inverse depth below as grayscale (white = 0.5 m)">Image or RGB-D video <input id="imageFile" type="file" accept="image/*,video/*" /></label>
+          <label>Highlight boost <input id="boost" type="number" min="0" max="100" step="1" value="8" /></label>
+          <button id="worldButton">3D world</button>
+          <button id="videoButton" title="Two people talking at a desk, with measured depth">RGB-D video</button>
+          <button id="sceneButton">Procedural scene</button>
+          <span class="playback" aria-label="Animation playback">
+            <button id="stepBack" title="Previous frame (1/30 s)">⏮</button>
+            <button id="playPause" title="Play or pause the animation">Pause</button>
+            <button id="stepForward" title="Next frame (1/30 s)">⏭</button>
+            <label>t <input id="sceneTime" type="number" min="0" step="0.0333333" value="0" /> s</label>
+            <button id="saveFrame" title="Save the displayed frame as PNG">Save PNG</button>
+            <button id="copyView" title="Copy the scene time, blur settings, kernel and GPU as JSON, to reproduce this view">Copy view state</button>
+            <button id="applyView" title="Restore a view from copied JSON">Apply view state…</button>
+          </span>
+        </div>
+        <textarea id="viewState" rows="4" placeholder="Paste a view state (JSON), then press Apply view state again" spellcheck="false" hidden></textarea>
+        <p id="blurStats" class="status"></p>
+        <p id="videoCredit" class="note" hidden>RGB-D video: TUM RGB-D benchmark, sequence fr3/sitting_static (J. Sturm et al., IROS 2012), <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>; depth holes filled, converted to inverse depth, re-encoded.</p>
+        <canvas id="blurCanvas"></canvas>
+        <details id="shaderPanel">
+          <summary>Shader code (WGSL)</summary>
+          <div class="buttons">
+            <select id="shaderKind" aria-label="Shader"><option value="compute">Compute passes</option><option value="display">Display pass</option></select>
+            <button id="copyShader">Copy</button>
+            <button id="downloadShader">Download</button>
+          </div>
+          <p class="note">The compute shader follows the intermediate storage setting. Its header comment describes the buffers, the tap tables (computed from the separable channels under "Current kernel"), and the dispatch order.</p>
+          <textarea id="shaderCode" rows="24" readonly spellcheck="false"></textarea>
+        </details>
+      </section>
+
       <section class="panel controls" aria-label="Optimizer settings">
         <h2>Problem</h2>
         <label>Components <input id="components" type="number" min="1" max="8" step="1" value="3" /></label>
@@ -88,58 +139,6 @@
           <button id="applyPasted">Use pasted parameters…</button>
         </div>
         <textarea id="pasted" rows="3" placeholder="One component per line: b, c, r, i (single) or b, c, r, i, r1, i1 (merged pair)" spellcheck="false" hidden></textarea>
-      </section>
-
-      <section class="panel blur" aria-label="WebGPU blur demo">
-        <h2>WebGPU blur demo</h2>
-        <div class="blur-controls">
-          <label>Disc radius (px) <input id="radius" type="range" min="2" max="120" step="1" value="24" /> <output id="radiusOut">24</output></label>
-          <label>Blur
-            <select id="blurMode">
-              <option value="uniform">Uniform</option>
-              <option value="tiltShift">Tilt-shift (varying radius, max = disc radius)</option>
-              <option value="depth">Depth of field from the z-buffer (3D world; disc radius = blur at 2 m with focus at infinity)</option>
-            </select>
-          </label>
-          <label>Focus distance <input id="focus" type="range" min="0" max="1" step="0.005" value="0" /> <output id="focusOut">∞</output></label>
-          <label>Exposure <input id="exposure" type="range" min="-4" max="4" step="0.1" value="0" /> <output id="exposureOut">1.0×</output></label>
-          <label>Tone map
-            <select id="tonemap"><option value="1">Reinhard</option><option value="0">Clip</option></select>
-          </label>
-          <label>Intermediate storage
-            <select id="precision"><option value="f32">f32</option><option value="f16">16-bit float (packed)</option></select>
-          </label>
-          <label class="check"><input id="follow" type="checkbox" checked /> Follow optimizer</label>
-          <label class="check"><input id="showSource" type="checkbox" /> Show source</label>
-          <label title="An image, or an RGB-D video: color on top, inverse depth below as grayscale (white = 0.5 m)">Image or RGB-D video <input id="imageFile" type="file" accept="image/*,video/*" /></label>
-          <label>Highlight boost <input id="boost" type="number" min="0" max="100" step="1" value="8" /></label>
-          <button id="worldButton">3D world</button>
-          <button id="videoButton" title="Two people talking at a desk, with measured depth">RGB-D video</button>
-          <button id="sceneButton">Procedural scene</button>
-          <span class="playback" aria-label="Animation playback">
-            <button id="stepBack" title="Previous frame (1/30 s)">⏮</button>
-            <button id="playPause" title="Play or pause the animation">Pause</button>
-            <button id="stepForward" title="Next frame (1/30 s)">⏭</button>
-            <label>t <input id="sceneTime" type="number" min="0" step="0.0333333" value="0" /> s</label>
-            <button id="saveFrame" title="Save the displayed frame as PNG">Save PNG</button>
-            <button id="copyView" title="Copy the scene time, blur settings, kernel and GPU as JSON, to reproduce this view">Copy view state</button>
-            <button id="applyView" title="Restore a view from copied JSON">Apply view state…</button>
-          </span>
-        </div>
-        <textarea id="viewState" rows="4" placeholder="Paste a view state (JSON), then press Apply view state again" spellcheck="false" hidden></textarea>
-        <p id="blurStats" class="status"></p>
-        <p id="videoCredit" class="note" hidden>RGB-D video: TUM RGB-D benchmark, sequence fr3/sitting_static (J. Sturm et al., IROS 2012), <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>; depth holes filled, converted to inverse depth, re-encoded.</p>
-        <canvas id="blurCanvas"></canvas>
-        <details id="shaderPanel">
-          <summary>Shader code (WGSL)</summary>
-          <div class="buttons">
-            <select id="shaderKind" aria-label="Shader"><option value="compute">Compute passes</option><option value="display">Display pass</option></select>
-            <button id="copyShader">Copy</button>
-            <button id="downloadShader">Download</button>
-          </div>
-          <p class="note">The compute shader follows the intermediate storage setting. Its header comment describes the buffers, the tap tables (computed from the separable channels under "Current kernel"), and the dispatch order.</p>
-          <textarea id="shaderCode" rows="24" readonly spellcheck="false"></textarea>
-        </details>
       </section>
     </main>
     <script type="module" src="./src/main.js"></script>
