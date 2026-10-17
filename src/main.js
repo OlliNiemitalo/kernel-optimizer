@@ -19,6 +19,7 @@ const state = {
   busy: false,
   history: [],
   populationSample: [],
+  include: null, // kernel to include once in the next population
   current: null, // { params, source, error, denseError }
   blur: null,
   imageFile: null,
@@ -118,14 +119,32 @@ function drawAll() {
 
 // ---- differential evolution ---------------------------------------------------------------
 
-function resetDE({ showBest = false, include = null } = {}) {
+// Drops the population; the next Start or New population creates one.
+function discardDE({ include = null } = {}) {
+  state.de?.dispose();
+  state.de = null;
+  if (include) state.include = include;
+  state.history = [];
+  state.populationSample = [];
+  describeRanges(readProblem());
+  if (state.current) {
+    setStatus(
+      `Showing ${state.current.source}, ripple ±${state.current.error.toFixed(6)}. ` +
+        `Start creates a population of ${readProblem().components}-component kernels and optimizes it.`,
+    );
+  }
+  drawAll();
+}
+
+function createDE() {
   state.de?.dispose();
   state.de = null;
   const problem = readProblem();
   describeRanges(problem);
   const D = problem.components * PARAMS_PER_COMPONENT;
-  const candidate = include ?? ($("seedWithCurrent").checked ? state.current?.params : null);
+  const candidate = state.include ?? ($("seedWithCurrent").checked ? state.current?.params : null);
   const seedWith = candidate?.length === D ? candidate : null;
+  state.include = null;
   try {
     state.de = new DifferentialEvolution({
       components: problem.components,
@@ -139,14 +158,14 @@ function resetDE({ showBest = false, include = null } = {}) {
     });
   } catch (e) {
     setStatus(`Could not create optimizer: ${e.message}`);
-    return;
+    return false;
   }
   state.history = [];
   state.populationSample = [];
-  observe(performance.now(), 0, showBest);
+  return true;
 }
 
-async function observe(startTime, generationsRun, showBest = false) {
+async function observe(startTime, generationsRun) {
   const de = state.de;
   let snap;
   try {
@@ -164,11 +183,7 @@ async function observe(startTime, generationsRun, showBest = false) {
     const k = Math.floor(Math.random() * de.P);
     return Array.from(snap.population.subarray(k * D, (k + 1) * D));
   });
-  const keepCurrent =
-    state.current && state.current.source !== "differential evolution" &&
-    state.current.params.length === D && state.current.error <= snap.bestCost;
-  // Before the first generation, keep showing a loaded preset or pasted kernel.
-  if (showBest || generationsRun > 0 || !keepCurrent) setCurrent(snap.best, "differential evolution");
+  setCurrent(snap.best, "differential evolution");
   const now = performance.now();
   const rate = generationsRun > 0 ? (generationsRun * de.P) / ((now - startTime) / 1000) : 0;
   setStatus(
@@ -238,7 +253,10 @@ async function fineTune() {
   } finally {
     tuner.dispose();
     // So that resuming the optimizer can't lose the fine-tuned kernel.
-    if (best.params !== start.params && state.de?.D === best.params.length) state.de.inject(best.params);
+    if (best.params !== start.params) {
+      if (state.de?.D === best.params.length) state.de.inject(best.params);
+      else if (!state.de) state.include = best.params;
+    }
     state.busy = false;
     $("finetune").disabled = false;
     if (wasRunning) setRunning(true);
@@ -320,14 +338,15 @@ async function initBlur() {
 
 function wire() {
   $("run").onclick = () => {
-    if (!state.de) resetDE();
+    if (!state.running && !state.de && !createDE()) return;
     setRunning(!state.running);
   };
   $("reset").onclick = () => {
     const wasRunning = state.running;
     setRunning(false);
     $("seed").value = (Math.round(num("seed")) + 1) >>> 0;
-    resetDE({ showBest: true });
+    if (!createDE()) return;
+    observe(performance.now(), 0);
     if (wasRunning) setRunning(true);
   };
   for (const id of ["components", "multiplicity", "transition", "passSamples", "stopSamples", "frequencyBands", "population", "F", "CR", "seed"]) {
@@ -339,7 +358,7 @@ function wire() {
       }
       setMultiplicity(readProblem().multiplicity);
       if (state.current) setCurrent(state.current.params, state.current.source);
-      resetDE();
+      discardDE();
     });
   }
   $("denseSamples").addEventListener("change", () => state.current && setCurrent(state.current.params, state.current.source));
@@ -351,7 +370,7 @@ function wire() {
     setMultiplicity(Array(n).fill(1));
     $("transition").value = 0.2;
     setCurrent(sortByFrequency(presetParams(n)), `article preset (${n} components)`);
-    resetDE({ include: state.current.params });
+    discardDE({ include: state.current.params });
     $("preset").value = "";
   };
   $("finetune").onclick = fineTune;
@@ -370,7 +389,7 @@ function wire() {
       $("components").value = params.length / PARAMS_PER_COMPONENT;
       setMultiplicity(multiplicities(params));
       setCurrent(params, "pasted parameters");
-      resetDE({ include: state.current.params });
+      discardDE({ include: state.current.params });
       box.hidden = true;
     } catch (e) {
       setStatus(e.message);
@@ -429,7 +448,7 @@ async function main() {
     return;
   }
   setCurrent(sortByFrequency(presetParams(3)), "article preset (3 components)");
-  resetDE();
+  discardDE();
 }
 
 main();
