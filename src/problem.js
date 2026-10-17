@@ -46,6 +46,14 @@ export function presetParams(n) {
   return Array.from({ length: n }, (_, u) => [...p.slice(u * 4, u * 4 + 4), 0, 0]).flat();
 }
 
+// The kernel doesn't depend on component order; ascending frequency matches the search's
+// per-slot frequency bands, so a seeded kernel isn't distorted by the bound reflection.
+export function sortByFrequency(params) {
+  const n = params.length / PARAMS_PER_COMPONENT;
+  const comps = Array.from({ length: n }, (_, u) => params.slice(u * PARAMS_PER_COMPONENT, (u + 1) * PARAMS_PER_COMPONENT));
+  return comps.sort((a, b) => a[1] - b[1]).flat();
+}
+
 export function defaultProblem() {
   return {
     components: 3,

@@ -5,7 +5,7 @@ import { FineTuner } from "./finetune.js";
 import { drawConvergence, drawDisc, drawError, drawProfile } from "./plots.js";
 import {
   PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, maxError, multiplicities, parseParams,
-  presetParams, sampleGrid,
+  presetParams, sampleGrid, sortByFrequency,
 } from "./problem.js";
 import { loadImage, proceduralScene } from "./scene.js";
 
@@ -118,13 +118,14 @@ function drawAll() {
 
 // ---- differential evolution ---------------------------------------------------------------
 
-function resetDE({ showBest = false } = {}) {
+function resetDE({ showBest = false, include = null } = {}) {
   state.de?.dispose();
   state.de = null;
   const problem = readProblem();
   describeRanges(problem);
   const D = problem.components * PARAMS_PER_COMPONENT;
-  const seedWith = $("seedWithCurrent").checked && state.current?.params.length === D ? state.current.params : null;
+  const candidate = include ?? ($("seedWithCurrent").checked ? state.current?.params : null);
+  const seedWith = candidate?.length === D ? candidate : null;
   try {
     state.de = new DifferentialEvolution({
       components: problem.components,
@@ -322,6 +323,7 @@ function wire() {
   $("reset").onclick = () => {
     const wasRunning = state.running;
     setRunning(false);
+    $("seed").value = (Math.round(num("seed")) + 1) >>> 0;
     resetDE({ showBest: true });
     if (wasRunning) setRunning(true);
   };
@@ -345,9 +347,8 @@ function wire() {
     $("components").value = n;
     setMultiplicity(Array(n).fill(1));
     $("transition").value = 0.2;
-    setCurrent(presetParams(n), `article preset (${n} components)`);
-    $("seedWithCurrent").checked = true;
-    resetDE();
+    setCurrent(sortByFrequency(presetParams(n)), `article preset (${n} components)`);
+    resetDE({ include: state.current.params });
     $("preset").value = "";
   };
   $("finetune").onclick = fineTune;
@@ -361,12 +362,12 @@ function wire() {
       return;
     }
     try {
-      const params = parseParams(box.value);
+      const params = sortByFrequency(parseParams(box.value));
       setRunning(false);
       $("components").value = params.length / PARAMS_PER_COMPONENT;
       setMultiplicity(multiplicities(params));
       setCurrent(params, "pasted parameters");
-      resetDE();
+      resetDE({ include: state.current.params });
       box.hidden = true;
     } catch (e) {
       setStatus(e.message);
@@ -423,7 +424,7 @@ async function main() {
     setStatus(`jax-js failed to initialize: ${e.message}`);
     return;
   }
-  setCurrent(presetParams(3), "article preset (3 components)");
+  setCurrent(sortByFrequency(presetParams(3)), "article preset (3 components)");
   resetDE();
 }
 
