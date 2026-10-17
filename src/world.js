@@ -15,6 +15,7 @@ struct World {
 @group(0) @binding(0) var<uniform> W: World;
 @group(0) @binding(1) var<storage, read_write> color: array<vec4f>;
 @group(0) @binding(2) var<storage, read_write> coc: array<f32>;
+@group(0) @binding(3) var<storage, read_write> scratch: array<vec4f>;
 
 const FAR = 1e4;
 const Z_REF = 2.0;
@@ -87,7 +88,44 @@ fn lampPos(k: f32, side: f32) -> vec3f {
   return vec3f(side * 5.2, 5.0, (k + select(0.0, 0.5, side > 0.0)) * LAMP_SPACING);
 }
 
-fn trace(o: vec3f, d: vec3f, time: f32) -> Hit {
+// Procedural patterns are box-filtered over the pixel footprint w (the procedural counterpart of
+// mip-mapping), so distant and grazing-angle detail averages out instead of aliasing.
+
+// Fraction of [x - w/2, x + w/2] where fract(x) < duty.
+fn stripes(x: f32, w: f32, duty: f32) -> f32 {
+  let h = 0.5 * max(w, 1e-4);
+  let c = fract(x); // keeps the differences below small despite large x
+  let a = c - h;
+  let b = c + h;
+  let ia = floor(a) * duty + min(fract(a), duty);
+  let ib = floor(b) * duty + min(fract(b), duty);
+  return (ib - ia) / (2.0 * h);
+}
+
+// Fraction of [x - w/2, x + w/2] inside [lo, hi].
+fn inside(x: f32, w: f32, lo: f32, hi: f32) -> f32 {
+  let h = 0.5 * max(w, 1e-4);
+  return clamp((min(x + h, hi) - max(x - h, lo)) / (2.0 * h), 0.0, 1.0);
+}
+
+// Narrows the ray-parameter interval span to where o + t d lies within [lo, hi] on one axis.
+fn slab(o: f32, d: f32, lo: f32, hi: f32, span: vec2f) -> vec2f {
+  if (abs(d) < 1e-6) { return select(vec2f(1.0, 0.0), span, o >= lo && o <= hi); }
+  let ta = (lo - o) / d;
+  let tb = (hi - o) / d;
+  return vec2f(max(span.x, min(ta, tb)), min(span.y, max(ta, tb)));
+}
+
+// Lamp or pole indices k whose objects can meet the ray within span.
+fn lampRange(o: vec3f, d: vec3f, span: vec2f, side: f32) -> vec2f {
+  let za = o.z + span.x * d.z;
+  let zb = o.z + span.y * d.z;
+  let off = select(0.0, 0.5, side > 0.0);
+  return vec2f(floor(min(za, zb) / LAMP_SPACING - off - 0.02), ceil(max(za, zb) / LAMP_SPACING - off + 0.02));
+}
+
+// px: pixel footprint in radians, for prefiltering.
+fn trace(o: vec3f, d: vec3f, time: f32, px: f32) -> Hit {
   var hit = Hit(FAR, vec3f(0.0), vec3f(0.0), vec3f(0.0, 1.0, 0.0));
 
   // Street, curbs, lane markings, and sidewalks.
@@ -95,14 +133,13 @@ fn trace(o: vec3f, d: vec3f, time: f32) -> Hit {
     let t = -o.y / d.y;
     let p = o + t * d;
     let ax = abs(p.x);
+    let footX = t * px;
+    let footZ = t * px / max(-d.y, 1e-3); // stretched along the view direction at grazing angles
+    let tiles = 1.0 - (1.0 - stripes(p.z * 0.5, footZ * 0.5, 0.04)) * (1.0 - stripes(ax * 0.5, footX * 0.5, 0.04));
     var albedo = vec3f(0.035);
-    if (ax > 5.0) {
-      albedo = select(vec3f(0.09), vec3f(0.05), fract(p.z * 0.5) < 0.04 || fract(ax * 0.5) < 0.04);
-    } else if (ax > 4.75 && ax < 4.9) {
-      albedo = vec3f(0.5);
-    } else if (ax < 0.08 && fract(p.z / 6.0) < 0.5) {
-      albedo = vec3f(0.55, 0.45, 0.15);
-    }
+    albedo = mix(albedo, mix(vec3f(0.09), vec3f(0.05), tiles), inside(ax, footX, 5.0, 1e9));
+    albedo = mix(albedo, vec3f(0.5), inside(ax, footX, 4.75, 4.9));
+    albedo = mix(albedo, vec3f(0.55, 0.45, 0.15), inside(p.x, footX, -0.08, 0.08) * stripes(p.z / 6.0, footZ / 6.0, 0.5));
     hit = Hit(t, albedo, vec3f(0.0), vec3f(0.0, 1.0, 0.0));
   }
 
@@ -115,41 +152,55 @@ fn trace(o: vec3f, d: vec3f, time: f32) -> Hit {
     let s = select(0.0, 1.0, side > 0.0);
     let local = p.z - block * BLOCK;
     if (t > 0.0 && t < hit.t && p.y < 9.0 + 28.0 * hash(vec2f(block, s))) {
-      var albedo = mix(vec3f(0.07, 0.06, 0.055), vec3f(0.05, 0.06, 0.08), hash(vec2f(block, s + 7.0)));
+      let footY = t * px;
+      let footZ = t * px / abs(d.x);
+      let wall = mix(vec3f(0.07, 0.06, 0.055), vec3f(0.05, 0.06, 0.08), hash(vec2f(block, s + 7.0)));
+      var albedo = wall;
       var emission = vec3f(0.0);
-      if (local > 16.0) {
-        albedo = vec3f(0.01); // alley
-      } else {
-        let cell = floor(vec2f(local / 2.5, p.y / 3.2));
-        let f = fract(vec2f(local / 2.5, p.y / 3.2));
-        if (p.y > 3.5 && f.x > 0.2 && f.x < 0.8 && f.y > 0.3 && f.y < 0.8) {
-          let r = hash(cell + vec2f(block * 13.0, s * 71.0));
-          let warm = hash(cell + vec2f(5.0, block)) < 0.75;
-          let on = r < 0.35 && fract(time * 0.05 + r * 37.0) > 0.03;
-          albedo = vec3f(0.02);
-          emission = select(vec3f(0.0), select(vec3f(0.6, 0.8, 1.2), vec3f(1.4, 0.9, 0.45), warm) * (1.0 + 12.0 * r), on);
-        }
-        let shop = hash(vec2f(block, s + 3.0));
-        if (p.y > 2.6 && p.y < 2.85 && local > 3.0 && local < 13.0 && shop < 0.6) {
-          let hue = shop * 10.0;
-          emission = (0.5 + 0.5 * cos(hue + vec3f(0.0, 2.1, 4.2))) * 6.0 * (0.8 + 0.2 * sin(time * 9.0 + hue));
-        }
+      let cell = floor(vec2f(local / 2.5, p.y / 3.2));
+      let f = fract(vec2f(local / 2.5, p.y / 3.2));
+      if (p.y > 3.5 && f.x > 0.2 && f.x < 0.8 && f.y > 0.3 && f.y < 0.8) {
+        let r = hash(cell + vec2f(block * 13.0, s * 71.0));
+        let warm = hash(cell + vec2f(5.0, block)) < 0.75;
+        let on = r < 0.35 && fract(time * 0.05 + r * 37.0) > 0.03;
+        albedo = vec3f(0.02);
+        emission = select(vec3f(0.0), select(vec3f(0.6, 0.8, 1.2), vec3f(1.4, 0.9, 0.45), warm) * (1.0 + 12.0 * r), on);
       }
-      hit = Hit(t, albedo, emission, vec3f(-side, 0.0, 0.0));
+      // Beyond about one window per pixel, fade to the windows' average (30% glass, 34% lit).
+      let blend = smoothstep(0.3, 1.0, max(footZ / 2.5, footY / 3.2)) * inside(p.y, footY, 3.5, 1e9);
+      albedo = mix(albedo, mix(wall, vec3f(0.02), 0.3), blend);
+      emission = mix(emission, vec3f(0.379, 0.276, 0.201), blend);
+      let shop = hash(vec2f(block, s + 3.0));
+      if (shop < 0.6) {
+        let hue = shop * 10.0;
+        let neon = (0.5 + 0.5 * cos(hue + vec3f(0.0, 2.1, 4.2))) * 6.0 * (0.8 + 0.2 * sin(time * 9.0 + hue));
+        emission += neon * inside(p.y, footY, 2.6, 2.85) * inside(local, footZ, 3.0, 13.0);
+      }
+      let alley = inside(local, footZ, 16.0, 20.0);
+      hit = Hit(t, mix(albedo, vec3f(0.01), alley), emission * (1.0 - alley), vec3f(-side, 0.0, 0.0));
     }
   }
 
-  // Street lamps on both sides.
-  let k0 = floor(o.z / LAMP_SPACING) - 1.0;
-  for (var k = 0; k < 24; k++) {
-    for (var s = -1.0; s <= 1.0; s += 2.0) {
-      let c = lampPos(k0 + f32(k), s);
-      let tl = sphere(o, d, c, 0.22);
-      if (tl < hit.t) { hit = Hit(tl, vec3f(0.0), LAMP_LIGHT, vec3f(0.0, 1.0, 0.0)); }
-      let tp = pole(o, d, s * 5.7, c.z, 0.07, 5.2);
-      if (tp < hit.t) {
-        let p = o + tp * d;
-        hit = Hit(tp, vec3f(0.15), vec3f(0.0), normalize(vec3f(p.x - s * 5.7, 0.0, p.z - c.z)));
+  // Street lamps and poles: only those near where the ray crosses their row.
+  for (var s = -1.0; s <= 1.0; s += 2.0) {
+    let lamps = slab(o.y, d.y, 4.78, 5.22, slab(o.x, d.x, s * 5.2 - 0.22, s * 5.2 + 0.22, vec2f(0.0, hit.t)));
+    if (lamps.x <= lamps.y) {
+      let ks = lampRange(o, d, lamps, s);
+      for (var k = ks.x; k <= min(ks.y, ks.x + 32.0); k += 1.0) {
+        let tl = sphere(o, d, lampPos(k, s), 0.22);
+        if (tl < hit.t) { hit = Hit(tl, vec3f(0.0), LAMP_LIGHT, vec3f(0.0, 1.0, 0.0)); }
+      }
+    }
+    let poles = slab(o.y, d.y, 0.0, 5.2, slab(o.x, d.x, s * 5.7 - 0.07, s * 5.7 + 0.07, vec2f(0.0, hit.t)));
+    if (poles.x <= poles.y) {
+      let ks = lampRange(o, d, poles, s);
+      for (var k = ks.x; k <= min(ks.y, ks.x + 32.0); k += 1.0) {
+        let cz = lampPos(k, s).z;
+        let tp = pole(o, d, s * 5.7, cz, 0.07, 5.2);
+        if (tp < hit.t) {
+          let p = o + tp * d;
+          hit = Hit(tp, vec3f(0.15), vec3f(0.0), normalize(vec3f(p.x - s * 5.7, 0.0, p.z - cz)));
+        }
       }
     }
   }
@@ -200,36 +251,76 @@ fn skyColor(d: vec3f) -> vec3f {
   return sky;
 }
 
-@compute @workgroup_size(8, 8)
-fn scene(@builtin(global_invocation_id) id: vec3u) {
-  if (id.x >= W.width || id.y >= W.height) { return; }
-  let cam = camera(W.time);
-  let tanHalf = 0.45;
-  let u = (2.0 * (f32(id.x) + 0.5) / f32(W.width) - 1.0) * tanHalf * f32(W.width) / f32(W.height);
-  let v = (1.0 - 2.0 * (f32(id.y) + 0.5) / f32(W.height)) * tanHalf;
+// Linear radiance and inverse view depth through image position pos (pixels).
+fn shade(cam: Camera, pos: vec2f, px: f32) -> vec4f {
+  let u = (pos.x - 0.5 * f32(W.width)) * PIXEL / f32(W.height);
+  let v = (0.5 * f32(W.height) - pos.y) * PIXEL / f32(W.height);
   let d = normalize(cam.fwd + u * cam.right + v * cam.up);
-  let hit = trace(cam.pos, d, W.time);
-  var c: vec3f;
-  var z = FAR;
-  if (hit.t >= FAR) {
-    c = skyColor(d);
-  } else {
-    let p = cam.pos + hit.t * d;
-    var light = vec3f(0.015, 0.018, 0.03);
-    let kc = floor(p.z / LAMP_SPACING);
-    for (var k = -2.0; k <= 2.0; k += 1.0) {
-      for (var s = -1.0; s <= 1.0; s += 2.0) {
-        let l = lampPos(kc + k, s) - p;
-        let r2 = dot(l, l);
-        light += LAMP_LIGHT * 0.6 * max(dot(hit.normal, l * inverseSqrt(r2)), 0.0) / r2;
-      }
+  let hit = trace(cam.pos, d, W.time, px);
+  if (hit.t >= FAR) { return vec4f(skyColor(d), 0.0); }
+  let p = cam.pos + hit.t * d;
+  var light = vec3f(0.015, 0.018, 0.03);
+  let kc = floor(p.z / LAMP_SPACING);
+  for (var k = -2.0; k <= 2.0; k += 1.0) {
+    for (var s = -1.0; s <= 1.0; s += 2.0) {
+      let l = lampPos(kc + k, s) - p;
+      let r2 = dot(l, l);
+      light += LAMP_LIGHT * 0.6 * max(dot(hit.normal, l * inverseSqrt(r2)), 0.0) / r2;
     }
-    c = mix(vec3f(0.02, 0.02, 0.035), hit.albedo * light + hit.emission, exp(-hit.t * 0.012));
-    z = hit.t * dot(d, cam.fwd);
   }
+  let c = mix(vec3f(0.02, 0.02, 0.035), hit.albedo * light + hit.emission, exp(-hit.t * 0.012));
+  return vec4f(c, 1.0 / (hit.t * dot(d, cam.fwd)));
+}
+
+const PIXEL = 0.9; // 2 tan(half vertical field of view)
+
+fn center(id: vec3u) -> vec2f {
+  return vec2f(f32(id.x) + 0.5, f32(id.y) + 0.5);
+}
+
+// Adaptive antialiasing in three passes. 1: one sample per pixel, (radiance, 1 / depth) into color.
+@compute @workgroup_size(8, 8)
+fn primary(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= W.width || id.y >= W.height) { return; }
+  color[id.y * W.width + id.x] = shade(camera(W.time), center(id), PIXEL / f32(W.height));
+}
+
+fn differs(a: vec4f, b: vec4f) -> bool {
+  let la = dot(a.rgb, vec3f(0.2126, 0.7152, 0.0722));
+  let lb = dot(b.rgb, vec3f(0.2126, 0.7152, 0.0722));
+  return abs(la - lb) > 0.1 * (la + lb) + 0.005 || abs(a.w - b.w) > 0.05 * max(a.w, b.w) + 1e-4;
+}
+
+// 2: where a pixel differs from a 4-neighbor (an edge or a small light), 3 more samples on a
+// rotated grid with half the footprint; result into scratch, as neighbors still read color.
+@compute @workgroup_size(8, 8)
+fn refine(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= W.width || id.y >= W.height) { return; }
   let i = id.y * W.width + id.x;
-  color[i] = vec4f(c, 1.0);
-  if (W.dof == 1u) { coc[i] = -min(W.aperture * Z_REF / z, W.aperture); }
+  let c = color[i];
+  let edge =
+    (id.x > 0u && differs(c, color[i - 1u])) || (id.x + 1u < W.width && differs(c, color[i + 1u])) ||
+    (id.y > 0u && differs(c, color[i - W.width])) || (id.y + 1u < W.height && differs(c, color[i + W.width]));
+  var sum = c;
+  if (edge) {
+    let cam = camera(W.time);
+    let px = 0.5 * PIXEL / f32(W.height);
+    sum += shade(cam, center(id) + vec2f(0.375, 0.125), px);
+    sum += shade(cam, center(id) + vec2f(-0.125, 0.375), px);
+    sum += shade(cam, center(id) + vec2f(-0.375, -0.375), px);
+    sum *= 0.25;
+  }
+  scratch[i] = sum;
+}
+
+// 3: final color, and the circle of confusion (linear in 1 / depth, so averaging 1 / depth
+// averages the samples' blur radii).
+@compute @workgroup_size(64)
+fn resolve(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= W.width * W.height) { return; }
+  let s = scratch[id.x];
+  color[id.x] = vec4f(s.rgb, 1.0);
+  if (W.dof == 1u) { coc[id.x] = -min(W.aperture * Z_REF * s.w, W.aperture); }
 }
 `;
 
@@ -237,28 +328,45 @@ export class World {
   constructor(device) {
     this.device = device;
     const module = device.createShaderModule({ code: worldShader });
-    this.scene = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "scene" } });
+    const storage = { visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } };
+    this.layout = device.createBindGroupLayout({
+      entries: [{ visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }, storage, storage, storage].map((e, binding) => ({ binding, ...e })),
+    });
+    const layout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
+    const make = (entryPoint) => device.createComputePipeline({ layout, compute: { module, entryPoint } });
+    this.pipelines = ["primary", "refine", "resolve"].map(make);
     this.uniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.noCoc = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE });
   }
 
-  // Encodes one frame into `color` (vec4f per pixel) and, if `coc` is given, the circle of confusion.
-  encode(encoder, { color, coc, width, height, time, aperture, timestampWrites }) {
+  // Encodes one frame into `color` (vec4f per pixel) and, if `coc` is given, the circle of
+  // confusion. `scratch` (16 bytes per pixel) is overwritten.
+  encode(encoder, { color, coc, scratch, width, height, time, aperture, timestampWrites }) {
     const u = new ArrayBuffer(32);
     new Uint32Array(u, 0, 2).set([width, height]);
     new Float32Array(u, 8, 2).set([time, aperture]);
     new Uint32Array(u, 16, 1)[0] = coc ? 1 : 0;
     this.device.queue.writeBuffer(this.uniform, 0, u);
-    const pass = encoder.beginComputePass(timestampWrites ? { timestampWrites } : {});
-    pass.setPipeline(this.scene);
-    pass.setBindGroup(
-      0,
-      this.device.createBindGroup({
-        layout: this.scene.getBindGroupLayout(0),
-        entries: [this.uniform, color, coc ?? this.noCoc].map((buffer, binding) => ({ binding, resource: { buffer } })),
-      }),
-    );
-    pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
-    pass.end();
+    const bindGroup = this.device.createBindGroup({
+      layout: this.layout,
+      entries: [this.uniform, color, coc ?? this.noCoc, scratch].map((buffer, binding) => ({ binding, resource: { buffer } })),
+    });
+    const groups = [
+      [Math.ceil(width / 8), Math.ceil(height / 8)],
+      [Math.ceil(width / 8), Math.ceil(height / 8)],
+      [Math.ceil((width * height) / 64)],
+    ];
+    // Separate passes: dispatches within one pass were not reliably ordered on Intel Gen9.
+    this.pipelines.forEach((pipeline, k) => {
+      const writes = timestampWrites && k !== 1 && {
+        querySet: timestampWrites.querySet,
+        ...(k === 0 ? { beginningOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex } : { endOfPassWriteIndex: timestampWrites.endOfPassWriteIndex }),
+      };
+      const pass = encoder.beginComputePass(writes ? { timestampWrites: writes } : {});
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(...groups[k]);
+      pass.end();
+    });
   }
 }

@@ -296,7 +296,7 @@ candidates per second.
 | `src/model.js`, `src/trig.js` | Traced (jax-js) kernel profile and accurate sine and cosine |
 | `src/de.js`, `src/finetune.js` | Differential evolution and gradient fine-tuning |
 | `src/blur.js` | WebGPU blur: WGSL compute and display shaders |
-| `src/world.js` | Animated 3D night street ray-cast on the GPU, with the circle of confusion from the z-buffer |
+| `src/world.js` | Animated 3D night street ray-cast on the GPU (adaptive 4× antialiasing, procedural patterns box-filtered over the pixel footprint), with the circle of confusion from the z-buffer |
 | `src/plots.js`, `src/scene.js`, `src/main.js` | Plots, procedural HDR test scene, user interface |
 | `test/smoke.js` | Checks the math and runs the optimizer and fine-tuner in Node |
 | `test/merged-de.js` | Experiment: DE convergence with and without merged pairs |

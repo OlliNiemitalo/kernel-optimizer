@@ -691,6 +691,7 @@ export class BlurRenderer {
       this.world.encode(encoder, {
         color: this.source,
         coc: this.varying?.kind === "depth" ? this.radiusBuffer : null,
+        scratch: this.acc, // free until the blur passes overwrite it
         width,
         height,
         time,
