@@ -97,6 +97,15 @@
             <fieldset id="varyingControls">
               <legend>Varying blur</legend>
               <label title="Depth of field only: blur near and far objects as separate layers composited front to back, so a blurry foreground spreads over what is behind it. Depth splits are chosen locally, per 16-pixel tile, so the same layers serve different depths in different places. 1 = no layering.">Depth layers <input id="layers" type="number" min="1" max="4" step="1" value="1" /></label>
+              <label title="Debug views of the depth layers">Layer view
+                <select id="showLayers" class="wide">
+                  <option value="0">Composite</option>
+                  <option value="1">Nearer layers in red</option>
+                  <option value="2">Nearer layers' opacity (half scale)</option>
+                  <option value="3">Nearest layer only</option>
+                  <option value="4">1 layer: kernel weight sum (half scale)</option>
+                </select>
+              </label>
               <label class="check" title="The vertical pass can use one kernel per pixel. On: the average blur level of the row sources reaching the pixel, weighted by brightness and by how much of their disc falls in the column, so highlights keep round discs. Off: the pixel's own level, which cuts the discs of blurry highlights next to sharper pixels."><input id="sizeBlur" type="checkbox" checked /> Blur the blur size</label>
               <label class="slider" title="Exponent of the brightness weight: 0 = all sources count equally, 1 = in proportion to brightness, 2 = bright highlights dominate">Brightness weight <input id="sizeBrightness" type="range" min="0" max="3" step="0.1" value="1" /> <output id="sizeBrightnessOut">1.0</output></label>
               <label class="check" title="Depth of field only: an in-focus or background pixel hides sources whose blur is much larger behind it, beyond its own blur radius, so background highlights do not bleed over sharp foreground edges"><input id="occlusion" type="checkbox" checked /> Occlusion</label>

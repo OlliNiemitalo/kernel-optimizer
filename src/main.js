@@ -538,6 +538,7 @@ async function renderBlur() {
       $("varyingControls").disabled = mode === "uniform";
       $("occlusion").disabled = !depth;
       $("layers").disabled = !depth;
+      $("showLayers").disabled = !depth;
       updateVaryingControls();
       blurKernelDirty = false;
     }
@@ -560,6 +561,7 @@ async function renderBlur() {
       sizeBlur: $("sizeBlur").checked ? num("sizeBrightness") : null,
       occlusion: $("occlusion").checked ? num("occlusionLevels") / 6 : 0,
       layers: num("layers"),
+      showLayers: Number($("showLayers").value),
       capture,
     });
     const prefix = { world: "street", video: "video" }[state.source];
@@ -782,7 +784,7 @@ function wire() {
     $("exposureOut").textContent = `${Math.pow(2, num("exposure")).toFixed(2)}×`;
     requestBlur();
   });
-  for (const id of ["blurOn", "layers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels"]) {
+  for (const id of ["blurOn", "layers", "showLayers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels"]) {
     $(id).addEventListener("input", () => {
       updateVaryingControls();
       requestBlur();

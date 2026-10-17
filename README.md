@@ -241,28 +241,50 @@ strength. With **depth layers** (z-buffer only, 1–4), near layers are blurred 
 composited over the farther ones, so the silhouette spreads over the background, and the
 background shows through the object's semi-transparent edge, as in a real lens.
 
-- **Local splits.** Which depths need separating varies across the image, so the splits are chosen
-  per 16×16 tile from a histogram of signed blur levels over the surrounding 5×5 tiles. A greedy
-  Otsu threshold splits it where the nearer part lies in front of the focus and is at least an
-  octave blurrier than the farther part (a sharper part in front is already handled by occlusion).
-  Elsewhere the tile needs fewer layers, and the unused near layers are empty there, so one layer
-  in memory serves different depths in different places.
-- **Membership depends only on the source.** Each pixel's weight in each layer comes from the splits
-  of the four nearest tile centers, bilinearly interpolated, with a soft step of ±1.5 levels.
-  Because it is a function of the source pixel alone, each layer is a linear image and the
-  separable passes stay exact.
-- **Front to back.** Layers run one after another, nearest first, through the same passes, buffers
-  and accumulator. After each layer but the last, its coverage-premultiplied result is composited:
-  $C \mathrel{+}= T\,c$, $T \mathrel{\times}= 1 - \alpha$. The memory for any number of layers is one
-  extra buffer (color and transmittance $T$, 16 bytes per pixel) plus the hole-filling pyramid
-  below, about a third more.
-- **Hole filling.** The last layer lacks the sources that nearer layers took. Where its coverage
-  approaches 0, it is completed by pull-push: a pyramid of coverage-weighted averages built by
-  halving, then filled from coarse to fine with bilinear upsampling. The display shows
-  $C + T \cdot \text{last layer}$.
+- **Local splits, at depth edges.** Which depths need separating varies across the image, so the
+  splits are chosen per 16×16 tile from the depth edges of the surrounding 5×5 tiles: pairs of
+  pixels 4 px apart whose nearer pixel lies in front of the focus and is at least an octave
+  blurrier. Each pair supports every split between its two blur levels; a tile splits in the
+  middle of the range supported by at least half the peak (and 16 pairs). A connected surface,
+  however steep, has no such edges and is not split. Elsewhere the tile needs fewer layers, and
+  the unused near layers are empty there, so one layer in memory serves different depths in
+  different places.
+- **Membership depends only on the source.** Each pixel's membership in front of each split comes
+  from the four nearest tile centers, bilinearly interpolated, with a soft step as wide as the
+  supported range (a surface that continues across the split, such as feet on the ground, fades
+  between the layers). These masks are then closed morphologically (4 px), so thin details whose
+  estimated depth fell behind (a zipper on a coat) stay with their surface. Because membership is
+  a function of the source pixel alone, each layer is a linear image and the separable passes
+  stay exact.
+- **Smooth blur levels within a layer.** Estimated depth is noisy, and with scatter-as-gather,
+  neighbors with different disc sizes do not sum to unit weight. Within each layer, the source
+  levels are smoothed by a median and then a mean over ±6 px of the layer's own pixels, never
+  across a split, so silhouettes keep their depth jumps.
+- **Back to front.** Layers run one after another, farthest first, through the same passes,
+  buffers and accumulator. The farthest layer lacks the sources that nearer layers took; where its
+  coverage is below ½, it is completed by pull-push (a pyramid of coverage-weighted averages built
+  by halving, then filled from coarse to fine with bilinear upsampling). Each nearer layer, its
+  color normalized by its coverage $w$, then goes over the composite with opacity
+  $\alpha = \max(\operatorname{close}(w), f)$: the coverage after a 3 px morphological closing,
+  which fills narrow dips from mixed disc sizes but keeps the smooth ramp around a silhouette,
+  and the fraction $f$ of the layer's pixels within the pixel's own blur radius (a square window),
+  which makes the layer opaque deeper inside than its blur reaches. The memory for any number of
+  layers is two extra buffers (the composite, and debug data; 16 bytes per pixel each) plus the
+  pyramid, about a third more, and two more byte maps per split.
 
-On the Intel GPU, two layers took 1.0–1.7× the GPU time of one on the Video Depth Anything clip of a
-woman in a field.
+The **Layer view** selector shows the composite, the nearer layers' opacity (tinted, or as gray at
+half scale), the nearest layer alone, or, with one layer, the summed kernel weight per pixel.
+
+**Mixing blur levels.** The horizontal pass uses each source's level and the vertical pass a
+per-pixel level, but each level's tables are normalized only as a pair: a source's horizontal taps
+at level $l_1$ followed by vertical taps at $l_2$ weigh
+$C_{l_1 l_2} = \sum_n \mathrm{Re}[\Sigma h_n^{(l_1)}\,\Sigma v_n^{(l_2)}]$, which is not 1 (the
+in-focus identity, all in channel 0, mixed with a blur level gave 0.3). The identity's center tap
+now carries, per channel, the tap sums of the largest level (it is still exactly the identity
+alone, and mixes with blur levels at 0.92–1.14), and the horizontal pass divides each source's taps
+by $C$ for the output pixel's vertical level (a levels × levels table after the K table in the
+kernel buffer). The smoke test checks that $C$ stays within a factor of 1.5 of 1 for the article's
+presets.
 
 #### Truncation and corners
 

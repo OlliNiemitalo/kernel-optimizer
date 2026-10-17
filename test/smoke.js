@@ -1,6 +1,7 @@
 // Node smoke test (Wasm backend): kernel math, separable channels, DE, fine-tuning.
 import { defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
 import { DifferentialEvolution } from "../src/de.js";
+import { tapTables } from "../src/blur.js";
 import { FineTuner } from "../src/finetune.js";
 import {
   bounds, defaultProblem, maxError, multiplicities, nonnegativePresetParams, parseParams, presetParams, profile, sampleGrid,
@@ -16,6 +17,24 @@ function check(name, value, tolerance) {
 }
 
 const problemFor = (multiplicity) => ({ ...defaultProblem(), components: multiplicity.length, multiplicity });
+
+// Varying-radius tap tables: a source's horizontal taps at one level followed by vertical taps at
+// another weigh C[l1][l2]; the renderer divides by it, so it must stay well away from 0. The identity
+// level must stay exact (a single center tap, 2-D weight 1).
+{
+  const radii = [null, ...Array.from({ length: 37 }, (_, l) => 2 ** (l / 6))];
+  let worstCross = 0;
+  let worstIdentity = 0;
+  for (const n of [1, 2, 3, 4, 5, 6]) {
+    const { tables, cross, halves } = tapTables(separableChannels(presetParams(n)), radii, 0.2);
+    for (const row of cross) for (const c of row) worstCross = Math.max(worstCross, Math.abs(Math.log(c)));
+    worstIdentity = Math.max(worstIdentity, halves[0], Math.abs(cross[0][0] - 1));
+    for (let level = 1; level < radii.length; level++) worstIdentity = Math.max(worstIdentity, Math.abs(cross[level][level] - 1));
+    if (tables[0][0][0].length !== 2) worstIdentity = Infinity;
+  }
+  check("varying-radius levels mix with weights within a factor of 1.5 of 1 (|log|)", worstCross, Math.log(1.5));
+  check("identity and each level alone have unit weight", worstIdentity, 1e-12);
+}
 
 // A merged pair is the limit of two coinciding rates: (B + A s) e^{λs} = lim Re[B e^{λs} + (A/δ)(e^{(λ+δ)s} − e^{λs})].
 {
