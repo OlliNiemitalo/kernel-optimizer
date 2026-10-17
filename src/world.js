@@ -113,7 +113,10 @@ fn box(o: vec3f, d: vec3f, c: vec3f, h: vec3f) -> vec4f {
   let tn = max(max(lo.x, lo.y), lo.z);
   let tf = min(min(hi.x, hi.y), hi.z);
   if (tn > tf || tn <= 0.0) { return vec4f(FAR, 0.0, 0.0, 0.0); }
-  let n = -sign(d) * step(lo.yzx, lo) * step(lo.zxy, lo);
+  // One axis even on edges and corners: a two-axis normal has length > 1 and overflows glints.
+  var n = vec3f(0.0, 0.0, -sign(d.z));
+  if (tn == lo.y) { n = vec3f(0.0, -sign(d.y), 0.0); }
+  if (tn == lo.x) { n = vec3f(-sign(d.x), 0.0, 0.0); }
   return vec4f(tn, n);
 }
 
@@ -318,10 +321,10 @@ fn direct(hit: Hit, p: vec3f, d: vec3f) -> vec3f {
       let ld = l * inverseSqrt(r2);
       let e = LAMP_LIGHT * 0.6 * max(dot(hit.normal, ld), 0.0) / r2;
       light += e;
-      glint += e * (0.5 * hit.gloss + 1.0) * pow(max(dot(r, ld), 0.0), hit.gloss);
+      glint += e * (0.5 * hit.gloss + 1.0) * pow(clamp(dot(r, ld), 0.0, 1.0), hit.gloss);
     }
   }
-  let fresnel = hit.spec + (1.0 - hit.spec) * pow(1.0 - max(dot(-d, hit.normal), 0.0), 5.0);
+  let fresnel = hit.spec + (1.0 - hit.spec) * pow(1.0 - clamp(dot(-d, hit.normal), 0.0, 1.0), 5.0);
   return hit.albedo * light + hit.emission + select(vec3f(0.0), fresnel * glint, hit.spec > 0.0);
 }
 
