@@ -726,7 +726,12 @@ function wire() {
     $("imageFile").value = "";
     if (state.blur) useWorld();
   };
-  for (const [k, sample] of VIDEO_SAMPLES.entries()) $("videoSample").add(new Option(sample.label, k));
+  const groups = {};
+  for (const [k, sample] of VIDEO_SAMPLES.entries()) {
+    const [, group, name] = sample.label.match(/^(.*?): (.*)$/);
+    if (!groups[group]) $("videoSample").append((groups[group] = Object.assign(document.createElement("optgroup"), { label: group })));
+    groups[group].append(new Option(name, k));
+  }
   const loadSample = () => {
     state.imageFile = null;
     $("imageFile").value = "";

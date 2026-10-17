@@ -22,126 +22,190 @@
           <a id="mathLink">How it works (implementation-oriented math)</a> · <a id="sourceLink">Source</a>
         </span>
       </p>
-      <p id="status" class="status">Starting…</p>
     </header>
 
     <main>
-      <section class="panel blur" aria-label="WebGPU blur demo">
-        <h2>WebGPU blur demo</h2>
-        <div class="blur-controls">
-          <label>Disc radius (px) <input id="radius" type="range" min="2" max="120" step="1" value="15" /> <output id="radiusOut">15</output></label>
-          <label>Blur
-            <select id="blurMode">
-              <option value="uniform">Uniform</option>
-              <option value="tiltShift">Tilt-shift (varying radius, max = disc radius)</option>
-              <option value="depth">Depth of field from the z-buffer (3D world; disc radius = blur at 2 m with focus at infinity)</option>
-            </select>
-          </label>
-          <label>Focus distance <input id="focus" type="range" min="0" max="1" step="0.005" value="0.316" /> <output id="focusOut">10 m</output></label>
-          <label>Exposure <input id="exposure" type="range" min="-4" max="4" step="0.1" value="0" /> <output id="exposureOut">1.0×</output></label>
-          <label>Tone map
-            <select id="tonemap"><option value="1">Reinhard</option><option value="0">Clip</option></select>
-          </label>
-          <label>Intermediate storage
-            <select id="precision"><option value="f32">f32</option><option value="f16">16-bit float (packed)</option></select>
-          </label>
-          <label class="check"><input id="follow" type="checkbox" checked /> Follow optimizer</label>
-          <label title="An image, or an RGB-D video: color on top, inverse depth below as grayscale (white = 0.5 m)">Image or RGB-D video <input id="imageFile" type="file" accept="image/*,video/*" /></label>
-          <label>Highlight boost <input id="boost" type="number" min="0" max="100" step="1" value="8" /></label>
-          <button id="worldButton">3D world</button>
-          <button id="videoButton" title="Play the selected RGB-D video">RGB-D video</button>
-          <select id="videoSample" aria-label="RGB-D video sample"></select>
-          <button id="sceneButton">Procedural scene</button>
-          <span class="playback" aria-label="Animation playback">
-            <button id="stepBack" title="Previous frame (1/30 s)">⏮</button>
-            <button id="playPause" title="Play or pause the animation">Pause</button>
-            <button id="stepForward" title="Next frame (1/30 s)">⏭</button>
-            <label>t <input id="sceneTime" type="number" min="0" step="0.0333333" value="0" /> s</label>
-            <button id="saveFrame" title="Save the displayed frame as PNG">Save PNG</button>
-            <button id="copyView" title="Copy the scene time, blur settings, kernel and GPU as JSON, to reproduce this view">Copy view state</button>
-            <button id="applyView" title="Restore a view from copied JSON">Apply view state…</button>
-          </span>
-        </div>
-        <textarea id="viewState" rows="4" placeholder="Paste a view state (JSON), then press Apply view state again" spellcheck="false" hidden></textarea>
-        <p id="blurStats" class="status"></p>
-        <p id="videoCredit" class="note" hidden></p>
-        <canvas id="blurCanvas"></canvas>
-        <details id="shaderPanel">
-          <summary>Shader code (WGSL)</summary>
-          <div class="buttons">
-            <select id="shaderKind" aria-label="Shader"><option value="compute">Compute passes</option><option value="display">Display pass</option></select>
-            <button id="copyShader">Copy</button>
-            <button id="downloadShader">Download</button>
+      <!-- ============================== Blur demo ============================== -->
+      <section class="panel" aria-labelledby="blurTitle">
+        <h2 id="blurTitle" class="panel-title">Blur demo <span class="subtitle">WebGPU, using the current kernel</span></h2>
+        <div class="demo">
+          <div class="viewport">
+            <canvas id="blurCanvas"></canvas>
+            <p id="blurStats" class="status small"></p>
+            <p id="videoCredit" class="note" hidden></p>
+            <details id="shaderPanel">
+              <summary>Shader code (WGSL)</summary>
+              <div class="buttons">
+                <select id="shaderKind" aria-label="Shader"><option value="compute">Compute passes</option><option value="display">Display pass</option></select>
+                <button id="copyShader">Copy</button>
+                <button id="downloadShader">Download</button>
+              </div>
+              <p class="note">The compute shader follows the intermediate storage setting. Its header comment describes the buffers, the tap tables (computed from the separable channels under "Current kernel"), and the dispatch order.</p>
+              <textarea id="shaderCode" rows="24" readonly spellcheck="false"></textarea>
+            </details>
           </div>
-          <p class="note">The compute shader follows the intermediate storage setting. Its header comment describes the buffers, the tap tables (computed from the separable channels under "Current kernel"), and the dispatch order.</p>
-          <textarea id="shaderCode" rows="24" readonly spellcheck="false"></textarea>
-        </details>
+
+          <div class="sidebar">
+            <fieldset>
+              <legend>Scene</legend>
+              <label class="stack">RGB-D video
+                <select id="videoSample" class="full"></select>
+              </label>
+              <div class="row">
+                <button id="videoButton" class="grow" title="Play the selected RGB-D video">Video</button>
+                <button id="worldButton" class="grow">3D world</button>
+                <button id="sceneButton" class="grow">Procedural</button>
+              </div>
+              <label class="stack" title="An image, or an RGB-D video: color on top, inverse depth below as grayscale (white = 0.5 m)">Open an image or RGB-D video
+                <input id="imageFile" type="file" accept="image/*,video/*" />
+              </label>
+              <label title="Lifts near-white pixels of images and videos into HDR, so highlights bloom into discs">Highlight boost <input id="boost" type="number" min="0" max="100" step="1" value="8" /></label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Playback</legend>
+              <div class="row playback" aria-label="Animation playback">
+                <button id="stepBack" title="Previous frame">⏮</button>
+                <button id="playPause" class="grow" title="Play or pause the animation">Pause</button>
+                <button id="stepForward" title="Next frame">⏭</button>
+              </div>
+              <label>Time (s) <input id="sceneTime" type="number" min="0" step="0.0333333" value="0" /></label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Lens</legend>
+              <label>Blur
+                <select id="blurMode" class="wide">
+                  <option value="uniform">Uniform</option>
+                  <option value="tiltShift">Tilt-shift</option>
+                  <option value="depth">Depth of field</option>
+                </select>
+              </label>
+              <label class="slider" title="Uniform and tilt-shift: the disc radius. Depth of field: the blur at 2 m with focus at infinity">Disc radius <input id="radius" type="range" min="2" max="120" step="1" value="15" /> <output id="radiusOut">15</output> px</label>
+              <label class="slider" title="Depth of field only">Focus <input id="focus" type="range" min="0" max="1" step="0.005" value="0.316" /> <output id="focusOut">10 m</output></label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Display</legend>
+              <label class="slider">Exposure <input id="exposure" type="range" min="-4" max="4" step="0.1" value="0" /> <output id="exposureOut">1.0×</output></label>
+              <label>Tone map
+                <select id="tonemap"><option value="1">Reinhard</option><option value="0">Clip</option></select>
+              </label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Rendering</legend>
+              <label>Intermediate storage
+                <select id="precision"><option value="f32">f32</option><option value="f16">16-bit float (packed)</option></select>
+              </label>
+              <label class="check"><input id="follow" type="checkbox" checked /> Follow the optimizer's kernel</label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Capture and bug reports</legend>
+              <div class="row">
+                <button id="saveFrame" title="Save the displayed frame as PNG">Save PNG</button>
+                <button id="copyView" title="Copy the scene time, blur settings, kernel and GPU as JSON, to reproduce this view">Copy view state</button>
+              </div>
+              <div class="row">
+                <button id="applyView" title="Restore a view from copied JSON">Apply view state…</button>
+              </div>
+              <textarea id="viewState" rows="4" placeholder="Paste a view state (JSON), then press Apply view state again" spellcheck="false" hidden></textarea>
+            </fieldset>
+          </div>
+        </div>
       </section>
 
-      <section class="panel controls" aria-label="Optimizer settings">
-        <label>Article preset
-          <select id="preset">
-            <option value="">—</option>
-            <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
-            <option value="nn1">1, non-negative</option><option value="nn2">2, non-negative</option>
-          </select>
-        </label>
-        <h2>Problem</h2>
-        <label>Components <input id="components" type="number" min="1" max="8" step="1" value="3" /></label>
-        <label>Multiplicities <input id="multiplicity" type="text" value="1, 1, 1" spellcheck="false" /></label>
-        <p class="note">Per component: 1 = single, 2 = merged pair, i.e. two coinciding rates in closed form,
-          <code>(B + A r²)·e<sup>λr²</sup></code>, costing two complex channels per pass. Example: 2, 2, 1.</p>
-        <label>Transition bandwidth <input id="transition" type="number" min="0.02" max="2" step="0.01" value="0.2" /></label>
-        <label>Pass-band samples <input id="passSamples" type="number" min="10" max="5000" step="10" value="200" /></label>
-        <label>Stop-band samples <input id="stopSamples" type="number" min="10" max="5000" step="10" value="200" /></label>
-        <label class="check"><input id="frequencyBands" type="checkbox" checked /> <span>Keep component <var>u</var> near frequency (1.14<var>u</var> + 0.5)π ± 0.4π</span></label>
-        <label>Negative gain <input id="negGain" type="number" min="1" max="1000" step="1" value="1" /></label>
-        <p class="note">Errors where the kernel is negative count this many times. Above 1, the optimizers trade ripple for fewer negative values, which look like cheap sharpening (as in the article's non-negative sets).</p>
-        <p id="ranges" class="note"></p>
+      <!-- ============================== Optimizer ============================== -->
+      <section class="panel" aria-labelledby="optTitle">
+        <h2 id="optTitle" class="panel-title">Kernel optimizer <span class="subtitle">fits the disc, on jax-js</span></h2>
+        <p id="status" class="status">Starting…</p>
+        <div class="optimizer">
+          <div class="sidebar controls">
+            <fieldset>
+              <legend>Kernel</legend>
+              <label>Article preset
+                <select id="preset">
+                  <option value="">—</option>
+                  <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
+                  <option value="nn1">1, non-negative</option><option value="nn2">2, non-negative</option>
+                </select>
+              </label>
+              <label>Components <input id="components" type="number" min="1" max="8" step="1" value="3" /></label>
+              <label>Multiplicities <input id="multiplicity" type="text" value="1, 1, 1" spellcheck="false" /></label>
+              <details class="help">
+                <summary>About multiplicities</summary>
+                <p class="note">Per component: 1 = single, 2 = merged pair, i.e. two coinciding rates in closed form,
+                  <code>(B + A r²)·e<sup>λr²</sup></code>, costing two complex channels per pass. Example: 2, 2, 1.</p>
+              </details>
+            </fieldset>
 
-        <h2>Differential evolution</h2>
-        <label>Population <input id="population" type="number" min="8" max="16384" step="8" value="512" /></label>
-        <label>Differential weight F <input id="F" type="number" min="0.05" max="2" step="0.01" value="0.76" /></label>
-        <label>Crossover continuation CR <input id="CR" type="number" min="0" max="1" step="0.001" value="0.999" /></label>
-        <label>Seed <input id="seed" type="number" min="0" step="1" value="1" /></label>
-        <label>Generations per frame <input id="gensPerFrame" type="number" min="1" max="1000" step="1" value="10" /></label>
-        <label class="check"><input id="seedWithCurrent" type="checkbox" /> Include the current kernel in a new population</label>
-        <div class="buttons">
-          <button id="run" class="primary">Start</button>
-          <button id="reset">New population</button>
-        </div>
+            <fieldset>
+              <legend>Target and error</legend>
+              <label>Transition bandwidth <input id="transition" type="number" min="0.02" max="2" step="0.01" value="0.2" /></label>
+              <label title="Errors where the kernel is negative count this many times">Negative gain <input id="negGain" type="number" min="1" max="1000" step="1" value="1" /></label>
+              <label>Pass-band samples <input id="passSamples" type="number" min="10" max="5000" step="10" value="200" /></label>
+              <label>Stop-band samples <input id="stopSamples" type="number" min="10" max="5000" step="10" value="200" /></label>
+              <label class="check"><input id="frequencyBands" type="checkbox" checked /> <span>Keep component <var>u</var> near frequency (1.14<var>u</var> + 0.5)π ± 0.4π</span></label>
+              <details class="help">
+                <summary>About negative gain and search ranges</summary>
+                <p class="note">Errors where the kernel is negative count "negative gain" times. Above 1, the optimizers trade ripple for fewer negative values, which look like cheap sharpening (as in the article's non-negative sets).</p>
+                <p id="ranges" class="note"></p>
+              </details>
+            </fieldset>
 
-        <h2>Gradient fine-tuning</h2>
-        <label>Steps <input id="ftSteps" type="number" min="100" max="100000" step="100" value="3000" /></label>
-        <label>Learning rate <input id="ftLr" type="number" min="0.000001" max="0.1" step="0.00001" value="0.00033" data-auto="1" /></label>
-        <label>Smooth-max sharpness <input id="ftSharpness" type="number" min="1" max="10000" step="1" value="100" /></label>
-        <label>Dense grid samples per band <input id="denseSamples" type="number" min="100" max="20000" step="100" value="2000" /></label>
-        <div class="buttons"><button id="finetune">Fine-tune current kernel</button></div>
-        <p class="note">Minimizes a log-sum-exp smooth maximum of |error| on the dense grid with Adam in parameter-relative units (learning rate defaults to 0.001/3<sup>N−2</sup> and halves every third of the run; sharpness, relative to the current ripple, rises 10×). Keeps the best kernel by true maximum error.</p>
-      </section>
+            <fieldset>
+              <legend>Differential evolution</legend>
+              <div class="row">
+                <button id="run" class="primary grow">Start</button>
+                <button id="reset" class="grow">New population</button>
+              </div>
+              <label>Population <input id="population" type="number" min="8" max="16384" step="8" value="512" /></label>
+              <label>Differential weight F <input id="F" type="number" min="0.05" max="2" step="0.01" value="0.76" /></label>
+              <label>Crossover continuation CR <input id="CR" type="number" min="0" max="1" step="0.001" value="0.999" /></label>
+              <label>Seed <input id="seed" type="number" min="0" step="1" value="1" /></label>
+              <label>Generations per frame <input id="gensPerFrame" type="number" min="1" max="1000" step="1" value="10" /></label>
+              <label class="check"><input id="seedWithCurrent" type="checkbox" /> Include the current kernel in a new population</label>
+            </fieldset>
 
-      <section class="plots" aria-label="Visualizations">
-        <div class="plot-controls">
-          <label>Plot range <input id="xmax" type="number" min="1.2" max="10" step="0.1" value="2.5" /></label>
-          <label class="check"><input id="showPopulation" type="checkbox" checked /> Population</label>
-          <label class="check"><input id="showComponents" type="checkbox" /> Components</label>
-        </div>
-        <div class="grid">
-          <canvas id="profile" class="plot"></canvas>
-          <div class="disc-wrap">
-            <canvas id="disc" width="320" height="320"></canvas>
-            <p class="note">2-D kernel normalized to its peak: positive values in gray levels, negative values in red, on the same brightness scale.</p>
+            <fieldset>
+              <legend>Gradient fine-tuning</legend>
+              <div class="row"><button id="finetune" class="grow">Fine-tune current kernel</button></div>
+              <label>Steps <input id="ftSteps" type="number" min="100" max="100000" step="100" value="3000" /></label>
+              <label>Learning rate <input id="ftLr" type="number" min="0.000001" max="0.1" step="0.00001" value="0.00033" data-auto="1" /></label>
+              <label>Smooth-max sharpness <input id="ftSharpness" type="number" min="1" max="10000" step="1" value="100" /></label>
+              <label>Dense grid samples per band <input id="denseSamples" type="number" min="100" max="20000" step="100" value="2000" /></label>
+              <details class="help">
+                <summary>How it works</summary>
+                <p class="note">Minimizes a log-sum-exp smooth maximum of |error| on the dense grid with Adam in parameter-relative units (learning rate defaults to 0.001/3<sup>N−2</sup> and halves every third of the run; sharpness, relative to the current ripple, rises 10×). Keeps the best kernel by true maximum error.</p>
+              </details>
+            </fieldset>
           </div>
-          <canvas id="error" class="plot"></canvas>
-          <canvas id="convergence" class="plot"></canvas>
+
+          <div class="plots" aria-label="Visualizations">
+            <div class="plot-controls">
+              <label>Plot range <input id="xmax" type="number" min="1.2" max="10" step="0.1" value="2.5" /></label>
+              <label class="check"><input id="showPopulation" type="checkbox" checked /> Population</label>
+              <label class="check"><input id="showComponents" type="checkbox" /> Components</label>
+            </div>
+            <div class="grid">
+              <canvas id="profile" class="plot"></canvas>
+              <div class="disc-wrap">
+                <canvas id="disc" width="320" height="320"></canvas>
+                <p class="note">2-D kernel normalized to its peak: positive values in gray levels, negative values in red, on the same brightness scale.</p>
+              </div>
+              <canvas id="error" class="plot"></canvas>
+              <canvas id="convergence" class="plot"></canvas>
+            </div>
+            <h3>Current kernel</h3>
+            <textarea id="output" rows="12" readonly spellcheck="false"></textarea>
+            <div class="buttons">
+              <button id="copy">Copy</button>
+              <button id="applyPasted">Use pasted parameters…</button>
+            </div>
+            <textarea id="pasted" rows="3" placeholder="One component per line: b, c, r, i (single) or b, c, r, i, r1, i1 (merged pair)" spellcheck="false" hidden></textarea>
+          </div>
         </div>
-        <h2>Current kernel</h2>
-        <textarea id="output" rows="12" readonly spellcheck="false"></textarea>
-        <div class="buttons">
-          <button id="copy">Copy</button>
-          <button id="applyPasted">Use pasted parameters…</button>
-        </div>
-        <textarea id="pasted" rows="3" placeholder="One component per line: b, c, r, i (single) or b, c, r, i, r1, i1 (merged pair)" spellcheck="false" hidden></textarea>
       </section>
     </main>
     <script type="module" src="./src/main.js"></script>
