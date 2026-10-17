@@ -104,6 +104,7 @@ function drawAll() {
   const ripple = state.current?.error ?? 0;
   drawProfile($("profile"), {
     best,
+    label: state.current && `${state.current.source}, ripple ±${state.current.error.toFixed(5)}`,
     population: $("showPopulation").checked ? state.populationSample : [],
     transition: problem.transition,
     ripple,
@@ -117,7 +118,7 @@ function drawAll() {
 
 // ---- differential evolution ---------------------------------------------------------------
 
-function resetDE() {
+function resetDE({ showBest = false } = {}) {
   state.de?.dispose();
   state.de = null;
   const problem = readProblem();
@@ -141,10 +142,10 @@ function resetDE() {
   }
   state.history = [];
   state.populationSample = [];
-  observe(performance.now(), 0);
+  observe(performance.now(), 0, showBest);
 }
 
-async function observe(startTime, generationsRun) {
+async function observe(startTime, generationsRun, showBest = false) {
   const de = state.de;
   let snap;
   try {
@@ -165,7 +166,8 @@ async function observe(startTime, generationsRun) {
   const keepCurrent =
     state.current && state.current.source !== "differential evolution" &&
     state.current.params.length === D && state.current.error <= snap.bestCost;
-  if (!keepCurrent) setCurrent(snap.best, "differential evolution");
+  // Before the first generation, keep showing a loaded preset or pasted kernel.
+  if (showBest || generationsRun > 0 || !keepCurrent) setCurrent(snap.best, "differential evolution");
   const now = performance.now();
   const rate = generationsRun > 0 ? (generationsRun * de.P) / ((now - startTime) / 1000) : 0;
   setStatus(
@@ -214,7 +216,7 @@ async function fineTune() {
     halfLife: steps / 3,
   });
   let best = { params: state.current.params, error: state.current.denseError };
-  const start = best.error;
+  const start = { ...best };
   try {
     for (let k = 0; k < rounds; k++) {
       const sharpness = num("ftSharpness") * Math.pow(10, k / Math.max(1, rounds - 1));
@@ -226,7 +228,7 @@ async function fineTune() {
       }
       setStatus(
         `Fine-tuning on ${state.backend} · step ${tuner.step}/${rounds * roundSteps} · ` +
-          `dense-grid ripple ±${best.error.toFixed(6)} (started ±${start.toFixed(6)})`,
+          `dense-grid ripple ±${best.error.toFixed(6)} (started ±${start.error.toFixed(6)})`,
       );
       await nextFrame();
     }
@@ -234,6 +236,8 @@ async function fineTune() {
     setStatus(`Fine-tuning failed: ${e.message}`);
   } finally {
     tuner.dispose();
+    // So that resuming the optimizer can't lose the fine-tuned kernel.
+    if (best.params !== start.params && state.de?.D === best.params.length) state.de.inject(best.params);
     state.busy = false;
     $("finetune").disabled = false;
     if (wasRunning) setRunning(true);
@@ -318,7 +322,7 @@ function wire() {
   $("reset").onclick = () => {
     const wasRunning = state.running;
     setRunning(false);
-    resetDE();
+    resetDE({ showBest: true });
     if (wasRunning) setRunning(true);
   };
   for (const id of ["components", "multiplicity", "transition", "passSamples", "stopSamples", "frequencyBands", "population", "F", "CR", "seed"]) {

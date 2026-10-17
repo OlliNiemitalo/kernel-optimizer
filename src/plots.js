@@ -1,5 +1,5 @@
 // Canvas 2-D plotting for profiles, errors, convergence, and the 2-D disc.
-import { componentProfile, profile } from "./problem.js";
+import { PARAMS_PER_COMPONENT, componentProfile, profile } from "./problem.js";
 
 const COLORS = ["#4cc9f0", "#f72585", "#90be6d", "#f9c74f", "#b5179e", "#43aa8b", "#f3722c", "#577590"];
 
@@ -88,7 +88,7 @@ function clipToPlot(ctx, w, h, m) {
 }
 
 // Radial cross-section of the best kernel, with faint population members and the spec.
-export function drawProfile(canvas, { best, population = [], transition, ripple, xmax, showComponents }) {
+export function drawProfile(canvas, { best, label, population = [], transition, ripple, xmax, showComponents }) {
   const { ctx, w, h } = setupCanvas(canvas);
   const n = 600;
   const xs = Array.from({ length: n }, (_, k) => (k / (n - 1)) * xmax);
@@ -96,7 +96,7 @@ export function drawProfile(canvas, { best, population = [], transition, ripple,
   const lo = Math.min(-0.15, ...bestY);
   const hi = Math.max(1.15, ...bestY);
   const { X, Y, m } = frame(ctx, w, h, [0, xmax], [lo, hi], {
-    title: "Radial cross-section K(r)",
+    title: `Radial cross-section K(r)${label ? ` — ${label}` : ""}`,
     xlabel: "r (disc radius = 1)",
   });
   ctx.save();
@@ -110,7 +110,7 @@ export function drawProfile(canvas, { best, population = [], transition, ripple,
   line(ctx, X, Y, [0, 1, 1, 1 + transition, 1 + transition, xmax], [1, 1, 0, 0, 0, 0], "#5c677d", 1);
   for (const p of population) line(ctx, X, Y, xs, xs.map((x) => profile(p, x)), "#8b93a7", 1, 0.25);
   if (best && showComponents) {
-    const nc = best.length / 4;
+    const nc = best.length / PARAMS_PER_COMPONENT;
     for (let u = 0; u < nc; u++) {
       line(ctx, X, Y, xs, xs.map((x) => componentProfile(best, u, x)), COLORS[u % COLORS.length], 1, 0.8);
     }

@@ -103,6 +103,23 @@ export class DifferentialEvolution {
       const nextCost = np.where(better, trialCost, targetCost);
       return [nextPop, nextCost, sub(3)];
     });
+
+    this.index = np.array(Int32Array.from({ length: P }, (_, k) => k), { dtype: np.int32 });
+    this.injectFn = jit((pop, cost, row, s2v, tv, lo, hi, index) => {
+      const r = fold(row.reshape([1, D]), lo, hi);
+      const hit = np.equal(index, np.argmax(cost));
+      return [np.where(hit.reshape([P, 1]), r, pop), np.where(hit, batchCost(r, s2v, tv, components), cost)];
+    });
+  }
+
+  // Replace the worst member with the given parameter vector (e.g. a fine-tuned kernel).
+  inject(params) {
+    using row = np.array(Float32Array.from(params));
+    const [pop, cost] = this.injectFn(this.pop, this.cost, row, this.s2, this.target, this.lo, this.hi, this.index);
+    this.pop.dispose();
+    this.cost.dispose();
+    this.pop = pop;
+    this.cost = cost;
   }
 
   // Enqueue generations without reading back.
@@ -140,10 +157,11 @@ export class DifferentialEvolution {
   }
 
   dispose() {
-    for (const a of [this.pop, this.cost, this.key, this.s2, this.target, this.lo, this.hi, this.positions, ...this.roll]) {
+    for (const a of [this.pop, this.cost, this.key, this.s2, this.target, this.lo, this.hi, this.positions, this.index, ...this.roll]) {
       a.dispose();
     }
     this.costFn.dispose();
     this.stepFn.dispose();
+    this.injectFn.dispose();
   }
 }
