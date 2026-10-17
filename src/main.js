@@ -567,10 +567,12 @@ function syncDepthVideo() {
 async function initBlur() {
   try {
     state.blur = await BlurRenderer.create($("blurCanvas"));
-    useWorld();
   } catch (e) {
     $("blurStats").textContent = `WebGPU blur demo unavailable: ${e.message}`;
+    return;
   }
+  // The default video is loaded from another site; without it, start with the 3D world.
+  await useVideo(VIDEO_SAMPLES[0]).catch(() => useWorld());
 }
 
 // ---- wiring ---------------------------------------------------------------------------------
