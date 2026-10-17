@@ -1,0 +1,18 @@
+{
+  "name": "circular-kernel-optimizer",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Optimizer and WebGPU demo for circularly symmetric blur kernels built from complex Gaussians",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "smoke": "vite-node test/smoke.js"
+  },
+  "license": "MIT",
+  "type": "module",
+  "devDependencies": {
+    "vite": "^6.4.4",
+    "vite-node": "^3.2.4"
+  }
+}

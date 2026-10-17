@@ -1,0 +1,150 @@
+{
+  "name": "@hamk-uas/jax-js-nonconsuming",
+  "version": "0.12.14",
+  "description": "Numerical computing and ML in the browser",
+  "keywords": [
+    "machine learning",
+    "jax",
+    "numpy",
+    "numerical computing"
+  ],
+  "author": {
+    "name": "Eric Zhang",
+    "email": "ekzhang1@gmail.com",
+    "url": "https://www.ekzhang.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hamk-uas/jax-js-nonconsuming.git"
+  },
+  "type": "module",
+  "files": [
+    "/dist/*.{js,cjs,d.ts,d.cts}",
+    "/packages/optax/dist/*.{js,cjs,d.ts,d.cts}",
+    "/packages/loaders/dist/*.{js,cjs,d.ts,d.cts}",
+    "/packages/loaders/dist/chunk-*.js",
+    "/packages/onnx/dist/*.{js,cjs,d.ts,d.cts}",
+    "/packages/eslint-plugin/dist/*.{js,cjs,d.ts,d.cts}"
+  ],
+  "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./optax": {
+      "import": "./packages/optax/dist/index.js",
+      "require": "./packages/optax/dist/index.cjs"
+    },
+    "./loaders": {
+      "import": "./packages/loaders/dist/index.js",
+      "require": "./packages/loaders/dist/index.cjs"
+    },
+    "./onnx": {
+      "import": "./packages/onnx/dist/index.js",
+      "require": "./packages/onnx/dist/index.cjs"
+    },
+    "./eslint-plugin": {
+      "import": "./packages/eslint-plugin/dist/index.js",
+      "require": "./packages/eslint-plugin/dist/index.cjs"
+    },
+    "./dist/index.d.ts": {
+      "import": "./dist/index.d.ts",
+      "require": "./dist/index.d.cts"
+    }
+  },
+  "types": "dist/index.d.ts",
+  "module": "dist/index.js",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsdown",
+    "build:watch": "TSDOWN_WATCH_MODE=1 tsdown",
+    "check": "tsc",
+    "docs": "tsx typedoc.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint",
+    "prepare": "(tsdown || (tsdown --no-dts && tsc --declaration --emitDeclarationOnly --outDir dist)) && (husky || true)",
+    "test": "vitest",
+    "test:report": "vitest run --reporter=json --outputFile tmp/vitest-report.json",
+    "test:policy:strict": "pnpm run test:report && node scripts/check-test-status.mjs --mode strict --report tmp/vitest-report.json --manifest .ci/expected-failures.json",
+    "test:arch": "bash scripts/test-arch.sh",
+    "test:arch:record": "pnpm run test:report && node scripts/record-expected-failures.mjs --report tmp/vitest-report.json --manifest .ci/expected-failures.json",
+    "test:arch:record:custom": "pnpm run test:report && node scripts/record-expected-failures.mjs",
+    "test:eslint-plugin": "tsx --test packages/eslint-plugin/test/*.node.ts",
+    "test:website:smoke": "pnpm -C website build && vitest run --config test/vitest.website-smoke.config.ts",
+    "test:coverage": "vitest run --coverage && open coverage/index.html",
+    "test:gpu": "bash scripts/gpu-test.sh run",
+    "test:gpu:nvidia": "GPU=nvidia bash scripts/gpu-test.sh run",
+    "test:gpu:intel": "GPU=intel bash scripts/gpu-test.sh run",
+    "bench:gpu": "bash scripts/gpu-test.sh bench",
+    "bench:gpu:nvidia": "GPU=nvidia bash scripts/gpu-test.sh bench",
+    "bench:gpu:intel": "GPU=intel bash scripts/gpu-test.sh bench",
+    "lint:ownership:website": "pnpm exec eslint --no-ignore --rule 'jax-js/require-using:error' --rule 'jax-js/no-use-after-dispose:error' --rule 'jax-js/require-scan-result-dispose:error' website/src/routes/repl/*.ts",
+    "lint:scan-dispose:website": "pnpm exec eslint --no-ignore --rule 'jax-js/require-scan-result-dispose:error' website/src/routes/**/*.ts",
+    "lint:ownership:internal": "pnpm exec eslint --no-ignore --rule 'jax-js/require-retained-release:warn' --rule 'jax-js/require-try-finally-symmetry:warn' --rule 'jax-js/require-wrapper-dispose-symmetry:warn' src/frontend/{jaxpr,jit,jvp,linearize,vmap}.ts",
+    "prepublishOnly": "pnpm build && test -f dist/index.d.ts",
+    "postpublish": "git tag jax/v$npm_package_version && git push --tags"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.31.0",
+    "@types/debug": "^4.1.12",
+    "@vitest/browser-playwright": "^4.0.9",
+    "@vitest/coverage-v8": "4.0.9",
+    "@webgpu/types": "^0.1.68",
+    "eslint": "^9.31.0",
+    "eslint-plugin-import": "^2.32.0",
+    "globals": "^16.0.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.7",
+    "playwright": "~1.58.2",
+    "prettier": "^3.6.2",
+    "prettier-plugin-svelte": "^3.4.0",
+    "tsdown": "0.13.2",
+    "tsx": "^4.20.3",
+    "typedoc": "^0.28.14",
+    "typedoc-theme-fresh": "^0.2.3",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.46.4",
+    "vitest": "^4.0.9"
+  },
+  "optionalDependencies": {
+    "@bufbuild/protobuf": "^2.10.2",
+    "onnx-buf": "^1.20.0-1",
+    "sentencepiece-buf": "^0.2.1-0"
+  },
+  "packageManager": "pnpm@10.22.0",
+  "engines": {
+    "pnpm": ">=10.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "@tensorflow/tfjs-core>@webgpu/types": "^0.1.68"
+    }
+  },
+  "prettier": {
+    "plugins": [
+      "prettier-plugin-svelte"
+    ],
+    "overrides": [
+      {
+        "files": [
+          "*.md"
+        ],
+        "options": {
+          "printWidth": 100
+        }
+      }
+    ],
+    "proseWrap": "always"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yml,yaml,css,svelte,html}": [
+      "prettier --write"
+    ]
+  }
+}

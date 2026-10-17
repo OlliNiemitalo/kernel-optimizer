@@ -1,0 +1,200 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f1218;
+  --panel: #171b24;
+  --border: #2a2f3a;
+  --text: #dfe5f2;
+  --muted: #8b93a7;
+  --accent: #4cc9f0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  padding: 12px 20px 4px;
+}
+
+header h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+header p {
+  margin: 4px 0;
+  max-width: 1100px;
+  color: var(--muted);
+}
+
+a {
+  color: var(--accent);
+}
+
+main {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 14px;
+  padding: 10px 20px 24px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+.controls h2,
+.plots h2,
+.blur h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 14px 0 6px;
+}
+
+.controls h2:first-child,
+.blur h2 {
+  margin-top: 2px;
+}
+
+label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin: 5px 0;
+}
+
+label.check {
+  justify-content: flex-start;
+}
+
+input[type="number"],
+input[type="text"],
+select {
+  width: 96px;
+  background: #0f1218;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 5px;
+}
+
+.buttons {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+button {
+  background: #222838;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+button.primary {
+  background: #1f6f8b;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.note {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 4px 0;
+}
+
+.status {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.plot-controls,
+.blur-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  align-items: center;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.plot {
+  width: 100%;
+  height: 260px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.disc-wrap {
+  grid-row: span 2;
+}
+
+#disc {
+  width: 320px;
+  height: 320px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  image-rendering: pixelated;
+}
+
+textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0b0e13;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+}
+
+.blur {
+  grid-column: 1 / -1;
+}
+
+.blur-controls input[type="range"] {
+  width: 160px;
+}
+
+#blurCanvas {
+  display: block;
+  max-width: 100%;
+  margin-top: 8px;
+  border-radius: 6px;
+}
+
+@media (max-width: 1000px) {
+  main {
+    grid-template-columns: 1fr;
+  }
+  .grid {
+    grid-template-columns: 1fr;
+  }
+  .disc-wrap {
+    grid-row: auto;
+  }
+}
