@@ -57,7 +57,7 @@ function readProblem() {
     passSamples: Math.max(2, Math.round(num("passSamples"))),
     stopSamples: Math.max(2, Math.round(num("stopSamples"))),
     frequencyBands: $("frequencyBands").checked,
-    negativeWeight: Math.max(1, num("negWeight") || 1),
+    negativeWeight: Math.max(1, num("negGain") || 1),
   };
 }
 
@@ -128,7 +128,7 @@ function drawAll() {
   });
   drawError($("error"), { best, transition: problem.transition, ripple, xmax });
   drawConvergence($("convergence"), state.history);
-  drawDisc($("disc"), best, xmax, num("negGain"));
+  drawDisc($("disc"), best, xmax);
 }
 
 // ---- differential evolution ---------------------------------------------------------------
@@ -522,7 +522,7 @@ function wire() {
     observe(performance.now(), 0);
     if (wasRunning) setRunning(true);
   };
-  for (const id of ["components", "multiplicity", "transition", "passSamples", "stopSamples", "frequencyBands", "negWeight", "population", "F", "CR", "seed"]) {
+  for (const id of ["components", "multiplicity", "transition", "passSamples", "stopSamples", "frequencyBands", "negGain", "population", "F", "CR", "seed"]) {
     // The component count reacts while typing or stepping, not only when the field loses focus.
     $(id).addEventListener(id === "components" ? "input" : "change", () => {
       if (id === "components" && !(num("components") >= 1)) return;
@@ -557,7 +557,7 @@ function wire() {
     $("components").value = n;
     setMultiplicity(Array(n).fill(1));
     $("transition").value = 0.2;
-    $("negWeight").value = nonnegative ? NONNEGATIVE_WEIGHT : 1;
+    $("negGain").value = nonnegative ? NONNEGATIVE_WEIGHT : 1;
     // The non-negative sets don't follow the frequency-band heuristic (one is almost a plain Gaussian).
     $("frequencyBands").checked = !nonnegative;
     const params = nonnegative ? nonnegativePresetParams(n) : presetParams(n);
@@ -587,7 +587,7 @@ function wire() {
       setStatus(e.message);
     }
   };
-  for (const id of ["xmax", "showPopulation", "showComponents", "negGain"]) $(id).addEventListener("input", drawAll);
+  for (const id of ["xmax", "showPopulation", "showComponents"]) $(id).addEventListener("input", drawAll);
   $("radius").addEventListener("input", () => {
     $("radiusOut").textContent = $("radius").value;
     requestBlur(true);

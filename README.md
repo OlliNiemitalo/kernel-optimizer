@@ -239,8 +239,8 @@ in the plots. The pass band is sampled uniformly on $[0, 1]$. Following the arti
 samples are $x_t = 1 + \tau - \ln\frac{N - t}{N}$ for $t = 0 \dots N-1$: dense near the edge,
 sparse far out.
 
-**Negative values.** Negative kernel values look like cheap sharpening. The "Negative-value
-weight" $w$ multiplies the error wherever the kernel is negative:
+**Negative values.** Negative kernel values look like cheap sharpening. The "Negative gain" $w$
+(a problem parameter) multiplies the error wherever the kernel is negative:
 $\max_j |K(x_j) - \mathrm{target}_j| \cdot (w \text{ if } K(x_j) < 0 \text{ else } 1)$, in the
 differential evolution, the fine-tuning loss, and the displayed ripple alike. The presets include
 the article's two "almost no negative values" sets, which it gives in the separable form

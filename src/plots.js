@@ -165,11 +165,13 @@ export function drawConvergence(canvas, history) {
   ctx.restore();
 }
 
-// 2-D kernel K(√(x²+y²)); positive values warm, negative values blue with extra gain.
-export function drawDisc(canvas, best, xmax, negativeGain = 10) {
+// 2-D kernel K(√(x²+y²)) as light: positive values gray, negative values yellow, both with
+// brightness |K| sRGB-encoded.
+export function drawDisc(canvas, best, xmax) {
   const size = canvas.width;
   const ctx = canvas.getContext("2d");
   const img = ctx.createImageData(size, size);
+  const srgb = (v) => 255 * (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
   if (best) {
     const lutN = 2048;
     const rmax = xmax * Math.SQRT2;
@@ -180,17 +182,10 @@ export function drawDisc(canvas, best, xmax, negativeGain = 10) {
         const y = ((py + 0.5) / size - 0.5) * 2 * xmax;
         const v = lut[Math.min(lutN - 1, Math.round((Math.hypot(x, y) / rmax) * (lutN - 1)))];
         const o = (py * size + px) * 4;
-        if (v >= 0) {
-          const t = Math.min(v / 1.1, 1);
-          img.data[o] = 255 * Math.min(1, t * 1.6);
-          img.data[o + 1] = 255 * Math.pow(t, 1.4);
-          img.data[o + 2] = 255 * Math.pow(t, 3);
-        } else {
-          const t = Math.min(-v * negativeGain, 1);
-          img.data[o] = 40 * t;
-          img.data[o + 1] = 110 * t;
-          img.data[o + 2] = 255 * t;
-        }
+        const level = srgb(Math.min(Math.abs(v), 1));
+        img.data[o] = level;
+        img.data[o + 1] = level;
+        img.data[o + 2] = v >= 0 ? level : 0;
         img.data[o + 3] = 255;
       }
     }
