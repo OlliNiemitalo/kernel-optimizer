@@ -155,6 +155,9 @@ function setCurrent(params, source) {
   $("output").value =
     formatParams(state.current.params, problem, state.current.error) +
     `\n\n// Source: ${source}; ripple on the dense grid: ±${state.current.denseError.toFixed(6)}`;
+  // The preset menu shows which preset is current, if any.
+  const preset = /^article (non-negative )?preset \((\d) components\)$/.exec(source);
+  $("preset").value = preset ? `${preset[1] ? "nn" : ""}${preset[2]}` : "";
   if ($("follow").checked) requestBlur(true);
 }
 
@@ -641,7 +644,6 @@ function wire() {
     const params = nonnegative ? nonnegativePresetParams(n) : presetParams(n);
     setCurrent(sortByFrequency(params), `article ${nonnegative ? "non-negative " : ""}preset (${n} components)`);
     discardDE({ include: state.current.params });
-    $("preset").value = "";
   };
   $("finetune").onclick = fineTune;
   $("ftLr").addEventListener("input", () => delete $("ftLr").dataset.auto);

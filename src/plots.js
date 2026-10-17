@@ -165,8 +165,8 @@ export function drawConvergence(canvas, history) {
   ctx.restore();
 }
 
-// 2-D kernel K(√(x²+y²)) as light: positive values gray, negative values yellow, both with
-// brightness |K| sRGB-encoded.
+// 2-D kernel K(√(x²+y²)) as light, normalized to its peak: positive values gray, negative values
+// red, both with brightness |K| / max |K| sRGB-encoded.
 export function drawDisc(canvas, best, xmax) {
   const size = canvas.width;
   const ctx = canvas.getContext("2d");
@@ -176,15 +176,16 @@ export function drawDisc(canvas, best, xmax) {
     const lutN = 2048;
     const rmax = xmax * Math.SQRT2;
     const lut = Float64Array.from({ length: lutN }, (_, k) => profile(best, (k / (lutN - 1)) * rmax));
+    const peak = lut.reduce((m, v) => Math.max(m, Math.abs(v)), 1e-12);
     for (let py = 0; py < size; py++) {
       for (let px = 0; px < size; px++) {
         const x = ((px + 0.5) / size - 0.5) * 2 * xmax;
         const y = ((py + 0.5) / size - 0.5) * 2 * xmax;
-        const v = lut[Math.min(lutN - 1, Math.round((Math.hypot(x, y) / rmax) * (lutN - 1)))];
+        const v = lut[Math.min(lutN - 1, Math.round((Math.hypot(x, y) / rmax) * (lutN - 1)))] / peak;
         const o = (py * size + px) * 4;
         const level = srgb(Math.min(Math.abs(v), 1));
         img.data[o] = level;
-        img.data[o + 1] = level;
+        img.data[o + 1] = v >= 0 ? level : 0;
         img.data[o + 2] = v >= 0 ? level : 0;
         img.data[o + 3] = 255;
       }
