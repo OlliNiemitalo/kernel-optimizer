@@ -9,8 +9,9 @@ pass, at a cost proportional to the blur radius rather than its area.
   fallback).
 - **Live visualizations**: radial cross-section with the evolving population, error curve,
   convergence, and the 2-D kernel.
-- **Blur demo**: two hand-written WGSL compute shaders, with adjustable disc radius, f32 or f16
-  intermediates, and GPU timings per pass.
+- **Blur demo**: hand-written WGSL compute shaders processing one channel at a time, so memory
+  doesn't grow with the channel count. Uniform or spatially varying (tilt-shift) disc radius,
+  f32 or packed 16-bit intermediates, and GPU timings and memory use per buffer.
 
 Based on Olli Niemitalo,
 [Circularly symmetric convolution and lens blur](https://yehar.com/blog/?p=1495) (2010), extended
@@ -142,21 +143,41 @@ See [`src/blur.js`](src/blur.js). For a disc radius of $R$ pixels:
 1. **Taps.** Use $t = -K \dots K$ with $K = \lceil R(1+\tau) \rceil$, evaluating each 1-D kernel at
    $(t/R)^2$. Compute tap values in double precision on the CPU and upload them as complex f32
    pairs (separate tables for $h$ and $v$).
-2. **Normalization.** The 2-D kernel's sum factorizes, so it costs only $O(\text{taps})$ to compute:
-   $$S = \sum_n \mathrm{Re}\,\Bigl[\bigl(\textstyle\sum_t h_n(t)\bigr)\bigl(\textstyle\sum_t v_n(t)\bigr)\Bigr].$$
-   Divide the output by $S$ to preserve brightness.
-3. **Horizontal pass.** For each channel and color, compute the complex intermediate
-   $m_n(x, y) = \sum_t I(x + t, y)\, h_n(t)$. That is two real multiply-adds per tap, since the
-   input is real.
-4. **Vertical pass.** Compute
-   $J(x, y) = \frac{1}{S} \sum_n \sum_t \mathrm{Re}\,\bigl[m_n(x, y + t)\, v_n(t)\bigr]$.
-   Only the real part is formed. Each thread computes 8 consecutive rows, so every input row it
-   reads feeds up to 8 outputs. The tap table is zero-padded, so taps outside a row's window
-   contribute nothing and the loop has no bounds checks.
+2. **One channel at a time.** For each channel $n$, run a horizontal pass, then a vertical pass
+   that adds its result into an accumulator:
+   $$m(x, y) = \sum_t I(x + t, y)\, h_n(t), \qquad A(x, y) \mathrel{+}= \sum_t \mathrm{Re}\,\bigl[m(x, y + t)\, v_n(t)\bigr].$$
+   Only one channel's complex intermediate $m$ exists at a time, so memory does not grow with
+   the number of channels. The horizontal pass costs two real multiply-adds per tap (the input is
+   real); the vertical pass forms only the real part.
+3. **Normalization in the shader.** The passes filter a fourth lane holding a constant 1 together
+   with the color, so $A_w(x, y)$ is the sum of the 2-D kernel weights that reached the pixel. The
+   output is $A_\mathrm{rgb} / A_w$. For a uniform radius this equals dividing by the kernel's sum,
+   also at image edges. It needs no precomputed constant, and it stays brightness-preserving
+   when the radius varies across the image.
+4. **Register blocking.** Each thread computes 8 consecutive outputs along the pass direction.
+   As the loop walks the input, the 8 taps in use slide through registers, so every input sample
+   and tap is read once per thread instead of once per output. The tap tables are zero-padded,
+   so the sliding window needs no bounds checks.
 5. **Edges.** Out-of-image reads clamp to the nearest edge pixel.
 
-The cost per pixel, per color, per pass is (channels × taps) multiply-adds, so it grows linearly
-with the radius. The intermediate buffer holds channels × 3 colors × one complex value per pixel.
+The cost per pixel, per color, per pass is (channels × taps) complex multiply-adds, so it grows
+linearly with the radius.
+
+**Memory.** Besides the source image and the 4-lane accumulator (16 bytes per pixel each), the
+only working buffer is one channel's intermediate: 4 complex lanes, 32 bytes per pixel in f32. The
+"16-bit float (packed)" option stores each complex lane as two half floats in one `u32`
+(`pack2x16float`): 16 bytes per pixel, with no optional GPU feature needed. At 960×600 the
+intermediate is 17.6 MiB, or 8.8 MiB packed, whatever the number of channels. Keeping all
+channels at once would take channels × that.
+
+**Spatially varying radius.** With a per-pixel radius map (the "Tilt-shift" option), each pixel
+gathers with taps for its own radius, in both passes. Tap tables are precomputed for a geometric
+ladder of radii, six per octave from 1 pixel up to the map's maximum, and each pixel uses the
+nearest level. Level 0 is an exact identity, so in-focus pixels stay perfectly sharp. When the
+radius changes between rows, the vertical pass combines intermediates computed with
+neighbouring levels' horizontal kernels. The resulting 2-D kernel is then a smooth blend rather
+than an exact disc, which suits smoothly varying blur such as depth of field. This path does not
+use register blocking, because neighbouring pixels can use different tap counts.
 
 **Truncation and corners.** Truncating each 1-D kernel at $|t| \le K$ makes the 2-D support a
 square. Its corners reach $r = \sqrt{2}\,(1 + \tau)$, so the kernel must already be near zero
@@ -168,9 +189,9 @@ Disc kernels with several channels have large weights that cancel. The fitted we
 roughly 2.5× per channel, reaching about 100 at 5–6 channels, so small relative errors in the
 terms get amplified.
 
-- **Accumulate in f32.** Measured with an impulse input, the f32 implementation matched the exact
-  kernel to $2.8 \times 10^{-6}$ relative error. Storing the intermediates in f16 (the
-  "Intermediate storage" option) gave about $10^{-2}$ error with the 4-component preset.
+- **Accumulate in f32.** Measured with an impulse input against the exact kernel (4-component
+  preset), the f32 path has $2.5 \times 10^{-6}$ relative error, and the packed 16-bit
+  intermediate about $9 \times 10^{-3}$.
 - **Don't trust GPU `sin`/`cos` for kernel coefficients.** On the tested GPU they had about
   $6 \times 10^{-5}$ absolute error. That is negligible alone, but multiplied by weights near 100
   it exceeds a ripple of $\pm 0.004$. This app computes tap tables on the CPU, and the optimizer

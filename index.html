@@ -94,12 +94,15 @@
         <h2>WebGPU blur demo</h2>
         <div class="blur-controls">
           <label>Disc radius (px) <input id="radius" type="range" min="2" max="120" step="1" value="24" /> <output id="radiusOut">24</output></label>
+          <label>Blur
+            <select id="blurMode"><option value="uniform">Uniform</option><option value="tiltShift">Tilt-shift (varying radius, max = disc radius)</option></select>
+          </label>
           <label>Exposure <input id="exposure" type="range" min="-4" max="4" step="0.1" value="0" /> <output id="exposureOut">1.0×</output></label>
           <label>Tone map
             <select id="tonemap"><option value="1">Reinhard</option><option value="0">Clip</option></select>
           </label>
           <label>Intermediate storage
-            <select id="precision"><option value="f32">f32</option><option value="f16">f16</option></select>
+            <select id="precision"><option value="f32">f32</option><option value="f16">16-bit float (packed)</option></select>
           </label>
           <label class="check"><input id="follow" type="checkbox" checked /> Follow optimizer</label>
           <label class="check"><input id="showSource" type="checkbox" /> Show source</label>

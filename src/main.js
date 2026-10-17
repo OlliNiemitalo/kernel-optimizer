@@ -1,5 +1,5 @@
 import { _setCalibrationState, defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
-import { BlurRenderer } from "./blur.js";
+import { BlurRenderer, tiltShiftRadiusMap } from "./blur.js";
 import { DifferentialEvolution } from "./de.js";
 import { FineTuner } from "./finetune.js";
 import { drawConvergence, drawDisc, drawError, drawProfile } from "./plots.js";
@@ -272,6 +272,8 @@ async function renderBlur() {
     const radius = num("radius");
     if (blurKernelDirty) {
       state.blur.setKernel(state.current.params, radius, readProblem().transition);
+      const { width, height } = state.blur;
+      state.blur.setRadiusMap($("blurMode").value === "tiltShift" ? tiltShiftRadiusMap(width, height, radius) : null);
       blurKernelDirty = false;
     }
     const r = await state.blur.render({
@@ -285,10 +287,14 @@ async function renderBlur() {
       r.horizontalMs !== undefined
         ? `GPU time: horizontal ${r.horizontalMs.toFixed(2)} ms + vertical ${r.verticalMs.toFixed(2)} ms`
         : `${r.ms.toFixed(1)} ms round trip`;
+    const mib = (b) => (b / 2 ** 20).toFixed(1);
+    const m = r.memory;
+    const total = Object.values(m).reduce((a, b) => a + b, 0);
     $("blurStats").textContent =
-      `${state.blur.width}×${state.blur.height} px · ${state.blur.channels} separable channels × ${r.taps} taps per pass · ` +
-      `${(2 * state.blur.channels * r.taps).toLocaleString()} complex MACs per pixel per color · ` +
-      `intermediates ${r.f16 ? "f16" : "f32"} (${(r.midBytes / 2 ** 20).toFixed(1)} MiB) · ${gpu}`;
+      `${state.blur.width}×${state.blur.height} px · ${state.blur.channels} separable channels × ` +
+      (r.varying ? `up to ${r.taps} taps (${r.levels} radius levels)` : `${r.taps} taps`) + ` per pass · ` +
+      `GPU memory ${mib(total)} MiB (intermediate ${mib(m.intermediate)}, accumulator ${mib(m.accumulator)}, ` +
+      `source ${mib(m.source)}${m.radiusMap ? `, radius map ${mib(m.radiusMap)}` : ""}) · ${gpu}`;
   } catch (e) {
     $("blurStats").textContent = `Blur failed: ${e.message}`;
   } finally {
@@ -304,9 +310,6 @@ async function useImage(image) {
 async function initBlur() {
   try {
     state.blur = await BlurRenderer.create($("blurCanvas"));
-    if (!state.blur.supportsF16) {
-      $("precision").querySelector('[value="f16"]').disabled = true;
-    }
     await useImage(proceduralScene());
   } catch (e) {
     $("blurStats").textContent = `WebGPU blur demo unavailable: ${e.message}`;
@@ -383,6 +386,7 @@ function wire() {
     requestBlur();
   });
   for (const id of ["tonemap", "precision", "showSource"]) $(id).addEventListener("change", () => requestBlur());
+  $("blurMode").addEventListener("change", () => requestBlur(true));
   $("follow").addEventListener("change", () => requestBlur(true));
   $("imageFile").addEventListener("change", async () => {
     state.imageFile = $("imageFile").files[0] ?? null;
