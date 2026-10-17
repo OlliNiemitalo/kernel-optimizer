@@ -310,6 +310,7 @@ async function renderBlur() {
       precision: $("precision").value,
       showSource: $("showSource").checked,
       time: state.sceneTime,
+      invFocus: num("focus") ** 2,
     });
     lastBlurTime = now;
     const gpu = r.gpuMs
@@ -432,6 +433,12 @@ function wire() {
   $("radius").addEventListener("input", () => {
     $("radiusOut").textContent = $("radius").value;
     requestBlur(true);
+  });
+  // Slider position squared is 1 / distance: finer steps at long distances.
+  $("focus").addEventListener("input", () => {
+    const inv = num("focus") ** 2;
+    $("focusOut").textContent = inv > 0 ? `${(1 / inv).toPrecision(2)} m` : "∞";
+    requestBlur();
   });
   $("exposure").addEventListener("input", () => {
     $("exposureOut").textContent = `${Math.pow(2, num("exposure")).toFixed(2)}×`;

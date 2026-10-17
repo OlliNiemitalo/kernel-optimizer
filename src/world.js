@@ -1,7 +1,7 @@
 // Animated "game" scene rendered on the GPU: a night street ray-cast analytically per pixel. Writes
-// linear HDR color and, for depth of field, the circle of confusion from the z-buffer, with the
-// lens focused at infinity: radius A Z_REF / z pixels (A at distance Z_REF, capped at A), stored
-// negative because everything is in front of the focus.
+// linear HDR color and, for depth of field, the signed circle of confusion from the z-buffer:
+// A Z_REF (1/f - 1/z) pixels for focus distance f (A = blur at Z_REF with focus at infinity),
+// capped at ±A; negative in front of the focus.
 
 export const worldShader = /* wgsl */ `
 struct World {
@@ -10,6 +10,7 @@ struct World {
   time: f32,
   aperture: f32,   // circle-of-confusion radius at Z_REF and the largest radius, in pixels
   dof: u32,        // 1: write the circle of confusion
+  invFocus: f32,   // 1 / focus distance, 1/m (0 = infinity)
 }
 
 @group(0) @binding(0) var<uniform> W: World;
@@ -401,7 +402,7 @@ fn resolve(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= W.width * W.height) { return; }
   let s = scratch[id.x];
   color[id.x] = vec4f(s.rgb, 1.0);
-  if (W.dof == 1u) { coc[id.x] = -min(W.aperture * Z_REF * s.w, W.aperture); }
+  if (W.dof == 1u) { coc[id.x] = clamp(W.aperture * Z_REF * (W.invFocus - s.w), -W.aperture, W.aperture); }
 }
 `;
 
@@ -422,11 +423,12 @@ export class World {
 
   // Encodes one frame into `color` (vec4f per pixel) and, if `coc` is given, the circle of
   // confusion. `scratch` (16 bytes per pixel) is overwritten.
-  encode(encoder, { color, coc, scratch, width, height, time, aperture, timestampWrites }) {
+  encode(encoder, { color, coc, scratch, width, height, time, aperture, invFocus = 0, timestampWrites }) {
     const u = new ArrayBuffer(32);
     new Uint32Array(u, 0, 2).set([width, height]);
     new Float32Array(u, 8, 2).set([time, aperture]);
     new Uint32Array(u, 16, 1)[0] = coc ? 1 : 0;
+    new Float32Array(u, 20, 1)[0] = invFocus;
     this.device.queue.writeBuffer(this.uniform, 0, u);
     const bindGroup = this.device.createBindGroup({
       layout: this.layout,

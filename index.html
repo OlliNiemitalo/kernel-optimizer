@@ -98,9 +98,10 @@
             <select id="blurMode">
               <option value="uniform">Uniform</option>
               <option value="tiltShift">Tilt-shift (varying radius, max = disc radius)</option>
-              <option value="depth">Depth of field from the z-buffer (3D world, focused at infinity; disc radius at 2 m)</option>
+              <option value="depth">Depth of field from the z-buffer (3D world; disc radius = blur at 2 m with focus at infinity)</option>
             </select>
           </label>
+          <label>Focus distance <input id="focus" type="range" min="0" max="1" step="0.005" value="0" /> <output id="focusOut">∞</output></label>
           <label>Exposure <input id="exposure" type="range" min="-4" max="4" step="0.1" value="0" /> <output id="exposureOut">1.0×</output></label>
           <label>Tone map
             <select id="tonemap"><option value="1">Reinhard</option><option value="0">Clip</option></select>

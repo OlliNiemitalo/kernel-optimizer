@@ -11,8 +11,8 @@ pass, at a cost proportional to the blur radius rather than its area.
   convergence, and the 2-D kernel.
 - **Blur demo**: hand-written WGSL compute shaders processing one channel at a time, so memory
   doesn't grow with the channel count. Uniform or spatially varying disc radius: tilt-shift, or
-  depth of field from the z-buffer of an animated 3D night street ray-cast on the GPU, focused at
-  infinity. f32 or packed 16-bit intermediates, and GPU timings and memory use per
+  depth of field from the z-buffer of an animated 3D night street ray-cast on the GPU, with an
+  adjustable focus distance. f32 or packed 16-bit intermediates, and GPU timings and memory use per
   buffer. The "Shader code (WGSL)" panel shows the shaders, with copy and download buttons. Their
   header comments document the buffers, tap tables, and dispatch order, so you can use them
   elsewhere.
@@ -176,8 +176,8 @@ channels at once would take channels × that.
 
 **Spatially varying radius.** The radius comes from a per-pixel map: tilt-shift, or the 3D world's
 z-buffer turned into a signed circle of confusion (negative in front of the focus). For focus
-distance $f$ it is proportional to $1/f - 1/z$; the demo focuses at infinity, so the radius is
-$R \cdot 2\,\text{m}/z$, capped at $R$. Tap tables are precomputed for a geometric ladder of radii, six per octave
+distance $f$ it is proportional to $1/f - 1/z$: the demo uses $2R\,\text{m}\,(1/f - 1/z)$, capped at
+$\pm R$, so $R$ is the blur at 2 m with focus at infinity. Tap tables are precomputed for a geometric ladder of radii, six per octave
 from 1 pixel up to the largest radius, each normalized so its 2-D kernel sums to 1. Level 0 is an
 exact identity, so in-focus pixels stay perfectly sharp.
 
