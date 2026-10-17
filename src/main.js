@@ -1,6 +1,9 @@
 import { _setCalibrationState, defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
 import { BlurRenderer, shaderSource, tiltShiftRadiusMap } from "./blur.js";
 import { World } from "./world.js";
+import { VideoSource } from "./video.js";
+
+const SAMPLE_VIDEO = { url: `${import.meta.env.BASE_URL}tum-sitting-rgbd.mp4`, name: "TUM RGB-D fr3/sitting_static" };
 import { DifferentialEvolution } from "./de.js";
 import { FineTuner } from "./finetune.js";
 import { drawConvergence, drawDisc, drawError, drawProfile } from "./plots.js";
@@ -24,7 +27,8 @@ const state = {
   current: null, // { params, source, error, denseError }
   blur: null,
   world: null,
-  worldActive: false,
+  source: null, // "world", "video", "image" or "procedural"
+  video: null, // { element, source, name }
   sceneTime: 0,
   playing: true,
   captureNext: false,
@@ -277,25 +281,42 @@ let blurRendering = false;
 let lastBlurTime = 0;
 
 const FRAME = 1 / 30; // seconds per step
-const animating = () => state.worldActive && state.playing && !document.hidden;
+const hasDepth = () => state.source === "world" || state.source === "video";
+const animating = () => hasDepth() && state.playing && !document.hidden;
 
 function showSceneTime() {
   if (document.activeElement !== $("sceneTime")) $("sceneTime").value = state.sceneTime.toFixed(4);
 }
 
+// Video time is the video element's; the 3D world's advances with the wall clock while playing.
+function seekScene(time) {
+  state.sceneTime = Math.max(0, time);
+  if (state.source === "video") state.video.element.currentTime = state.sceneTime; // renders on "seeked"
+  else requestBlur();
+  showSceneTime();
+}
+
 function setPlaying(playing) {
   state.playing = playing;
   $("playPause").textContent = playing ? "Pause" : "Play";
+  if (state.source === "video") {
+    if (playing) state.video.element.play().catch(() => {});
+    else state.video.element.pause();
+  }
   lastBlurTime = 0;
   requestBlur();
 }
 
 function stepScene(frames) {
-  state.playing = false;
-  $("playPause").textContent = "Play";
-  state.sceneTime = Math.max(0, Math.round(state.sceneTime / FRAME + frames) * FRAME);
-  showSceneTime();
-  requestBlur();
+  setPlaying(false);
+  // Video frames are addressed at their middle, away from the boundaries between frames.
+  const offset = state.source === "video" ? 0.5 : 0;
+  seekScene((Math.round(state.sceneTime / FRAME - offset + frames) + offset) * FRAME);
+}
+
+function setFocusSlider(value) {
+  $("focus").value = value;
+  $("focus").dispatchEvent(new Event("input"));
 }
 
 function download(url, name) {
@@ -311,7 +332,10 @@ const VIEW_CONTROLS = ["radius", "blurMode", "focus", "exposure", "tonemap", "pr
 function viewState() {
   const controls = Object.fromEntries(VIEW_CONTROLS.map((id) => [id, $(id).type === "checkbox" ? $(id).checked : $(id).value]));
   return {
-    scene: state.worldActive ? "world" : state.imageFile ? `image: ${state.imageFile.name}` : "procedural",
+    scene:
+      state.source === "video" ? `video: ${state.video.name}`
+      : state.source === "image" ? `image: ${state.imageFile?.name}`
+      : state.source,
     time: state.sceneTime,
     playing: state.playing,
     controls,
@@ -323,9 +347,10 @@ function viewState() {
   };
 }
 
-function applyViewState(view) {
-  if (view.scene === "world" && !state.worldActive) useWorld();
-  if (view.scene === "procedural") useImage(proceduralScene());
+async function applyViewState(view) {
+  if (view.scene === "world" && state.source !== "world") useWorld();
+  if (view.scene === "procedural") useImage(proceduralScene(), "procedural");
+  if (view.scene === `video: ${SAMPLE_VIDEO.name}` && state.video?.name !== SAMPLE_VIDEO.name) await useVideo(SAMPLE_VIDEO.url, SAMPLE_VIDEO.name);
   for (const [id, value] of Object.entries(view.controls ?? {})) {
     if (!VIEW_CONTROLS.includes(id)) continue;
     if ($(id).type === "checkbox") $(id).checked = value;
@@ -339,10 +364,8 @@ function applyViewState(view) {
     setCurrent(view.kernel, "view state");
     discardDE({ include: state.current.params });
   }
-  state.playing = !!view.playing;
-  $("playPause").textContent = state.playing ? "Pause" : "Play";
-  state.sceneTime = Math.max(0, Number(view.time) || 0);
-  showSceneTime();
+  setPlaying(!!view.playing);
+  seekScene(Number(view.time) || 0);
   lastBlurTime = 0;
   requestBlur(true);
 }
@@ -369,12 +392,13 @@ async function renderBlur() {
       state.blur.setKernel(state.current.params, radius, readProblem().transition);
       const { width, height } = state.blur;
       const mode = $("blurMode").value;
-      if (mode === "depth" && state.worldActive) state.blur.setDepthOfField();
+      if (mode === "depth" && hasDepth()) state.blur.setDepthOfField();
       else state.blur.setRadiusMap(mode === "tiltShift" ? tiltShiftRadiusMap(width, height, radius) : null);
       blurKernelDirty = false;
     }
     const now = performance.now();
-    if (animating() && lastBlurTime) state.sceneTime += Math.min(0.1, (now - lastBlurTime) / 1000);
+    if (state.source === "video") state.sceneTime = state.video.element.currentTime;
+    else if (animating() && lastBlurTime) state.sceneTime += Math.min(0.1, (now - lastBlurTime) / 1000);
     showSceneTime();
     const capture = state.captureNext;
     state.captureNext = false;
@@ -387,7 +411,8 @@ async function renderBlur() {
       invFocus: num("focus") ** 2,
       capture,
     });
-    if (r.png) download(r.png, state.worldActive ? `street-t${state.sceneTime.toFixed(4)}s.png` : "blur.png");
+    const prefix = { world: "street", video: "video" }[state.source];
+    if (r.png) download(r.png, prefix ? `${prefix}-t${state.sceneTime.toFixed(4)}s.png` : "blur.png");
     lastBlurTime = now;
     const gpu = r.gpuMs
       ? "GPU time: " + Object.entries(r.gpuMs).map(([k, ms]) => `${k} ${ms.toFixed(2)} ms`).join(" + ")
@@ -410,18 +435,53 @@ async function renderBlur() {
   }
 }
 
-async function useImage(image) {
-  state.worldActive = false;
+function stopVideo() {
+  if (!state.video) return;
+  state.video.element.pause();
+  state.video.element.removeAttribute("src");
+  state.video.element.load();
+  state.video = null;
+  $("videoCredit").hidden = true;
+}
+
+async function useImage(image, source = "image") {
+  stopVideo();
+  state.source = source;
   state.blur.setImage(image.rgba, image.width, image.height);
   if ($("blurMode").value === "depth") $("blurMode").value = "uniform";
   requestBlur(true);
 }
 
 function useWorld() {
+  stopVideo();
   state.world ??= new World(state.blur.device);
-  state.blur.setWorld(state.world, 960, 600);
-  state.worldActive = true;
+  state.blur.setAnimated(state.world, 960, 600);
+  state.source = "world";
   $("blurMode").value = "depth";
+  setFocusSlider(0);
+  requestBlur(true);
+}
+
+// An RGB-D video: color on top, inverse depth below (see video.js).
+async function useVideo(url, name) {
+  stopVideo();
+  const element = document.createElement("video");
+  Object.assign(element, { muted: true, loop: true, playsInline: true, src: url });
+  await new Promise((resolve, reject) => {
+    element.onloadeddata = resolve;
+    element.onerror = () => reject(new Error(`Could not load the video ${name}.`));
+  });
+  element.addEventListener("seeked", () => requestBlur());
+  const source = new VideoSource(state.blur.device, element);
+  source.boost = num("boost");
+  state.video = { element, source, name };
+  $("videoCredit").hidden = name !== SAMPLE_VIDEO.name;
+  state.blur.setAnimated(source, source.width, source.height);
+  state.source = "video";
+  state.sceneTime = 0;
+  $("blurMode").value = "depth";
+  setFocusSlider(0.75); // 1.8 m: the people in the sample clip
+  setPlaying(state.playing);
   requestBlur(true);
 }
 
@@ -533,29 +593,46 @@ function wire() {
   $("blurMode").addEventListener("change", () => requestBlur(true));
   $("follow").addEventListener("change", () => requestBlur(true));
   $("imageFile").addEventListener("change", async () => {
-    state.imageFile = $("imageFile").files[0] ?? null;
-    if (state.imageFile && state.blur) await useImage(await loadImage(state.imageFile, num("boost")));
+    const file = $("imageFile").files[0];
+    if (!file || !state.blur) return;
+    try {
+      if (file.type.startsWith("video/")) {
+        state.imageFile = null;
+        await useVideo(URL.createObjectURL(file), file.name);
+      } else {
+        state.imageFile = file;
+        await useImage(await loadImage(file, num("boost")));
+      }
+    } catch (e) {
+      $("blurStats").textContent = e.message;
+    }
   });
   $("boost").addEventListener("change", async () => {
-    if (state.imageFile && state.blur) await useImage(await loadImage(state.imageFile, num("boost")));
+    if (state.video) {
+      state.video.source.boost = num("boost");
+      requestBlur();
+    }
+    if (state.imageFile && state.source === "image" && state.blur) await useImage(await loadImage(state.imageFile, num("boost")));
   });
   $("sceneButton").onclick = () => {
     state.imageFile = null;
     $("imageFile").value = "";
-    if (state.blur) useImage(proceduralScene());
+    if (state.blur) useImage(proceduralScene(), "procedural");
   };
   $("worldButton").onclick = () => {
     state.imageFile = null;
     $("imageFile").value = "";
     if (state.blur) useWorld();
   };
+  $("videoButton").onclick = () => {
+    state.imageFile = null;
+    $("imageFile").value = "";
+    if (state.blur) useVideo(SAMPLE_VIDEO.url, SAMPLE_VIDEO.name).catch((e) => ($("blurStats").textContent = e.message));
+  };
   $("playPause").onclick = () => setPlaying(!state.playing);
   $("stepBack").onclick = () => stepScene(-1);
   $("stepForward").onclick = () => stepScene(1);
-  $("sceneTime").addEventListener("change", () => {
-    state.sceneTime = Math.max(0, num("sceneTime") || 0);
-    requestBlur();
-  });
+  $("sceneTime").addEventListener("change", () => seekScene(num("sceneTime") || 0));
   $("saveFrame").onclick = () => {
     state.captureNext = true;
     requestBlur();
@@ -565,7 +642,7 @@ function wire() {
     $("copyView").textContent = "Copied";
     setTimeout(() => ($("copyView").textContent = "Copy view state"), 1500);
   };
-  $("applyView").onclick = () => {
+  $("applyView").onclick = async () => {
     const box = $("viewState");
     if (box.hidden) {
       box.hidden = false;
@@ -573,7 +650,7 @@ function wire() {
       return;
     }
     try {
-      applyViewState(JSON.parse(box.value));
+      await applyViewState(JSON.parse(box.value));
       box.hidden = true;
     } catch (e) {
       setStatus(`Could not apply view state: ${e.message}`);

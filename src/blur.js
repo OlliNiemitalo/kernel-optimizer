@@ -454,7 +454,7 @@ export class BlurRenderer {
       ].map((e, binding) => ({ binding, ...e })),
     });
     this.varying = null; // null, { kind: "map", maxRadius } or { kind: "depth" }
-    this.world = null;
+    this.animated = null;
   }
 
   computePipelines(packed) {
@@ -482,10 +482,11 @@ export class BlurRenderer {
     this.device.queue.writeBuffer(this.source, 0, rgba);
   }
 
-  // Renders `world` (see world.js) into the source every frame.
-  setWorld(world, width, height) {
+  // Renders an animated source (World in world.js, VideoSource in video.js) into the source image
+  // every frame; it also supplies the depth for depth of field.
+  setAnimated(source, width, height) {
     this.resize(width, height);
-    this.world = world;
+    this.animated = source;
   }
 
   resize(width, height) {
@@ -504,7 +505,7 @@ export class BlurRenderer {
     this.levelMaps = null;
     this.tiles = null;
     this.varying = null;
-    this.world = null;
+    this.animated = null;
     this.tablesDirty = true;
   }
 
@@ -535,9 +536,9 @@ export class BlurRenderer {
     this.tablesDirty = true;
   }
 
-  // Radius from the world's z-buffer: the disc radius is the blur at 2 m with focus at infinity.
+  // Radius from the animated source's depth: the disc radius is the blur at 2 m with focus at infinity.
   setDepthOfField() {
-    if (!this.world) throw new Error("Depth of field needs the 3D world.");
+    if (!this.animated) throw new Error("Depth of field needs the 3D world or an RGB-D video.");
     this.ensureVaryingBuffers();
     this.varying = { kind: "depth" };
     this.tablesDirty = true;
@@ -639,7 +640,7 @@ export class BlurRenderer {
   }
 
   // Runs the passes and draws; resolves with timings once the GPU has finished. `time` and
-  // `invFocus` (1 / focus distance in 1/m) drive the 3D world. `capture` returns the frame as a
+  // `invFocus` (1 / focus distance in 1/m) drive the animated source. `capture` returns the frame as a
   // PNG data URL.
   async render({ exposure = 1, tonemap = 1, precision = "f32", showSource = false, time = 0, invFocus = 0, capture = false } = {}) {
     if (this.tablesDirty) this.buildTables();
@@ -691,8 +692,8 @@ export class BlurRenderer {
       const k = 2 * (labels.length - 1);
       return { querySet: this.querySet, beginningOfPassWriteIndex: k, endOfPassWriteIndex: k + 1 };
     };
-    if (this.world) {
-      this.world.encode(encoder, {
+    if (this.animated) {
+      this.animated.encode(encoder, {
         color: this.source,
         coc: this.varying?.kind === "depth" ? this.radiusBuffer : null,
         scratch: this.acc, // free until the blur passes overwrite it
