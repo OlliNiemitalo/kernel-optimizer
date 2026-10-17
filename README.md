@@ -11,8 +11,8 @@ pass, at a cost proportional to the blur radius rather than its area.
   convergence, and the 2-D kernel.
 - **Blur demo**: hand-written WGSL compute shaders processing one channel at a time, so memory
   doesn't grow with the channel count. Uniform or spatially varying disc radius: tilt-shift, or
-  depth of field from the z-buffer of an animated 3D night street ray-cast on the GPU (click to
-  set the autofocus point). f32 or packed 16-bit intermediates, and GPU timings and memory use per
+  depth of field from the z-buffer of an animated 3D night street ray-cast on the GPU, focused at
+  infinity. f32 or packed 16-bit intermediates, and GPU timings and memory use per
   buffer. The "Shader code (WGSL)" panel shows the shaders, with copy and download buttons. Their
   header comments document the buffers, tap tables, and dispatch order, so you can use them
   elsewhere.
@@ -175,8 +175,9 @@ intermediate is 17.6 MiB, or 8.8 MiB packed, whatever the number of channels. Ke
 channels at once would take channels × that.
 
 **Spatially varying radius.** The radius comes from a per-pixel map: tilt-shift, or the 3D world's
-z-buffer turned into a signed circle of confusion $c = R\,(1 - f/z)$ for focus distance $f$ (negative
-in front of the focus). Tap tables are precomputed for a geometric ladder of radii, six per octave
+z-buffer turned into a signed circle of confusion (negative in front of the focus). For focus
+distance $f$ it is proportional to $1/f - 1/z$; the demo focuses at infinity, so the radius is
+$R \cdot 2\,\text{m}/z$, capped at $R$. Tap tables are precomputed for a geometric ladder of radii, six per octave
 from 1 pixel up to the largest radius, each normalized so its 2-D kernel sums to 1. Level 0 is an
 exact identity, so in-focus pixels stay perfectly sharp.
 
@@ -295,7 +296,7 @@ candidates per second.
 | `src/model.js`, `src/trig.js` | Traced (jax-js) kernel profile and accurate sine and cosine |
 | `src/de.js`, `src/finetune.js` | Differential evolution and gradient fine-tuning |
 | `src/blur.js` | WebGPU blur: WGSL compute and display shaders |
-| `src/world.js` | Animated 3D night street ray-cast on the GPU, autofocus, z-buffer to circle of confusion |
+| `src/world.js` | Animated 3D night street ray-cast on the GPU, with the circle of confusion from the z-buffer |
 | `src/plots.js`, `src/scene.js`, `src/main.js` | Plots, procedural HDR test scene, user interface |
 | `test/smoke.js` | Checks the math and runs the optimizer and fine-tuner in Node |
 | `test/merged-de.js` | Experiment: DE convergence with and without merged pairs |

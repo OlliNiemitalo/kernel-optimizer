@@ -98,7 +98,7 @@
             <select id="blurMode">
               <option value="uniform">Uniform</option>
               <option value="tiltShift">Tilt-shift (varying radius, max = disc radius)</option>
-              <option value="depth">Depth of field from the z-buffer (3D world; disc radius at infinity)</option>
+              <option value="depth">Depth of field from the z-buffer (3D world, focused at infinity; disc radius at 2 m)</option>
             </select>
           </label>
           <label>Exposure <input id="exposure" type="range" min="-4" max="4" step="0.1" value="0" /> <output id="exposureOut">1.0×</output></label>
@@ -116,7 +116,6 @@
           <button id="sceneButton">Procedural scene</button>
           <label class="check"><input id="animate" type="checkbox" checked /> Animate</label>
         </div>
-        <p class="note">3D world: click the image to set the autofocus point.</p>
         <p id="blurStats" class="status"></p>
         <canvas id="blurCanvas"></canvas>
         <details id="shaderPanel">

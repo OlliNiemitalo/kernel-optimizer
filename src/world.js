@@ -1,24 +1,23 @@
 // Animated "game" scene rendered on the GPU: a night street ray-cast analytically per pixel. Writes
-// linear HDR color and a z-buffer, then (for depth of field) autofocuses and turns depth into a
-// signed circle of confusion in pixels: negative in front of the focus distance, positive behind.
+// linear HDR color and, for depth of field, the circle of confusion from the z-buffer, with the
+// lens focused at infinity: radius A Z_REF / z pixels (A at distance Z_REF, capped at A), stored
+// negative because everything is in front of the focus.
 
 export const worldShader = /* wgsl */ `
 struct World {
   width: u32,
   height: u32,
   time: f32,
-  aperture: f32,   // circle-of-confusion radius at infinity, in pixels
-  focusX: f32,     // autofocus point, as fractions of the image size
-  focusY: f32,
-  dof: u32,        // 1: write depth and circle of confusion
+  aperture: f32,   // circle-of-confusion radius at Z_REF and the largest radius, in pixels
+  dof: u32,        // 1: write the circle of confusion
 }
 
 @group(0) @binding(0) var<uniform> W: World;
 @group(0) @binding(1) var<storage, read_write> color: array<vec4f>;
-@group(0) @binding(2) var<storage, read_write> depth: array<f32>;  // view depth, then signed CoC
-@group(0) @binding(3) var<storage, read_write> focus: array<f32>;  // [0]: smoothed 1 / focus distance
+@group(0) @binding(2) var<storage, read_write> coc: array<f32>;
 
 const FAR = 1e4;
+const Z_REF = 2.0;
 const LAMP_SPACING = 15.0;
 const LAMP_LIGHT = vec3f(30.0, 21.0, 11.0);
 const BLOCK = 20.0;
@@ -196,8 +195,6 @@ fn trace(o: vec3f, d: vec3f, time: f32) -> Hit {
 
 fn skyColor(d: vec3f) -> vec3f {
   var sky = mix(vec3f(0.03, 0.025, 0.05), vec3f(0.005, 0.008, 0.025), sqrt(max(d.y, 0.0)));
-  let cell = floor(vec2f(atan2(d.z, d.x), asin(clamp(d.y, -1.0, 1.0))) * 500.0);
-  if (d.y > 0.02 && hash(cell) < 0.004) { sky += vec3f(1.0, 0.95, 0.85) * (2.0 + 30.0 * hash(cell + 1.7)); }
   let moon = dot(d, normalize(vec3f(-0.4, 0.45, 1.0)));
   sky += select(vec3f(0.0), vec3f(6.0, 5.8, 5.0), moon > 0.99965) + vec3f(0.2, 0.2, 0.25) * pow(max(moon, 0.0), 400.0);
   return sky;
@@ -232,31 +229,7 @@ fn scene(@builtin(global_invocation_id) id: vec3u) {
   }
   let i = id.y * W.width + id.x;
   color[i] = vec4f(c, 1.0);
-  if (W.dof == 1u) { depth[i] = z; }
-}
-
-// Mean inverse depth around the focus point, smoothed over frames like a camera's focus pull.
-@compute @workgroup_size(1)
-fn autofocus() {
-  let cx = i32(W.focusX * f32(W.width));
-  let cy = i32(W.focusY * f32(W.height));
-  var sum = 0.0;
-  for (var dy = -3; dy <= 3; dy++) {
-    for (var dx = -3; dx <= 3; dx++) {
-      let x = clamp(cx + dx * 2, 0, i32(W.width) - 1);
-      let y = clamp(cy + dy * 2, 0, i32(W.height) - 1);
-      sum += 1.0 / depth[u32(y) * W.width + u32(x)];
-    }
-  }
-  let aim = sum / 49.0;
-  focus[0] = select(mix(focus[0], aim, 0.15), aim, focus[0] <= 0.0);
-}
-
-@compute @workgroup_size(64)
-fn coc(@builtin(global_invocation_id) id: vec3u) {
-  if (id.x >= W.width * W.height) { return; }
-  let z = depth[id.x];
-  depth[id.x] = clamp(W.aperture * (1.0 - 1.0 / max(z * focus[0], 1e-6)), -W.aperture, W.aperture);
+  if (W.dof == 1u) { coc[i] = -min(W.aperture * Z_REF / z, W.aperture); }
 }
 `;
 
@@ -264,45 +237,28 @@ export class World {
   constructor(device) {
     this.device = device;
     const module = device.createShaderModule({ code: worldShader });
-    const make = (entryPoint) => device.createComputePipeline({ layout: "auto", compute: { module, entryPoint } });
-    this.scene = make("scene");
-    this.autofocus = make("autofocus");
-    this.coc = make("coc");
+    this.scene = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "scene" } });
     this.uniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.focus = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE });
-    this.noDepth = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE });
+    this.noCoc = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE });
   }
 
-  // Encodes one frame into `color` (vec4f per pixel) and, if `depth` is given, the signed CoC.
-  encode(encoder, { color, depth, width, height, time, aperture, focusX = 0.5, focusY = 0.75, timestampWrites }) {
+  // Encodes one frame into `color` (vec4f per pixel) and, if `coc` is given, the circle of confusion.
+  encode(encoder, { color, coc, width, height, time, aperture, timestampWrites }) {
     const u = new ArrayBuffer(32);
     new Uint32Array(u, 0, 2).set([width, height]);
-    new Float32Array(u, 8, 4).set([time, aperture, focusX, focusY]);
-    new Uint32Array(u, 24, 1)[0] = depth ? 1 : 0;
+    new Float32Array(u, 8, 2).set([time, aperture]);
+    new Uint32Array(u, 16, 1)[0] = coc ? 1 : 0;
     this.device.queue.writeBuffer(this.uniform, 0, u);
-    const bind = (pipeline) =>
+    const pass = encoder.beginComputePass(timestampWrites ? { timestampWrites } : {});
+    pass.setPipeline(this.scene);
+    pass.setBindGroup(
+      0,
       this.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries: [this.uniform, color, depth ?? this.noDepth, this.focus]
-          .map((buffer, binding) => ({ binding, resource: { buffer } }))
-          .filter(({ binding }) => pipeline === this.scene ? binding < 3 : binding !== 1),
-      });
-    // Separate passes: dispatches within one pass were not reliably ordered on Intel Gen9.
-    const steps = [[this.scene, [Math.ceil(width / 8), Math.ceil(height / 8)]]];
-    if (depth) steps.push([this.autofocus, [1]], [this.coc, [Math.ceil((width * height) / 64)]]);
-    steps.forEach(([pipeline, workgroups], k) => {
-      const first = k === 0;
-      const last = k === steps.length - 1;
-      const writes = timestampWrites && (first || last) && {
-        querySet: timestampWrites.querySet,
-        ...(first && { beginningOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex }),
-        ...(last && { endOfPassWriteIndex: timestampWrites.endOfPassWriteIndex }),
-      };
-      const pass = encoder.beginComputePass(writes ? { timestampWrites: writes } : {});
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, bind(pipeline));
-      pass.dispatchWorkgroups(...workgroups);
-      pass.end();
-    });
+        layout: this.scene.getBindGroupLayout(0),
+        entries: [this.uniform, color, coc ?? this.noCoc].map((buffer, binding) => ({ binding, resource: { buffer } })),
+      }),
+    );
+    pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
+    pass.end();
   }
 }

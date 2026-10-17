@@ -26,7 +26,6 @@ const state = {
   world: null,
   worldActive: false,
   sceneTime: 0,
-  focus: [0.5, 0.75],
   imageFile: null,
 };
 
@@ -311,7 +310,6 @@ async function renderBlur() {
       precision: $("precision").value,
       showSource: $("showSource").checked,
       time: state.sceneTime,
-      focus: state.focus,
     });
     lastBlurTime = now;
     const gpu = r.gpuMs
@@ -475,12 +473,6 @@ function wire() {
   document.addEventListener("visibilitychange", () => {
     lastBlurTime = 0;
     if (animating()) requestBlur();
-  });
-  $("blurCanvas").addEventListener("click", (e) => {
-    if (!state.worldActive) return;
-    const box = $("blurCanvas").getBoundingClientRect();
-    state.focus = [(e.clientX - box.left) / box.width, (e.clientY - box.top) / box.height];
-    requestBlur();
   });
   window.addEventListener("resize", drawAll);
 }

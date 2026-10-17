@@ -532,7 +532,7 @@ export class BlurRenderer {
     this.tablesDirty = true;
   }
 
-  // Radius from the world's z-buffer: up to the disc radius, in front of and behind the focus.
+  // Radius from the world's z-buffer, focused at infinity: the disc radius at 2 m, capped there.
   setDepthOfField() {
     if (!this.world) throw new Error("Depth of field needs the 3D world.");
     this.ensureVaryingBuffers();
@@ -635,9 +635,9 @@ export class BlurRenderer {
     };
   }
 
-  // Runs the passes and draws; resolves with timings once the GPU has finished. `time` and
-  // `focus` ([x, y] as fractions of the image) drive the 3D world.
-  async render({ exposure = 1, tonemap = 1, precision = "f32", showSource = false, time = 0, focus = [0.5, 0.75] } = {}) {
+  // Runs the passes and draws; resolves with timings once the GPU has finished. `time` drives the
+  // 3D world.
+  async render({ exposure = 1, tonemap = 1, precision = "f32", showSource = false, time = 0 } = {}) {
     if (this.tablesDirty) this.buildTables();
     const packed = precision === "f16";
     const { width, height, device } = this;
@@ -690,13 +690,11 @@ export class BlurRenderer {
     if (this.world) {
       this.world.encode(encoder, {
         color: this.source,
-        depth: this.varying?.kind === "depth" ? this.radiusBuffer : null,
+        coc: this.varying?.kind === "depth" ? this.radiusBuffer : null,
         width,
         height,
         time,
         aperture: this.kernelSpec.radius,
-        focusX: focus[0],
-        focusY: focus[1],
         timestampWrites: timestampWrites("scene"),
       });
     }
