@@ -23,6 +23,7 @@ const LAMP_SPACING = 15.0;
 const LAMP_LIGHT = vec3f(30.0, 21.0, 11.0);
 const BLOCK = 20.0;
 const STREET = 8.0;    // facade distance from the street center
+const BACK = 30.0;     // back of the buildings, and the next street's facades
 const SPEED = 4.0;     // camera speed, m/s
 
 fn hash(p: vec2f) -> f32 {
@@ -124,9 +125,41 @@ fn lampRange(o: vec3f, d: vec3f, span: vec2f, side: f32) -> vec2f {
   return vec2f(floor(min(za, zb) / LAMP_SPACING - off - 0.02), ceil(max(za, zb) / LAMP_SPACING - off + 0.02));
 }
 
+// A building face at ray parameter t with normal n: wall with lit windows, and neon shop signs on
+// the street side. u runs along the face; px is the pixel footprint in radians.
+fn building(o: vec3f, d: vec3f, t: f32, n: vec3f, block: f32, s: f32, time: f32, px: f32) -> Hit {
+  let p = o + t * d;
+  let street = abs(n.x) > 0.5;
+  let u = select(abs(p.x) - STREET, p.z - block * BLOCK, street);
+  let footU = t * px / max(abs(select(d.z, d.x, street)), 1e-3);
+  let footY = t * px;
+  let wall = mix(vec3f(0.07, 0.06, 0.055), vec3f(0.05, 0.06, 0.08), hash(vec2f(block, s + 7.0)));
+  var albedo = wall;
+  var emission = vec3f(0.0);
+  let cell = floor(vec2f(u / 2.5, p.y / 3.2)) + select(vec2f(50.0, 0.0), vec2f(0.0), street);
+  let f = fract(vec2f(u / 2.5, p.y / 3.2));
+  if (p.y > 3.5 && f.x > 0.2 && f.x < 0.8 && f.y > 0.3 && f.y < 0.8) {
+    let r = hash(cell + vec2f(block * 13.0, s * 71.0));
+    let warm = hash(cell + vec2f(5.0, block)) < 0.75;
+    let on = r < 0.35 && fract(time * 0.05 + r * 37.0) > 0.03;
+    albedo = vec3f(0.02);
+    emission = select(vec3f(0.0), select(vec3f(0.6, 0.8, 1.2), vec3f(1.4, 0.9, 0.45), warm) * (1.0 + 12.0 * r), on);
+  }
+  // Beyond about one window per pixel, fade to the windows' average (30% glass, 34% lit).
+  let blend = smoothstep(0.3, 1.0, max(footU / 2.5, footY / 3.2)) * inside(p.y, footY, 3.5, 1e9);
+  albedo = mix(albedo, mix(wall, vec3f(0.02), 0.3), blend);
+  emission = mix(emission, vec3f(0.379, 0.276, 0.201), blend);
+  let shop = hash(vec2f(block, s + 3.0));
+  if (street && shop < 0.6) {
+    let hue = shop * 10.0;
+    let neon = (0.5 + 0.5 * cos(hue + vec3f(0.0, 2.1, 4.2))) * 6.0 * (0.8 + 0.2 * sin(time * 9.0 + hue));
+    emission += neon * inside(p.y, footY, 2.6, 2.85) * inside(u, footU, 3.0, 13.0);
+  }
+  return Hit(t, albedo, emission, n);
+}
+
 // px: pixel footprint in radians, for prefiltering.
-fn trace(o: vec3f, d: vec3f, time: f32, px: f32) -> Hit {
-  var hit = Hit(FAR, vec3f(0.0), vec3f(0.0), vec3f(0.0, 1.0, 0.0));
+fn trace(o: vec3f, d: vec3f, time: f32, px: f32) -> Hit {  var hit = Hit(FAR, vec3f(0.0), vec3f(0.0), vec3f(0.0, 1.0, 0.0));
 
   // Street, curbs, lane markings, and sidewalks.
   if (d.y < 0.0) {
@@ -143,41 +176,32 @@ fn trace(o: vec3f, d: vec3f, time: f32, px: f32) -> Hit {
     hit = Hit(t, albedo, vec3f(0.0), vec3f(0.0, 1.0, 0.0));
   }
 
-  // Building facades with lit windows and neon shop signs.
-  if (abs(d.x) > 1e-4) {
-    let side = sign(d.x);
-    let t = (side * STREET - o.x) / d.x;
-    let p = o + t * d;
-    let block = floor(p.z / BLOCK);
+  // Buildings: one box per block and side, 16 m along the street with a 4 m alley to the next,
+  // walls with lit windows on every face, neon shop signs on the street faces.
+  for (var side = -1.0; side <= 1.0; side += 2.0) {
     let s = select(0.0, 1.0, side > 0.0);
-    let local = p.z - block * BLOCK;
-    if (t > 0.0 && t < hit.t && p.y < 9.0 + 28.0 * hash(vec2f(block, s))) {
-      let footY = t * px;
-      let footZ = t * px / abs(d.x);
-      let wall = mix(vec3f(0.07, 0.06, 0.055), vec3f(0.05, 0.06, 0.08), hash(vec2f(block, s + 7.0)));
-      var albedo = wall;
-      var emission = vec3f(0.0);
-      let cell = floor(vec2f(local / 2.5, p.y / 3.2));
-      let f = fract(vec2f(local / 2.5, p.y / 3.2));
-      if (p.y > 3.5 && f.x > 0.2 && f.x < 0.8 && f.y > 0.3 && f.y < 0.8) {
-        let r = hash(cell + vec2f(block * 13.0, s * 71.0));
-        let warm = hash(cell + vec2f(5.0, block)) < 0.75;
-        let on = r < 0.35 && fract(time * 0.05 + r * 37.0) > 0.03;
-        albedo = vec3f(0.02);
-        emission = select(vec3f(0.0), select(vec3f(0.6, 0.8, 1.2), vec3f(1.4, 0.9, 0.45), warm) * (1.0 + 12.0 * r), on);
+    let span = slab(o.x, d.x, min(side * STREET, side * BACK), max(side * STREET, side * BACK), vec2f(0.0, hit.t));
+    if (span.x > span.y) { continue; }
+    let za = o.z + span.x * d.z;
+    let zb = o.z + span.y * d.z;
+    let first = floor(min(za, zb) / BLOCK);
+    let last = floor(max(za, zb) / BLOCK);
+    let forward = d.z >= 0.0;
+    var block = select(last, first, forward);
+    for (var n = 0; n < 48; n++) {
+      if (block < first || block > last) { break; }
+      let h = 9.0 + 28.0 * hash(vec2f(block, s));
+      let b = box(o, d, vec3f(side * 0.5 * (STREET + BACK), 0.5 * h, block * BLOCK + 8.0), vec3f(0.5 * (BACK - STREET), 0.5 * h, 8.0));
+      if (b.x < hit.t) {
+        hit = building(o, d, b.x, b.yzw, block, s, time, px);
+        break;
       }
-      // Beyond about one window per pixel, fade to the windows' average (30% glass, 34% lit).
-      let blend = smoothstep(0.3, 1.0, max(footZ / 2.5, footY / 3.2)) * inside(p.y, footY, 3.5, 1e9);
-      albedo = mix(albedo, mix(wall, vec3f(0.02), 0.3), blend);
-      emission = mix(emission, vec3f(0.379, 0.276, 0.201), blend);
-      let shop = hash(vec2f(block, s + 3.0));
-      if (shop < 0.6) {
-        let hue = shop * 10.0;
-        let neon = (0.5 + 0.5 * cos(hue + vec3f(0.0, 2.1, 4.2))) * 6.0 * (0.8 + 0.2 * sin(time * 9.0 + hue));
-        emission += neon * inside(p.y, footY, 2.6, 2.85) * inside(local, footZ, 3.0, 13.0);
-      }
-      let alley = inside(local, footZ, 16.0, 20.0);
-      hit = Hit(t, mix(albedo, vec3f(0.01), alley), emission * (1.0 - alley), vec3f(-side, 0.0, 0.0));
+      block += select(-1.0, 1.0, forward);
+    }
+    // The next street over, seen through the alleys.
+    if (abs(d.x) > 1e-4) {
+      let t = (side * BACK - o.x) / d.x;
+      if (t > 0.0 && t < hit.t && o.y + t * d.y < 14.0) { hit = Hit(t, vec3f(0.012), vec3f(0.0), vec3f(-side, 0.0, 0.0)); }
     }
   }
 
