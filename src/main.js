@@ -3,7 +3,53 @@ import { BlurRenderer, shaderSource, tiltShiftRadiusMap } from "./blur.js";
 import { World } from "./world.js";
 import { VideoSource } from "./video.js";
 
-const SAMPLE_VIDEO = { url: `${import.meta.env.BASE_URL}tum-sitting-rgbd.mp4`, name: "TUM RGB-D fr3/sitting_static" };
+// RGB-D video samples. Video Depth Anything's comparison clips are fetched from its project page
+// (served with CORS): color in origin/, inferno-coded relative depth in ours/.
+const VDA = "https://videodepthanything.github.io/videos/comparison/";
+const VDA_CREDIT =
+  'Video and depth: <a href="https://videodepthanything.github.io/">Video Depth Anything</a> project page ' +
+  "(S. Chen et al., CVPR 2025), loaded from its site; depth is estimated and relative.";
+const TUM_CREDIT =
+  'RGB-D video: TUM RGB-D benchmark, sequence fr3/sitting_static (J. Sturm et al., IROS 2012), ' +
+  '<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>; depth holes filled, converted to inverse depth, re-encoded.';
+const VIDEO_SAMPLES = [
+  // [color file, depth file if named differently, focus slider position, label]
+  ["4511004-uhd_3840_2160_24fps_rgb.mp4", null, 0.675, "woman in a field"], // focused on her: v ≈ 0.455
+  ["1753029-hd_1920_1080_30fps.mp4"],
+  ["4158877-uhd_3840_2160_30fps_rgb.mp4"],
+  ["Balloons-32132.mp4"],
+  ["Istanbul-26920.mp4"],
+  ["Tokyo-Walk_rgb.mp4"],
+  ["davis_burnout.mp4"],
+  ["davis_rollercoaster.mp4"],
+  ["example_5473765-l.mp4"],
+  ["face_3.mp4"],
+  ["obj_1.mp4"],
+  ["sheep_cut1.mp4"],
+  ["vdw_000423.mp4"],
+  ["2Dto3D_Test2.mp4"],
+  ["hulisongputao-cut1-1-1_input.mp4", "hulisongputao-cut1-1-1_vis.mp4"],
+  ["yubangxiangzheng-cut3-1_input.mp4", "yubangxiangzheng-cut3-1_vis.mp4"],
+]
+  .map(([file, depth, focus = 0.7, description]) => {
+    const name = file.replace(/\.mp4$/, "").replace(/(-u?hd_\d+_\d+_\d+fps)?(_rgb|_input)?$/, "");
+    return {
+      label: `Video Depth Anything: ${description ? `${name}, ${description}` : name}`,
+      color: VDA + "origin/" + file,
+      depth: VDA + "ours/" + (depth ?? file),
+      fps: Number(/(\d+)fps/.exec(file)?.[1]) || 30,
+      focus,
+      credit: VDA_CREDIT,
+    };
+  })
+  .concat([{
+    label: "TUM RGB-D: two people talking (measured depth)",
+    color: `${import.meta.env.BASE_URL}tum-sitting-rgbd.mp4`,
+    depth: null,
+    fps: 30,
+    focus: 0.75, // 1.8 m: the people
+    credit: TUM_CREDIT,
+  }]);
 import { DifferentialEvolution } from "./de.js";
 import { FineTuner } from "./finetune.js";
 import { drawConvergence, drawDisc, drawError, drawProfile } from "./plots.js";
@@ -295,7 +341,10 @@ function showSceneTime() {
 // Video time is the video element's; the 3D world's advances with the wall clock while playing.
 function seekScene(time) {
   state.sceneTime = Math.max(0, time);
-  if (state.source === "video") state.video.element.currentTime = state.sceneTime; // renders on "seeked"
+  if (state.source === "video") {
+    state.video.element.currentTime = state.sceneTime; // renders on "seeked"
+    if (state.video.depth) state.video.depth.currentTime = state.sceneTime;
+  }
   else requestBlur();
   showSceneTime();
 }
@@ -304,8 +353,11 @@ function setPlaying(playing) {
   state.playing = playing;
   $("playPause").textContent = playing ? "Pause" : "Play";
   if (state.source === "video") {
-    if (playing) state.video.element.play().catch(() => {});
-    else state.video.element.pause();
+    for (const element of [state.video.element, state.video.depth]) {
+      if (!element) continue;
+      if (playing) element.play().catch(() => {});
+      else element.pause();
+    }
   }
   lastBlurTime = 0;
   requestBlur();
@@ -315,7 +367,8 @@ function stepScene(frames) {
   setPlaying(false);
   // Video frames are addressed at their middle, away from the boundaries between frames.
   const offset = state.source === "video" ? 0.5 : 0;
-  seekScene((Math.round(state.sceneTime / FRAME - offset + frames) + offset) * FRAME);
+  const frame = state.source === "video" ? 1 / state.video.fps : FRAME;
+  seekScene((Math.round(state.sceneTime / frame - offset + frames) + offset) * frame);
 }
 
 function setFocusSlider(value) {
@@ -354,7 +407,8 @@ function viewState() {
 async function applyViewState(view) {
   if (view.scene === "world" && state.source !== "world") useWorld();
   if (view.scene === "procedural") useImage(proceduralScene(), "procedural");
-  if (view.scene === `video: ${SAMPLE_VIDEO.name}` && state.video?.name !== SAMPLE_VIDEO.name) await useVideo(SAMPLE_VIDEO.url, SAMPLE_VIDEO.name);
+  const sample = VIDEO_SAMPLES.find((s) => view.scene === `video: ${s.label}`);
+  if (sample && state.video?.name !== sample.label) await useVideo(sample);
   for (const [id, value] of Object.entries(view.controls ?? {})) {
     if (!VIEW_CONTROLS.includes(id)) continue;
     if ($(id).type === "checkbox") $(id).checked = value;
@@ -401,7 +455,10 @@ async function renderBlur() {
       blurKernelDirty = false;
     }
     const now = performance.now();
-    if (state.source === "video") state.sceneTime = state.video.element.currentTime;
+    if (state.source === "video") {
+      syncDepthVideo();
+      state.sceneTime = state.video.element.currentTime;
+    }
     else if (animating() && lastBlurTime) state.sceneTime += Math.min(0.1, (now - lastBlurTime) / 1000);
     showSceneTime();
     const capture = state.captureNext;
@@ -440,9 +497,12 @@ async function renderBlur() {
 
 function stopVideo() {
   if (!state.video) return;
-  state.video.element.pause();
-  state.video.element.removeAttribute("src");
-  state.video.element.load();
+  for (const element of [state.video.element, state.video.depth]) {
+    if (!element) continue;
+    element.pause();
+    element.removeAttribute("src");
+    element.load();
+  }
   state.video = null;
   $("videoCredit").hidden = true;
 }
@@ -465,27 +525,43 @@ function useWorld() {
   requestBlur(true);
 }
 
-// An RGB-D video: color on top, inverse depth below (see video.js).
-async function useVideo(url, name) {
-  stopVideo();
+async function loadVideo(url) {
   const element = document.createElement("video");
-  Object.assign(element, { muted: true, loop: true, playsInline: true, src: url });
+  Object.assign(element, { crossOrigin: "anonymous", muted: true, loop: true, playsInline: true, preload: "auto", src: url });
   await new Promise((resolve, reject) => {
     element.onloadeddata = resolve;
-    element.onerror = () => reject(new Error(`Could not load the video ${name}.`));
+    element.onerror = () => reject(new Error(`Could not load the video ${url}.`));
   });
   element.addEventListener("seeked", () => requestBlur());
-  const source = new VideoSource(state.blur.device, element);
+  return element;
+}
+
+// An RGB-D video sample (see VIDEO_SAMPLES and video.js): stacked color over depth, or a color
+// video with a separate depth video.
+async function useVideo(sample) {
+  stopVideo();
+  $("blurStats").textContent = `Loading ${sample.label}…`;
+  const [element, depth] = await Promise.all([loadVideo(sample.color), sample.depth ? loadVideo(sample.depth) : null]);
+  const source = new VideoSource(state.blur.device, element, depth);
   source.boost = num("boost");
-  state.video = { element, source, name };
-  $("videoCredit").hidden = name !== SAMPLE_VIDEO.name;
+  state.video = { element, depth, source, name: sample.label, fps: sample.fps ?? 30 };
+  $("videoCredit").innerHTML = sample.credit ?? "";
+  $("videoCredit").hidden = !sample.credit;
   state.blur.setAnimated(source, source.width, source.height);
   state.source = "video";
   state.sceneTime = 0;
   $("blurMode").value = "depth";
-  setFocusSlider(0.75); // 1.8 m: the people in the sample clip
+  if (sample.focus !== undefined) setFocusSlider(sample.focus);
   setPlaying(state.playing);
   requestBlur(true);
+}
+
+// The depth video follows the color video; while playing they drift apart by up to a frame or so.
+function syncDepthVideo() {
+  const { element, depth, fps } = state.video;
+  if (depth && Math.abs(depth.currentTime - element.currentTime) > (element.paused ? 0.25 : 3) / fps) {
+    depth.currentTime = element.currentTime;
+  }
 }
 
 async function initBlur() {
@@ -620,7 +696,7 @@ function wire() {
     try {
       if (file.type.startsWith("video/")) {
         state.imageFile = null;
-        await useVideo(URL.createObjectURL(file), file.name);
+        await useVideo({ label: file.name, color: URL.createObjectURL(file), depth: null });
       } else {
         state.imageFile = file;
         await useImage(await loadImage(file, num("boost")));
@@ -646,11 +722,14 @@ function wire() {
     $("imageFile").value = "";
     if (state.blur) useWorld();
   };
-  $("videoButton").onclick = () => {
+  for (const [k, sample] of VIDEO_SAMPLES.entries()) $("videoSample").add(new Option(sample.label, k));
+  const loadSample = () => {
     state.imageFile = null;
     $("imageFile").value = "";
-    if (state.blur) useVideo(SAMPLE_VIDEO.url, SAMPLE_VIDEO.name).catch((e) => ($("blurStats").textContent = e.message));
+    if (state.blur) useVideo(VIDEO_SAMPLES[num("videoSample")]).catch((e) => ($("blurStats").textContent = e.message));
   };
+  $("videoButton").onclick = loadSample;
+  $("videoSample").addEventListener("change", loadSample);
   $("playPause").onclick = () => setPlaying(!state.playing);
   $("stepBack").onclick = () => stepScene(-1);
   $("stepForward").onclick = () => stepScene(1);

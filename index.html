@@ -49,7 +49,8 @@
           <label title="An image, or an RGB-D video: color on top, inverse depth below as grayscale (white = 0.5 m)">Image or RGB-D video <input id="imageFile" type="file" accept="image/*,video/*" /></label>
           <label>Highlight boost <input id="boost" type="number" min="0" max="100" step="1" value="8" /></label>
           <button id="worldButton">3D world</button>
-          <button id="videoButton" title="Two people talking at a desk, with measured depth">RGB-D video</button>
+          <button id="videoButton" title="Play the selected RGB-D video">RGB-D video</button>
+          <select id="videoSample" aria-label="RGB-D video sample"></select>
           <button id="sceneButton">Procedural scene</button>
           <span class="playback" aria-label="Animation playback">
             <button id="stepBack" title="Previous frame (1/30 s)">⏮</button>
@@ -63,7 +64,7 @@
         </div>
         <textarea id="viewState" rows="4" placeholder="Paste a view state (JSON), then press Apply view state again" spellcheck="false" hidden></textarea>
         <p id="blurStats" class="status"></p>
-        <p id="videoCredit" class="note" hidden>RGB-D video: TUM RGB-D benchmark, sequence fr3/sitting_static (J. Sturm et al., IROS 2012), <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>; depth holes filled, converted to inverse depth, re-encoded.</p>
+        <p id="videoCredit" class="note" hidden></p>
         <canvas id="blurCanvas"></canvas>
         <details id="shaderPanel">
           <summary>Shader code (WGSL)</summary>

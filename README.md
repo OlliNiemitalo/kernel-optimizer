@@ -12,8 +12,9 @@ pass, at a cost proportional to the blur radius rather than its area.
 - **Blur demo**: hand-written WGSL compute shaders processing one channel at a time, so memory
   doesn't grow with the channel count. Uniform or spatially varying disc radius: tilt-shift, or
   depth of field from the z-buffer of an animated 3D night street ray-cast on the GPU, with an
-  adjustable focus distance, or from an RGB-D video (a sample of two people talking at a desk, with
-  measured depth, is included). f32 or packed 16-bit intermediates, and GPU timings and memory use per
+  adjustable focus distance, or from an RGB-D video: Video Depth Anything's comparison clips (loaded
+  from its project page) or two people talking at a desk with measured depth (included). f32 or
+  packed 16-bit intermediates, and GPU timings and memory use per
   buffer. The "Shader code (WGSL)" panel shows the shaders, with copy and download buttons. Their
   header comments document the buffers, tap tables, and dispatch order, so you can use them
   elsewhere.
@@ -178,11 +179,20 @@ channels at once would take channels × that.
 **Spatially varying radius.** The radius comes from a per-pixel map: tilt-shift, or the 3D world's
 z-buffer turned into a signed circle of confusion (negative in front of the focus). For focus
 distance $f$ it is proportional to $1/f - 1/z$: the demo uses $2R\,\text{m}\,(1/f - 1/z)$, capped at
-$\pm R$, so $R$ is the blur at 2 m with focus at infinity. An RGB-D video works the same way: each
-frame has the color image on top and the depth below as grayscale inverse depth
-$v = 0.5\,\text{m}/z$ (white = 0.5 m, black = infinitely far), which is the format depth estimators
-commonly produce. Inverse depth suits 8-bit video, since the blur radius is linear in it: one gray
-level is a fixed $R/64$ pixels of blur. Tap tables are precomputed for a geometric ladder of radii, six per octave
+$\pm R$, so $R$ is the blur at 2 m with focus at infinity. An RGB-D video works the same way, with
+relative inverse depth $v \in [0, 1]$ in one of two layouts:
+
+- **Stacked** (the included TUM clip, and the file picker): one video, color on top, depth below
+  as grayscale, used as $1/z = 2v$ per meter (white = 0.5 m, black = infinitely far).
+- **Pair** (the [Video Depth Anything](https://videodepthanything.github.io/) samples): a color
+  video and a separate depth video coded with matplotlib's "inferno" colormap, as that project
+  visualizes its estimates. A 32³ lookup table maps each color to the position of the nearest
+  colormap entry. Their depth is estimated and relative, so it is used as $1/z = v$ per meter, and
+  the focus distance is in these relative units. The depth video is kept within a few frames of
+  the color video while playing, and on the same frame when paused or stepping.
+
+Inverse depth suits 8-bit video, since the blur radius is linear in it: one gray level is a fixed
+fraction of $R$. Videos wider than 960 pixels are downscaled when read. Tap tables are precomputed for a geometric ladder of radii, six per octave
 from 1 pixel up to the largest radius, each normalized so its 2-D kernel sums to 1. Level 0 is an
 exact identity, so in-focus pixels stay perfectly sharp.
 
@@ -312,7 +322,7 @@ candidates per second.
 | `src/de.js`, `src/finetune.js` | Differential evolution and gradient fine-tuning |
 | `src/blur.js` | WebGPU blur: WGSL compute and display shaders |
 | `src/world.js` | Animated 3D night street ray-cast on the GPU: procedural textures, puddles with traced reflections, glossy highlights; adaptive 4× antialiasing and procedural patterns box-filtered over the pixel footprint; the circle of confusion from the z-buffer |
-| `src/video.js` | RGB-D video as a depth-of-field source: color on top, inverse depth below (white = 0.5 m) |
+| `src/video.js` | RGB-D video as a depth-of-field source: color over grayscale depth, or a color video with an inferno-coded depth video |
 | `tools/tum_rgbd_video.py` | Converts a [TUM RGB-D](https://cvg.cit.tum.de/data/datasets/rgbd-dataset) sequence to that format (fills depth holes, H.264) |
 | `public/tum-sitting-rgbd.mp4` | 15 s of TUM RGB-D fr3/sitting_static, converted with the tool above |
 | `src/plots.js`, `src/scene.js`, `src/main.js` | Plots, procedural HDR test scene, user interface |
@@ -333,4 +343,7 @@ licensed; see [vendor/jax-js-nonconsuming/LICENSE](vendor/jax-js-nonconsuming/LI
 (J. Sturm, N. Engelhard, F. Endres, W. Burgard and D. Cremers, "A Benchmark for the Evaluation of
 RGB-D SLAM Systems", IROS 2012), licensed under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/): trimmed to 15 s, depth holes filled,
-depth converted to 8-bit inverse depth, and re-encoded as H.264.
+depth converted to 8-bit inverse depth, and re-encoded as H.264. The Video Depth Anything samples
+are not part of this repository: the page loads them from
+[videodepthanything.github.io](https://videodepthanything.github.io/) (S. Chen et al., "Video Depth
+Anything: Consistent Depth Estimation for Super-Long Videos", CVPR 2025).
