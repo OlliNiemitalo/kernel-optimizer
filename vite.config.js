@@ -18,7 +18,8 @@ export default defineConfig({
       { find: /^@hamk-uas\/jax-js-nonconsuming$/, replacement: vendor("src/index.ts") },
     ],
   },
-  esbuild: { target: "es2022" },
+  // Also run esbuild on .js so `using` declarations are lowered for Node 22 and older browsers.
+  esbuild: { target: "es2022", include: /\.(m?[jt]s|[jt]sx)$/, exclude: /node_modules/ },
   build: { target: "es2022" },
   server: { headers: isolation },
   preview: { headers: isolation },
