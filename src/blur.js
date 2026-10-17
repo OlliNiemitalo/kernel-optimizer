@@ -715,7 +715,7 @@ export class BlurRenderer {
         timestampWrites: timestampWrites("scene"),
       });
     }
-    if (varying) {
+    if (varying && !showSource) {
       encoder.clearBuffer(this.tiles);
       const tileGroups = Math.ceil((this.tilesX * this.tilesY) / 64);
       const steps = [
@@ -742,7 +742,7 @@ export class BlurRenderer {
       cp.dispatchWorkgroups(...workgroups);
       cp.end();
     };
-    for (let ch = 0; ch < this.channels; ch++) {
+    for (let ch = 0; ch < (showSource ? 0 : this.channels); ch++) {
       pass(horizontal, 256 * ch, groups.h, "horizontal");
       pass(vertical, 256 * ch, groups.v, "vertical");
     }

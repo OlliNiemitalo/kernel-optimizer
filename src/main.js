@@ -387,7 +387,7 @@ function download(url, name) {
 }
 
 const VIEW_CONTROLS = [
-  "radius", "blurMode", "focus", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels",
+  "blurOn", "radius", "blurMode", "focus", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels",
   "exposure", "tonemap", "precision", "transition",
 ];
 
@@ -484,6 +484,7 @@ async function renderBlur() {
       exposure: Math.pow(2, num("exposure")),
       tonemap: Number($("tonemap").value),
       precision: $("precision").value,
+      showSource: !$("blurOn").checked,
       time: state.sceneTime,
       invFocus: num("focus") ** 2,
       sizeBlur: $("sizeBlur").checked ? num("sizeBrightness") : null,
@@ -500,6 +501,7 @@ async function renderBlur() {
     const m = r.memory;
     const total = Object.values(m).reduce((a, b) => a + b, 0);
     $("blurStats").textContent =
+      ($("blurOn").checked ? "" : "Blur off · ") +
       `${state.blur.width}×${state.blur.height} px · ${state.blur.channels} separable channels × ` +
       (r.varying ? `up to ${r.taps} taps (${r.levels} radius levels)` : `${r.taps} taps`) + ` per pass · ` +
       `GPU memory ${mib(total)} MiB (intermediate ${mib(m.intermediate)}, accumulator ${mib(m.accumulator)}, ` +
@@ -698,7 +700,7 @@ function wire() {
     $("exposureOut").textContent = `${Math.pow(2, num("exposure")).toFixed(2)}×`;
     requestBlur();
   });
-  for (const id of ["sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels"]) {
+  for (const id of ["blurOn", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels"]) {
     $(id).addEventListener("input", () => {
       updateVaryingControls();
       requestBlur();
