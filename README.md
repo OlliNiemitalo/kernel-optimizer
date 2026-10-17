@@ -43,8 +43,13 @@ installs dependencies, runs the smoke test, builds, and deploys `dist/`. The bui
 page header to this README.
 
 GitHub Pages cannot send the cross-origin isolation headers (`Cross-Origin-Opener-Policy`,
-`Cross-Origin-Embedder-Policy`) that the development server sets. That only matters for the
-WebAssembly fallback, which then runs single-threaded; WebGPU is unaffected.
+`Cross-Origin-Embedder-Policy`) that jax-js needs for `SharedArrayBuffer`, which its multithreaded
+WebAssembly backend uses. The page therefore includes
+[coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker): on the first visit it registers
+a service worker that adds those headers to every response, then reloads the page once. Where the
+server already sends the headers, as the development server does, it does nothing. It needs a
+secure context (HTTPS or localhost), and private browsing modes may block service workers; the
+app still works without cross-origin isolation, just without multithreaded WebAssembly.
 
 ## How it works
 
@@ -245,6 +250,7 @@ candidates per second.
 | `test/smoke.js` | Checks the math and runs the optimizer and fine-tuner in Node |
 | `test/merged-de.js` | Experiment: DE convergence with and without merged pairs |
 | `vendor/jax-js-nonconsuming/` | jax-js-nonconsuming v0.12.14 TypeScript sources (MIT), compiled by Vite |
+| `public/coi-serviceworker.js` | coi-serviceworker v0.1.7 (MIT), served unbundled at the site root |
 
 jax-js-nonconsuming is vendored because it is not published on npm, and its Git install
 does not build on Windows.
@@ -253,3 +259,4 @@ does not build on Windows.
 
 MIT for this project ([LICENSE](LICENSE)). The vendored jax-js-nonconsuming sources are MIT
 licensed; see [vendor/jax-js-nonconsuming/LICENSE](vendor/jax-js-nonconsuming/LICENSE).
+`public/coi-serviceworker.js` is by Guido Zuidhof and contributors, MIT licensed (see its header).

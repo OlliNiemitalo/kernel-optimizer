@@ -252,7 +252,7 @@ function requestBlur(kernelChanged = false) {
   if (blurPending || !state.blur) return;
   blurPending = true;
   const wait = state.running ? Math.max(0, 150 - (performance.now() - lastBlurTime)) : 0;
-  setTimeout(() => requestAnimationFrame(renderBlur), wait);
+  setTimeout(() => nextFrame().then(renderBlur), wait);
 }
 
 async function renderBlur() {
