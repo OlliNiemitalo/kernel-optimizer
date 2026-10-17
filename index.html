@@ -18,10 +18,16 @@
         gradient fine-tuning on <a href="https://github.com/hamk-uas/jax-js-nonconsuming">jax-js-nonconsuming</a>;
         the blur demo is plain WebGPU shaders. After
         <a href="https://yehar.com/blog/?p=1495">Olli Niemitalo: Circularly symmetric convolution and lens blur</a>.
-        <span id="repoLinks" hidden>
-          <a id="mathLink">How it works (implementation-oriented math)</a> · <a id="sourceLink">Source</a>
-        </span>
       </p>
+      <nav class="links" aria-label="Documentation">
+        <a data-readme="" href="https://github.com/OlliNiemitalo/kernel-optimizer">Source and README on GitHub</a>
+        <a data-readme="#how-it-works" href="https://github.com/OlliNiemitalo/kernel-optimizer#how-it-works">How it works</a>
+        <a data-readme="#2-kernel-model" href="https://github.com/OlliNiemitalo/kernel-optimizer#2-kernel-model">Merged pairs</a>
+        <a data-readme="#3-from-components-to-separable-channels" href="https://github.com/OlliNiemitalo/kernel-optimizer#3-from-components-to-separable-channels">Separable channels</a>
+        <a data-readme="#4-discrete-implementation-webgpu" href="https://github.com/OlliNiemitalo/kernel-optimizer#4-discrete-implementation-webgpu">WebGPU implementation</a>
+        <a data-readme="#spatially-varying-radius" href="https://github.com/OlliNiemitalo/kernel-optimizer#spatially-varying-radius">Depth of field, z-buffer and occlusion</a>
+        <a data-readme="#6-optimization" href="https://github.com/OlliNiemitalo/kernel-optimizer#6-optimization">Optimization</a>
+      </nav>
     </header>
 
     <main>
@@ -85,6 +91,15 @@
               <label class="slider" title="Depth of field only">Focus <input id="focus" type="range" min="0" max="1" step="0.005" value="0.316" /> <output id="focusOut">10 m</output></label>
             </fieldset>
 
+            <fieldset id="varyingControls">
+              <legend>Varying blur</legend>
+              <label class="check" title="The vertical pass can use one kernel per pixel. On: the average blur level of the row sources reaching the pixel, weighted by brightness and by how much of their disc falls in the column, so highlights keep round discs. Off: the pixel's own level, which cuts the discs of blurry highlights next to sharper pixels."><input id="sizeBlur" type="checkbox" checked /> Blur the blur size</label>
+              <label class="slider" title="Exponent of the brightness weight: 0 = all sources count equally, 1 = in proportion to brightness, 2 = bright highlights dominate">Brightness weight <input id="sizeBrightness" type="range" min="0" max="3" step="0.1" value="1" /> <output id="sizeBrightnessOut">1.0</output></label>
+              <label class="check" title="Depth of field only: an in-focus or background pixel hides sources whose blur is much larger behind it, beyond its own blur radius, so background highlights do not bleed over sharp foreground edges"><input id="occlusion" type="checkbox" checked /> Occlusion</label>
+              <label class="slider" title="Hide sources whose blur is larger than the pixel's by more than this many octaves (doublings of the radius)">Threshold <input id="occlusionLevels" type="range" min="1" max="24" step="1" value="6" /> <output id="occlusionOut">1.00 oct</output></label>
+              <p class="note"><a data-readme="#spatially-varying-radius" href="https://github.com/OlliNiemitalo/kernel-optimizer#spatially-varying-radius">How the varying blur works</a></p>
+            </fieldset>
+
             <fieldset>
               <legend>Display</legend>
               <label class="slider">Exposure <input id="exposure" type="range" min="-4" max="4" step="0.1" value="0" /> <output id="exposureOut">1.0×</output></label>
@@ -136,7 +151,8 @@
               <details class="help">
                 <summary>About multiplicities</summary>
                 <p class="note">Per component: 1 = single, 2 = merged pair, i.e. two coinciding rates in closed form,
-                  <code>(B + A r²)·e<sup>λr²</sup></code>, costing two complex channels per pass. Example: 2, 2, 1.</p>
+                  <code>(B + A r²)·e<sup>λr²</sup></code>, costing two complex channels per pass. Example: 2, 2, 1.
+                  <a data-readme="#2-kernel-model" href="https://github.com/OlliNiemitalo/kernel-optimizer#2-kernel-model">More in the README</a>.</p>
               </details>
             </fieldset>
 

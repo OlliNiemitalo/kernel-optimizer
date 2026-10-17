@@ -36,7 +36,6 @@ const PAD = ROWS - 1; // zero taps around each table so the sliding window needs
 const LEVELS_PER_OCTAVE = 6;
 const RADIUS_MIN = 1; // smallest blurring level, in pixels; smaller radii map to the identity level
 const TILE = 16; // pixels per side of the tiles used to bound the gather reach
-const OCCLUSION_LEVELS = LEVELS_PER_OCTAVE; // a source this many levels farther is hidden
 const MAX_QUERIES = 2 * (2 * MAX_CHANNELS + 5);
 
 const J = Array.from({ length: ROWS }, (_, j) => j);
@@ -90,6 +89,8 @@ struct Params {
   tilesX: u32,
   tilesY: u32,
   occlusion: i32,         // > 0: hide sources this many signed levels behind the destination
+  sizeBlur: u32,          // 1: vertical level = weighted average over the row ("blur the blur size")
+  sizeBrightness: f32,    // exponent of the brightness weight in that average
 }
 
 struct Complex4 { re: vec4f, im: vec4f }
@@ -262,12 +263,13 @@ fn verticalLevels(@builtin(global_invocation_id) id: vec3u) {
     let kd = halfOf(ld);
     var sum = 0.0;
     var weight = 0.0;
-    for (var t = -r; t <= r; t++) {
+    let span = select(-1, r, P.sizeBlur == 1u); // -1: no sources, keep the own level
+    for (var t = -span; t <= span; t++) {
       let xs = u32(clamp(i32(x) + t, 0, i32(P.width) - 1));
       let s = levelByte(0u, xs, id.y);
       let level = s & 127u;
       if (abs(t) > levelHalf[level] || hidden(signedLevel(s), ld, t, kd)) { continue; }
-      let w = (dot(src[row + xs].rgb, vec3f(0.2126, 0.7152, 0.0722)) + 0.01) * marginal(level, t);
+      let w = pow(dot(src[row + xs].rgb, vec3f(0.2126, 0.7152, 0.0722)) + 0.01, P.sizeBrightness) * marginal(level, t);
       sum += w * f32(level);
       weight += w;
     }
@@ -377,11 +379,12 @@ ${displayShader}`;
 //     varying radius:  horizontalVarying, verticalVarying, same workgroup counts
 // then draw with the display shader (acc.rgb / acc.w).
 //
-// Params (56 bytes): width u32 @0, height u32 @4, halfTaps i32 @8 (largest K), channel u32 @12,
+// Params (64 bytes): width u32 @0, height u32 @4, halfTaps i32 @8 (largest K), channel u32 @12,
 // channels u32 @16, stride u32 @20, levels u32 @24, first u32 @28 (1 for channel 0, else 0),
 // radiusMin f32 @32, levelsPerOctave f32 @36, rowWords u32 @40 (= ceil(width / 4)),
-// tilesX u32 @44, tilesY u32 @48 (= ceil(size / ${TILE})), occlusion i32 @52 (${OCCLUSION_LEVELS} for a z-buffer
-// radius, 0 otherwise).
+// tilesX u32 @44, tilesY u32 @48 (= ceil(size / ${TILE})), occlusion i32 @52 (threshold in levels for a
+// z-buffer radius, ${LEVELS_PER_OCTAVE} per octave; 0 = off), sizeBlur u32 @56 (0: vertical level = own level),
+// sizeBrightness f32 @60.
 //
 // Buffers (one entry per pixel, row-major): src vec4f linear RGB (alpha unused); acc vec4f;
 // mid ${packed ? "16" : "32"} bytes; radius f32, signed: negative in front of the focus (varying only).
@@ -641,8 +644,12 @@ export class BlurRenderer {
 
   // Runs the passes and draws; resolves with timings once the GPU has finished. `time` and
   // `invFocus` (1 / focus distance in 1/m) drive the animated source. `capture` returns the frame as a
-  // PNG data URL.
-  async render({ exposure = 1, tonemap = 1, precision = "f32", showSource = false, time = 0, invFocus = 0, capture = false } = {}) {
+  // PNG data URL. Varying radius: `sizeBlur` is the brightness exponent of the blur-size smoothing
+  // (null = off); `occlusion` is the depth-of-field occlusion threshold in octaves (0 = off).
+  async render({
+    exposure = 1, tonemap = 1, precision = "f32", showSource = false, time = 0, invFocus = 0, capture = false,
+    sizeBlur = 1, occlusion = 1,
+  } = {}) {
     if (this.tablesDirty) this.buildTables();
     const packed = precision === "f16";
     const { width, height, device } = this;
@@ -660,7 +667,10 @@ export class BlurRenderer {
       new Uint32Array(block, o + 12, 5).set([ch, this.channels, this.stride, this.levels, ch === 0 ? 1 : 0]);
       new Float32Array(block, o + 32, 2).set([RADIUS_MIN, LEVELS_PER_OCTAVE]);
       new Uint32Array(block, o + 40, 3).set([this.rowWords, this.tilesX, this.tilesY]);
-      new Int32Array(block, o + 52, 1)[0] = this.varying?.kind === "depth" ? OCCLUSION_LEVELS : 0;
+      new Int32Array(block, o + 52, 1)[0] =
+        this.varying?.kind === "depth" && occlusion > 0 ? Math.max(1, Math.round(occlusion * LEVELS_PER_OCTAVE)) : 0;
+      new Uint32Array(block, o + 56, 1)[0] = sizeBlur === null ? 0 : 1;
+      new Float32Array(block, o + 60, 1)[0] = sizeBlur ?? 1;
     }
     device.queue.writeBuffer(this.params, 0, block);
     const v = new ArrayBuffer(32);

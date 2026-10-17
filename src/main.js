@@ -386,7 +386,10 @@ function download(url, name) {
   link.click();
 }
 
-const VIEW_CONTROLS = ["radius", "blurMode", "focus", "exposure", "tonemap", "precision", "transition"];
+const VIEW_CONTROLS = [
+  "radius", "blurMode", "focus", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels",
+  "exposure", "tonemap", "precision", "transition",
+];
 
 // Everything needed to re-render the displayed frame, plus context for bug reports.
 function viewState() {
@@ -431,6 +434,13 @@ async function applyViewState(view) {
   requestBlur(true);
 }
 
+function updateVaryingControls() {
+  $("sizeBrightnessOut").textContent = num("sizeBrightness").toFixed(1);
+  $("occlusionOut").textContent = `${(num("occlusionLevels") / 6).toFixed(2)} oct`;
+  $("sizeBrightness").disabled = !$("sizeBlur").checked;
+  $("occlusionLevels").disabled = $("occlusion").disabled || !$("occlusion").checked;
+}
+
 function requestBlur(kernelChanged = false) {
   blurKernelDirty ||= kernelChanged;
   if (blurPending || !state.blur) return;
@@ -453,8 +463,12 @@ async function renderBlur() {
       state.blur.setKernel(state.current.params, radius, readProblem().transition);
       const { width, height } = state.blur;
       const mode = $("blurMode").value;
-      if (mode === "depth" && hasDepth()) state.blur.setDepthOfField();
+      const depth = mode === "depth" && hasDepth();
+      if (depth) state.blur.setDepthOfField();
       else state.blur.setRadiusMap(mode === "tiltShift" ? tiltShiftRadiusMap(width, height, radius) : null);
+      $("varyingControls").disabled = mode === "uniform";
+      $("occlusion").disabled = !depth;
+      updateVaryingControls();
       blurKernelDirty = false;
     }
     const now = performance.now();
@@ -472,6 +486,8 @@ async function renderBlur() {
       precision: $("precision").value,
       time: state.sceneTime,
       invFocus: num("focus") ** 2,
+      sizeBlur: $("sizeBlur").checked ? num("sizeBrightness") : null,
+      occlusion: $("occlusion").checked ? num("occlusionLevels") / 6 : 0,
       capture,
     });
     const prefix = { world: "street", video: "video" }[state.source];
@@ -682,6 +698,12 @@ function wire() {
     $("exposureOut").textContent = `${Math.pow(2, num("exposure")).toFixed(2)}×`;
     requestBlur();
   });
+  for (const id of ["sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels"]) {
+    $(id).addEventListener("input", () => {
+      updateVaryingControls();
+      requestBlur();
+    });
+  }
   for (const id of ["tonemap", "precision"]) $(id).addEventListener("change", () => requestBlur());
   for (const id of ["precision", "shaderKind"]) $(id).addEventListener("change", showShader);
   $("copyShader").onclick = () => navigator.clipboard.writeText($("shaderCode").value);
@@ -775,11 +797,7 @@ function wire() {
 
 async function main() {
   const repo = import.meta.env.VITE_REPO_URL;
-  if (repo) {
-    $("mathLink").href = `${repo}#how-it-works`;
-    $("sourceLink").href = repo;
-    $("repoLinks").hidden = false;
-  }
+  if (repo) for (const a of document.querySelectorAll("a[data-readme]")) a.href = repo + a.dataset.readme;
   wire();
   showShader();
   describeRanges(readProblem());

@@ -36,6 +36,14 @@ a {
   color: var(--accent);
 }
 
+nav.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 16px;
+  margin: 6px 0 4px;
+  font-size: 13px;
+}
+
 main {
   display: flex;
   flex-direction: column;
@@ -196,6 +204,11 @@ button.primary {
 button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+fieldset:disabled,
+fieldset:not(:disabled) label:has(:disabled) {
+  opacity: 0.5;
 }
 
 details.help summary,

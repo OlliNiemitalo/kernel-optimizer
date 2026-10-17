@@ -46,8 +46,9 @@ measurable difference to optimizer speed.
 2. In **Settings → Pages**, set **Source** to **GitHub Actions**.
 
 Every push to `main` then runs [`.github/workflows/pages.yml`](.github/workflows/pages.yml): it
-installs dependencies, runs the smoke test, builds, and deploys `dist/`. The build also links the
-page header to this README.
+installs dependencies, runs the smoke test, builds, and deploys `dist/`. The page links to sections
+of this README on [GitHub](https://github.com/OlliNiemitalo/kernel-optimizer); in a fork, the build
+points those links at the fork instead.
 
 GitHub Pages cannot send the cross-origin isolation headers (`Cross-Origin-Opener-Policy`,
 `Cross-Origin-Embedder-Policy`) that jax-js needs for `SharedArrayBuffer`, which its multithreaded
@@ -169,14 +170,18 @@ See [`src/blur.js`](src/blur.js). For a disc radius of $R$ pixels:
 The cost per pixel, per color, per pass is (channels × taps) complex multiply-adds, so it grows
 linearly with the radius.
 
-**Memory.** Besides the source image and the 4-lane accumulator (16 bytes per pixel each), the
+#### Memory
+
+Besides the source image and the 4-lane accumulator (16 bytes per pixel each), the
 only working buffer is one channel's intermediate: 4 complex lanes, 32 bytes per pixel in f32. The
 "16-bit float (packed)" option stores each complex lane as two half floats in one `u32`
 (`pack2x16float`): 16 bytes per pixel, with no optional GPU feature needed. At 960×600 the
 intermediate is 17.6 MiB, or 8.8 MiB packed, whatever the number of channels. Keeping all
 channels at once would take channels × that.
 
-**Spatially varying radius.** The radius comes from a per-pixel map: tilt-shift, or the 3D world's
+#### Spatially varying radius
+
+The radius comes from a per-pixel map: tilt-shift, or the 3D world's
 z-buffer turned into a signed circle of confusion (negative in front of the focus). For focus
 distance $f$ it is proportional to $1/f - 1/z$: the demo uses $2R\,\text{m}\,(1/f - 1/z)$, capped at
 $\pm R$, so $R$ is the blur at 2 m with focus at infinity. An RGB-D video works the same way, with
@@ -211,9 +216,12 @@ sharper pixels: those pixels neither look far enough nor use the highlight's ker
    the **vertical level** is the average level of the row sources that reach the pixel, weighted by
    their brightness and by how much of their disc falls in the column. Bright highlights keep
    round discs; sharp detail next to them stays sharp. With a radius that depends only on the row
-   (tilt-shift), every disc is exact.
-4. **Occlusion** (z-buffer only): an in-focus or background pixel hides sources more than an
-   octave of blur behind it, beyond its own blur radius, so background highlights do not bleed over
+   (tilt-shift), every disc is exact. In the "Varying blur" controls, this can be turned off (each
+   pixel then uses its own level, cutting the discs of blurry highlights next to sharper pixels),
+   and the brightness weight is raised to an adjustable power: 0 counts all sources equally,
+   1 (the default) in proportion to brightness, larger values let highlights dominate.
+4. **Occlusion** (z-buffer only, optional): an in-focus or background pixel hides sources more than an
+   adjustable threshold of blur behind it (default one octave, i.e. twice the radius), beyond its own blur radius, so background highlights do not bleed over
    sharp foreground edges. Blurry foreground pixels hide nothing, because they cover only part of the
    lens aperture. Light hidden behind a small blurry foreground object is missing from the image, so
    such objects' discs come out somewhat brighter in the middle; avoiding that would need separate
@@ -223,7 +231,9 @@ The extra memory is the radius map (4 bytes per pixel) and two level maps (1 byt
 Each prepass step runs in its own compute pass: on the tested Intel GPU, dependent dispatches within
 one compute pass were not reliably ordered, which made the output vary from frame to frame.
 
-**Truncation and corners.** Truncating each 1-D kernel at $|t| \le K$ makes the 2-D support a
+#### Truncation and corners
+
+Truncating each 1-D kernel at $|t| \le K$ makes the 2-D support a
 square. Its corners reach $r = \sqrt{2}\,(1 + \tau)$, so the kernel must already be near zero
 there. The optimizer's stop band extends far beyond that, to about $1 + \tau + \ln N_\text{stop}$.
 
