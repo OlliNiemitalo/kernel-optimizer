@@ -265,10 +265,13 @@ background shows through the object's semi-transparent edge, as in a real lens.
   coverage is below ½, it is completed by pull-push (a pyramid of coverage-weighted averages built
   by halving, then filled from coarse to fine with bilinear upsampling). Each nearer layer, its
   color normalized by its coverage $w$, then goes over the composite with opacity
-  $\alpha = \max(\operatorname{close}(w), f)$: the coverage after a 3 px morphological closing,
-  which fills narrow dips from mixed disc sizes but keeps the smooth ramp around a silhouette,
-  and the fraction $f$ of the layer's pixels within the pixel's own blur radius (a square window),
-  which makes the layer opaque deeper inside than its blur reaches. The memory for any number of
+  $\alpha = \min(\max(\operatorname{close}(w), m f),\ 3w)$: the coverage after a 3 px
+  morphological closing, which fills narrow dips from mixed disc sizes but keeps the smooth ramp
+  around a silhouette, and, on the layer's own pixels (membership $m$), the fraction $f$ of the
+  layer's pixels within the pixel's own blur radius (a square window), which makes the layer
+  opaque deeper inside than its blur reaches. The cap $3w$ keeps the noisy color of the kernels'
+  fading tails, a ratio of two tiny sums, from showing as a sharp, speckled fringe. The memory for
+  any number of
   layers is two extra buffers (the composite, and debug data; 16 bytes per pixel each) plus the
   pyramid, about a third more, and two more byte maps per split.
 

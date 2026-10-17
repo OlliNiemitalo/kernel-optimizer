@@ -613,7 +613,10 @@ fn insideFraction(@builtin(global_invocation_id) id: vec3u) {
 // latest layer's own color and the transmittance of the nearer layers (for the debug views). The
 // farthest layer, hole-filled, starts the composite. Each nearer layer, with color c (its sum
 // normalized by its coverage w = acc.w), goes over it with opacity the larger of its closed
-// coverage and its inside fraction.
+// coverage and, on its own pixels, its inside fraction. The opacity is at most MAX_GAIN * w: in
+// the fading tail of the kernels, c is the ratio of two tiny sums and noisy, and outside their
+// support it is undefined.
+const MAX_GAIN = 3.0;
 @compute @workgroup_size(64, 1)
 fn composite(@builtin(global_invocation_id) id: vec3u) {
   let px = P.width * P.height;
@@ -628,7 +631,8 @@ fn composite(@builtin(global_invocation_id) id: vec3u) {
   let w = a.w;
   var c = vec3f(0.0);
   if (w > 1e-6) { c = a.rgb / w; }
-  let alpha = clamp(max(loadScratch(id.x, 1u), loadScratch(id.x, 3u)), 0.0, 1.0);
+  let member = sourceWeight(id.x % P.width, id.x / P.width);
+  let alpha = clamp(min(max(loadScratch(id.x, 1u), member * loadScratch(id.x, 3u)), MAX_GAIN * w), 0.0, 1.0);
   let behind = layer[id.x];
   layer[id.x] = vec4f(mix(behind.rgb, c, alpha), 0.0);
   layer[px + id.x] = vec4f(c, layer[px + id.x].w * (1.0 - alpha));
