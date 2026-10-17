@@ -9,7 +9,7 @@ import { FineTuner } from "./finetune.js";
 import { drawConvergence, drawDisc, drawError, drawProfile } from "./plots.js";
 import {
   PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, maxError, multiplicities, parseParams,
-  presetParams, nonnegativePresetParams, sampleGrid, sortByFrequency,
+  presetParams, nonnegativePresetParams, PRESETS, sampleGrid, sortByFrequency,
 } from "./problem.js";
 import { loadImage, proceduralScene } from "./scene.js";
 
@@ -523,13 +523,26 @@ function wire() {
     if (wasRunning) setRunning(true);
   };
   for (const id of ["components", "multiplicity", "transition", "passSamples", "stopSamples", "frequencyBands", "negWeight", "population", "F", "CR", "seed"]) {
-    $(id).addEventListener("change", () => {
+    // The component count reacts while typing or stepping, not only when the field loses focus.
+    $(id).addEventListener(id === "components" ? "input" : "change", () => {
+      if (id === "components" && !(num("components") >= 1)) return;
       setRunning(false);
       if (id === "multiplicity") {
         const count = ($("multiplicity").value.match(/\d+/g) ?? []).length;
         if (count >= 1 && count <= 8) $("components").value = count;
       }
-      setMultiplicity(readProblem().multiplicity);
+      const problem = readProblem();
+      setMultiplicity(problem.multiplicity);
+      const shapeChanged =
+        state.current &&
+        (state.current.params.length !== problem.components * PARAMS_PER_COMPONENT ||
+          multiplicities(state.current.params).join() !== problem.multiplicity.join());
+      // A new structure shows the article's kernel for it when there is one, so the plots follow.
+      if (shapeChanged && problem.multiplicity.every((m) => m === 1) && PRESETS[problem.components]) {
+        setCurrent(sortByFrequency(presetParams(problem.components)), `article preset (${problem.components} components)`);
+        discardDE({ include: state.current.params });
+        return;
+      }
       if (state.current) setCurrent(state.current.params, state.current.source);
       discardDE();
     });
