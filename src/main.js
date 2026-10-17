@@ -1,5 +1,6 @@
 import { _setCalibrationState, defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
 import { BlurRenderer, shaderSource, tiltShiftRadiusMap } from "./blur.js";
+import { World } from "./world.js";
 import { DifferentialEvolution } from "./de.js";
 import { FineTuner } from "./finetune.js";
 import { drawConvergence, drawDisc, drawError, drawProfile } from "./plots.js";
@@ -22,6 +23,10 @@ const state = {
   include: null, // kernel to include once in the next population
   current: null, // { params, source, error, denseError }
   blur: null,
+  world: null,
+  worldActive: false,
+  sceneTime: 0,
+  focus: [0.5, 0.75],
   imageFile: null,
 };
 
@@ -270,6 +275,8 @@ let blurKernelDirty = true;
 let blurRendering = false;
 let lastBlurTime = 0;
 
+const animating = () => state.worldActive && $("animate").checked && !document.hidden;
+
 function requestBlur(kernelChanged = false) {
   blurKernelDirty ||= kernelChanged;
   if (blurPending || !state.blur) return;
@@ -291,20 +298,25 @@ async function renderBlur() {
     if (blurKernelDirty) {
       state.blur.setKernel(state.current.params, radius, readProblem().transition);
       const { width, height } = state.blur;
-      state.blur.setRadiusMap($("blurMode").value === "tiltShift" ? tiltShiftRadiusMap(width, height, radius) : null);
+      const mode = $("blurMode").value;
+      if (mode === "depth" && state.worldActive) state.blur.setDepthOfField();
+      else state.blur.setRadiusMap(mode === "tiltShift" ? tiltShiftRadiusMap(width, height, radius) : null);
       blurKernelDirty = false;
     }
+    const now = performance.now();
+    if (animating() && lastBlurTime) state.sceneTime += Math.min(0.1, (now - lastBlurTime) / 1000);
     const r = await state.blur.render({
       exposure: Math.pow(2, num("exposure")),
       tonemap: Number($("tonemap").value),
       precision: $("precision").value,
       showSource: $("showSource").checked,
+      time: state.sceneTime,
+      focus: state.focus,
     });
-    lastBlurTime = performance.now();
-    const gpu =
-      r.horizontalMs !== undefined
-        ? `GPU time: horizontal ${r.horizontalMs.toFixed(2)} ms + vertical ${r.verticalMs.toFixed(2)} ms`
-        : `${r.ms.toFixed(1)} ms round trip`;
+    lastBlurTime = now;
+    const gpu = r.gpuMs
+      ? "GPU time: " + Object.entries(r.gpuMs).map(([k, ms]) => `${k} ${ms.toFixed(2)} ms`).join(" + ")
+      : `${r.ms.toFixed(1)} ms round trip`;
     const mib = (b) => (b / 2 ** 20).toFixed(1);
     const m = r.memory;
     const total = Object.values(m).reduce((a, b) => a + b, 0);
@@ -312,23 +324,36 @@ async function renderBlur() {
       `${state.blur.width}×${state.blur.height} px · ${state.blur.channels} separable channels × ` +
       (r.varying ? `up to ${r.taps} taps (${r.levels} radius levels)` : `${r.taps} taps`) + ` per pass · ` +
       `GPU memory ${mib(total)} MiB (intermediate ${mib(m.intermediate)}, accumulator ${mib(m.accumulator)}, ` +
-      `source ${mib(m.source)}${m.radiusMap ? `, radius map ${mib(m.radiusMap)}` : ""}) · ${gpu}`;
+      `source ${mib(m.source)}` +
+      (m.radiusMap ? `, radius ${mib(m.radiusMap)}, level maps ${mib(m.levelMaps)}` : "") +
+      `) · ${gpu}`;
   } catch (e) {
     $("blurStats").textContent = `Blur failed: ${e.message}`;
   } finally {
     blurRendering = false;
+    if (animating()) requestBlur();
   }
 }
 
 async function useImage(image) {
+  state.worldActive = false;
   state.blur.setImage(image.rgba, image.width, image.height);
+  if ($("blurMode").value === "depth") $("blurMode").value = "uniform";
+  requestBlur(true);
+}
+
+function useWorld() {
+  state.world ??= new World(state.blur.device);
+  state.blur.setWorld(state.world, 960, 600);
+  state.worldActive = true;
+  $("blurMode").value = "depth";
   requestBlur(true);
 }
 
 async function initBlur() {
   try {
     state.blur = await BlurRenderer.create($("blurCanvas"));
-    await useImage(proceduralScene());
+    useWorld();
   } catch (e) {
     $("blurStats").textContent = `WebGPU blur demo unavailable: ${e.message}`;
   }
@@ -438,6 +463,25 @@ function wire() {
     $("imageFile").value = "";
     if (state.blur) useImage(proceduralScene());
   };
+  $("worldButton").onclick = () => {
+    state.imageFile = null;
+    $("imageFile").value = "";
+    if (state.blur) useWorld();
+  };
+  $("animate").addEventListener("change", () => {
+    lastBlurTime = 0;
+    requestBlur();
+  });
+  document.addEventListener("visibilitychange", () => {
+    lastBlurTime = 0;
+    if (animating()) requestBlur();
+  });
+  $("blurCanvas").addEventListener("click", (e) => {
+    if (!state.worldActive) return;
+    const box = $("blurCanvas").getBoundingClientRect();
+    state.focus = [(e.clientX - box.left) / box.width, (e.clientY - box.top) / box.height];
+    requestBlur();
+  });
   window.addEventListener("resize", drawAll);
 }
 

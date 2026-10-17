@@ -10,10 +10,12 @@ pass, at a cost proportional to the blur radius rather than its area.
 - **Live visualizations**: radial cross-section with the evolving population, error curve,
   convergence, and the 2-D kernel.
 - **Blur demo**: hand-written WGSL compute shaders processing one channel at a time, so memory
-  doesn't grow with the channel count. Uniform or spatially varying (tilt-shift) disc radius,
-  f32 or packed 16-bit intermediates, and GPU timings and memory use per buffer. The "Shader code
-  (WGSL)" panel shows the shaders, with copy and download buttons. Their header comments document
-  the buffers, tap tables, and dispatch order, so you can use them elsewhere.
+  doesn't grow with the channel count. Uniform or spatially varying disc radius: tilt-shift, or
+  depth of field from the z-buffer of an animated 3D night street ray-cast on the GPU (click to
+  set the autofocus point). f32 or packed 16-bit intermediates, and GPU timings and memory use per
+  buffer. The "Shader code (WGSL)" panel shows the shaders, with copy and download buttons. Their
+  header comments document the buffers, tap tables, and dispatch order, so you can use them
+  elsewhere.
 
 Based on Olli Niemitalo,
 [Circularly symmetric convolution and lens blur](https://yehar.com/blog/?p=1495) (2010), extended
@@ -172,14 +174,38 @@ only working buffer is one channel's intermediate: 4 complex lanes, 32 bytes per
 intermediate is 17.6 MiB, or 8.8 MiB packed, whatever the number of channels. Keeping all
 channels at once would take channels × that.
 
-**Spatially varying radius.** With a per-pixel radius map (the "Tilt-shift" option), each pixel
-gathers with taps for its own radius, in both passes. Tap tables are precomputed for a geometric
-ladder of radii, six per octave from 1 pixel up to the map's maximum, and each pixel uses the
-nearest level. Level 0 is an exact identity, so in-focus pixels stay perfectly sharp. When the
-radius changes between rows, the vertical pass combines intermediates computed with
-neighbouring levels' horizontal kernels. The resulting 2-D kernel is then a smooth blend rather
-than an exact disc, which suits smoothly varying blur such as depth of field. This path does not
-use register blocking, because neighbouring pixels can use different tap counts.
+**Spatially varying radius.** The radius comes from a per-pixel map: tilt-shift, or the 3D world's
+z-buffer turned into a signed circle of confusion $c = R\,(1 - f/z)$ for focus distance $f$ (negative
+in front of the focus). Tap tables are precomputed for a geometric ladder of radii, six per octave
+from 1 pixel up to the largest radius, each normalized so its 2-D kernel sums to 1. Level 0 is an
+exact identity, so in-focus pixels stay perfectly sharp.
+
+A plain gather, where each output uses its own radius, cuts the discs of blurry highlights next to
+sharper pixels: those pixels neither look far enough nor use the highlight's kernel. So the passes
+*scatter as gather*:
+
+1. A prepass quantizes the radius map to a byte-per-pixel level map (sign bit = in front of the
+   focus) and records the largest kernel half-width per 16×16 tile. Dilating that over the
+   neighbouring tiles gives each tile's **reach**: how far its pixels must look.
+2. Every tap uses the tap table of the **source** pixel it reads, so each source spreads its own
+   disc. Tables are centered and zero beyond each level's half-width, so sources whose disc does
+   not reach contribute nothing, without branches. Register blocking works as in the uniform path.
+3. After the horizontal pass, a pixel mixes light from sources with different radii, but the
+   vertical pass can apply only one kernel per pixel. The prepass therefore "blurs the blur size":
+   the **vertical level** is the average level of the row sources that reach the pixel, weighted by
+   their brightness and by how much of their disc falls in the column. Bright highlights keep
+   round discs; sharp detail next to them stays sharp. With a radius that depends only on the row
+   (tilt-shift), every disc is exact.
+4. **Occlusion** (z-buffer only): an in-focus or background pixel hides sources more than an
+   octave of blur behind it, beyond its own blur radius, so background highlights do not bleed over
+   sharp foreground edges. Blurry foreground pixels hide nothing, because they cover only part of the
+   lens aperture. Light hidden behind a small blurry foreground object is missing from the image, so
+   such objects' discs come out somewhat brighter in the middle; avoiding that would need separate
+   near and far layers, doubling the intermediate memory.
+
+The extra memory is the radius map (4 bytes per pixel) and two level maps (1 byte per pixel each).
+Each prepass step runs in its own compute pass: on the tested Intel GPU, dependent dispatches within
+one compute pass were not reliably ordered, which made the output vary from frame to frame.
 
 **Truncation and corners.** Truncating each 1-D kernel at $|t| \le K$ makes the 2-D support a
 square. Its corners reach $r = \sqrt{2}\,(1 + \tau)$, so the kernel must already be near zero
@@ -269,6 +295,7 @@ candidates per second.
 | `src/model.js`, `src/trig.js` | Traced (jax-js) kernel profile and accurate sine and cosine |
 | `src/de.js`, `src/finetune.js` | Differential evolution and gradient fine-tuning |
 | `src/blur.js` | WebGPU blur: WGSL compute and display shaders |
+| `src/world.js` | Animated 3D night street ray-cast on the GPU, autofocus, z-buffer to circle of confusion |
 | `src/plots.js`, `src/scene.js`, `src/main.js` | Plots, procedural HDR test scene, user interface |
 | `test/smoke.js` | Checks the math and runs the optimizer and fine-tuner in Node |
 | `test/merged-de.js` | Experiment: DE convergence with and without merged pairs |
