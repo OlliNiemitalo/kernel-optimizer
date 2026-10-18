@@ -707,6 +707,8 @@ function updateVaryingControls() {
     occlusion: $("occlusion").checked, showLayers: $("showLayers").value,
   });
   for (const [id, disabled] of Object.entries(controls.disabled)) $(id).disabled = disabled;
+  $("playerBlur").checked = $("blurOn").checked;
+  $("playerBlur").disabled = $("blurOn").disabled;
   const clipboardSupported = !!navigator.clipboard?.write && typeof ClipboardItem !== "undefined";
   $("copyImage").disabled = !state.blur || !state.source || !clipboardSupported || state.copyBusy;
   $("copyImage").title = clipboardSupported
@@ -1082,6 +1084,10 @@ function wire() {
       requestBlur();
     });
   }
+  $("playerBlur").addEventListener("input", () => {
+    $("blurOn").checked = $("playerBlur").checked;
+    $("blurOn").dispatchEvent(new Event("input"));
+  });
   for (const id of ["tonemap", "precision"]) $(id).addEventListener("change", () => requestBlur());
   for (const id of ["precision", "shaderKind"]) $(id).addEventListener("change", showShader);
   $("radiusInterpolation").addEventListener("input", showShader);

@@ -48,7 +48,7 @@ for the optimizer.
 **Control availability.** Blur-specific controls are disabled when blur is off. The player bar under
 the picture (go to start, previous frame, play/pause, next frame, time, speed) is available only for
 videos and the animated world; the seek bar, duration and loop only for videos, and full screen for
-every scene (also by double-clicking the picture, again to exit). The space bar plays and pauses, unless a control that uses it has focus. Highlight boost is available only for images and videos.
+every scene (also by double-clicking the picture, again to exit). The bar repeats the Blur on/off switch, so it is available in full screen. The space bar plays and pauses, unless a control that uses it has focus. Highlight boost is available only for images and videos.
 Focus, layers, blur-size blending and occlusion require depth mode with a depth source (world,
 video or Tetras). Brightness weight additionally requires blur-size blending, and the occlusion
 threshold requires occlusion. Radius interpolation is available only for varying blur.
