@@ -77,7 +77,7 @@ const HORIZONTAL_OUTPUTS = 4;
 const HJ = Array.from({ length: HORIZONTAL_OUTPUTS }, (_, j) => j);
 const eachV = (f) => HJ.map(f).join("\n    ");
 
-function computeShader(packed) {
+function computeShader(packed, interpolate = false) {
   // One channel's complex intermediate per pixel, lanes (r, g, b, w):
   //   f32:    two vec4f (re, im)                      32 bytes per pixel
   //   packed: vec4u, lane = pack2x16float(re, im)     16 bytes per pixel
@@ -176,7 +176,7 @@ fn tableStart(level: u32, dir: u32) -> u32 {
 }
 
 // Varying path: precompute the radius-table coordinate once per pixel, before channel filtering.
-// Byte levels remain for depth classification only; continuous fractions select between nodes.
+// Byte levels remain for depth classification only; optional fractions blend adjacent nodes.
 fn normCoordinate(r: f32) -> vec2f {
   var q = r * ${RADIUS_LINEAR_DENSITY}.0;
   if (r > ${RADIUS_LINEAR_LIMIT}.0) { q = ${RADIUS_LINEAR_LIMIT * RADIUS_LINEAR_DENSITY}.0 + log2(r / ${RADIUS_LINEAR_LIMIT}.0) * ${RADIUS_LEVELS_PER_OCTAVE}.0; }
@@ -185,14 +185,14 @@ fn normCoordinate(r: f32) -> vec2f {
 fn tableCoordinate(key: f32) -> vec2f {
   var q = key;
   q = min(q, kern[HALVES + 1u].y - 1.0);
-  let i = min(floor(q), kern[HALVES + 1u].y - 2.0);
-  return vec2f(i, q - i);
+  ${interpolate ? `let i = min(floor(q), kern[HALVES + 1u].y - 2.0);
+  return vec2f(i, q - i);` : `return vec2f(floor(q + 0.5), 0.0);`}
 }
 
 fn radiusFixAt(a: vec2f, b: vec2f, fade: f32) -> f32 {
   let n = u32(kern[HALVES + 1u].y);
   let i = u32(kern[HALVES + 2u].y) + u32(a.x) * n + u32(b.x);
-  let f = mix(mix(kern[i].x, kern[i + n].x, a.y), mix(kern[i + 1u].x, kern[i + n + 1u].x, a.y), b.y);
+  let f = ${interpolate ? "mix(mix(kern[i].x, kern[i + n].x, a.y), mix(kern[i + 1u].x, kern[i + n + 1u].x, a.y), b.y)" : "kern[i].x"};
   // Fade out the already-small correction before the fast path, not a threshold jump.
   return mix(1.0 / f, 1.0, fade);
 }
@@ -203,18 +203,19 @@ fn radiusBase(q: vec2f, dir: u32) -> u32 {
 }
 fn radiusTap(base: u32, fraction: f32, t: i32) -> vec2f {
   let i = base + u32(abs(t));
-  return mix(kern[i], kern[i + u32(kern[HALVES + 1u].x)], fraction);
+  return ${interpolate ? "mix(kern[i], kern[i + u32(kern[HALVES + 1u].x)], fraction)" : "kern[i]"};
 }
 
 fn radiusHalf(r: f32) -> i32 {
   if (r == 0.0) { return 0; }
   let q = normCoordinate(r);
   // A blend has the union of its two node supports, not the support of the requested radius.
-  return i32(kern[u32(kern[HALVES + 2u].x) + u32(q.x) + 1u].x);
+  return i32(kern[u32(kern[HALVES + 2u].x) + u32(q.x)${interpolate ? " + 1u" : ""}].x);
 }
 
 // Four f32 planes appended to packed maps: smoothed source radius, smoothing scratch (reused for
-// the source table key after smoothing), vertical radius, and vertical table key. No quantization.
+// the source table key after smoothing), vertical radius, and vertical table key. Radii stay
+// continuous in both lookup modes; only the table keys are rounded in nearest mode.
 fn floatMap(plane: u32, x: u32, y: u32) -> u32 {
   return ${MAPS}u * P.height * P.rowWords + plane * P.width * P.height + y * P.width + x;
 }
@@ -1021,7 +1022,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 `;
 
 // Standalone WGSL with the host-side protocol, for use outside this app.
-export function shaderSource(kind, packed) {
+export function shaderSource(kind, packed, interpolate = false) {
   if (kind === "display") {
     return `// Display pass of the separable circular blur: draws acc.rgb / acc.w as one fullscreen triangle
 // (draw(3), no vertex buffers). View (32 bytes): width u32 @0, height u32 @4, exposure f32 @8,
@@ -1089,10 +1090,12 @@ ${displayShader}`;
 // Supports: N entries in .x. Mixed DC: N*N entries in .x, row = source node, column = vertical
 // node. Bilinearly interpolate DC then take its reciprocal, NOT interpolation of reciprocals.
 // Key = r*${RADIUS_LINEAR_DENSITY} below ${RADIUS_LINEAR_LIMIT}px, ${RADIUS_LINEAR_LIMIT * RADIUS_LINEAR_DENSITY}+${RADIUS_LEVELS_PER_OCTAVE}*log2(r/${RADIUS_LINEAR_LIMIT}) above.
+// Nearest mode rounds this key, fetches one node and its DC correction, and uses that node's support.
 // Taps: [direction][channel][node][stride], complex vec2f, even (nonnegative offsets only),
 // normalized at each node and zero-padded. Gather support is the union of the adjacent nodes.
 // Node zero is identity; subpixel nodes blend it continuously with the radius-one profile.
-${computeShader(packed)}`;
+// Radius lookup mode: ${interpolate ? "interpolated adjacent nodes" : "nearest node (default)"}.
+${computeShader(packed, interpolate)}`;
 }
 
 // Tap tables in double precision: tables[level][dir][channel] = 2K + 1 complex taps (re, im
@@ -1236,10 +1239,10 @@ export class BlurRenderer {
     this.animated = null;
   }
 
-  computePipelines(packed) {
-    const key = packed ? "packed" : "f32";
+  computePipelines(packed, interpolate = false) {
+    const key = `${packed ? "packed" : "f32"}-${interpolate ? "linear" : "nearest"}`;
     if (!this.pipelines[key]) {
-      const module = this.device.createShaderModule({ code: computeShader(packed) });
+      const module = this.device.createShaderModule({ code: computeShader(packed, interpolate) });
       const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.computeLayout] });
       const make = (entryPoint) => this.device.createComputePipeline({ layout, compute: { module, entryPoint } });
       this.pipelines[key] = {
@@ -1357,9 +1360,8 @@ export class BlurRenderer {
     this.tablesDirty = true;
   }
 
-  // Tap tables, computed in double precision: one level at the exact radius, or an identity
-  // level followed by a geometric ladder of radii from RADIUS_MIN up to the largest radius.
-  // Normalized so that any mix of levels sums to 1 (see tapTables).
+  // Tap tables, computed in double precision: one exact uniform radius, or the dense radius-node
+  // grid for varying blur. Both varying shader modes share the same normalized tables.
   buildTables() {
     const { channels, radius, transition } = this.kernelSpec;
     if (this.varying) { this.buildContinuousTable(); return; }
@@ -1442,9 +1444,10 @@ export class BlurRenderer {
   // PNG data URL. Varying radius: `sizeBlur` is the brightness exponent of the blur-size smoothing
   // (null = off); `occlusion` is the depth-of-field occlusion threshold in octaves (0 = off).
   // Depth of field: `layers` (1 or 2) depth layers with a locally chosen split.
+  // `interpolate` (default false) blends adjacent radius nodes instead of selecting the nearest.
   async render({
     exposure = 1, tonemap = 1, precision = "f32", showSource = false, time = 0, invFocus = 0, capture = false,
-    sizeBlur = 1, occlusion = 1, layers = 1, showLayers = 0,
+    sizeBlur = 1, occlusion = 1, layers = 1, showLayers = 0, interpolate = false,
   } = {}) {
     if (this.tablesDirty) this.buildTables();
     const packed = precision === "f16";
@@ -1492,7 +1495,7 @@ export class BlurRenderer {
     new Uint32Array(v, 12, 4).set([tonemap, showSource ? 1 : 0, layered ? 1 : 0, showLayers]);
     device.queue.writeBuffer(this.view, 0, v);
 
-    const p = this.computePipelines(packed);
+    const p = this.computePipelines(packed, varying && interpolate);
     const [horizontal, vertical] = varying ? [p.horizontalVarying, p.verticalVarying] : [p.horizontal, p.vertical];
     const groups = { h: [Math.ceil(Math.ceil(width / (varying ? HORIZONTAL_OUTPUTS : ROWS)) / 64), height], v: [Math.ceil(width / 64), Math.ceil(height / ROWS)] };
     const bindGroup = device.createBindGroup({

@@ -98,6 +98,7 @@
 
             <fieldset id="varyingControls">
               <legend>Varying blur</legend>
+              <label class="check" title="Blend adjacent radius tables for continuous radius changes. Off (default): use the nearest table for faster rendering."><input id="radiusInterpolation" type="checkbox" /> Interpolate blur radii</label>
               <label class="check" title="Depth of field only: blur near and far objects as two separate layers, the near one composited over the far one, so a blurry foreground spreads over what is behind it. The depth split is chosen locally, per 16-pixel tile, so the same layers serve different depths in different places."><input id="layers" type="checkbox" /> Layers (experimental)</label>
               <label title="Debug views of the depth layers">Layer view
                 <select id="showLayers" class="wide">

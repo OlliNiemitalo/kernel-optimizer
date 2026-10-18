@@ -505,7 +505,7 @@ function download(url, name) {
 
 const VIEW_CONTROLS = [
   "blurOn", "radius", "blurMode", "focus", "layers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels",
-  "exposure", "tonemap", "precision", "transition",
+  "exposure", "tonemap", "precision", "transition", "radiusInterpolation",
 ];
 
 // Everything needed to re-render the displayed frame, plus context for bug reports.
@@ -613,6 +613,7 @@ async function renderBlur() {
       exposure: Math.pow(2, num("exposure")),
       tonemap: Number($("tonemap").value),
       precision: $("precision").value,
+      interpolate: $("radiusInterpolation").checked,
       showSource: !$("blurOn").checked,
       time: state.sceneTime,
       invFocus: num("focus") ** 2,
@@ -634,7 +635,7 @@ async function renderBlur() {
     $("blurStats").textContent =
       ($("blurOn").checked ? "" : "Blur off · ") +
       `${state.blur.width}×${state.blur.height} px · ${state.blur.channels} separable channels × ` +
-      (r.varying ? `up to ${r.taps} taps (continuous radius)` : `${r.taps} taps`) + ` per pass · ` +
+      (r.varying ? `up to ${r.taps} taps (${$("radiusInterpolation").checked ? "interpolated radii" : "nearest radius"})` : `${r.taps} taps`) + ` per pass · ` +
       `GPU memory ${mib(total)} MiB (intermediate ${mib(m.intermediate)}, accumulator ${mib(m.accumulator)}, ` +
       `source ${mib(m.source)}` +
       (m.radiusMap ? `, radius ${mib(m.radiusMap)}, working maps ${mib(m.levelMaps)}` : "") +
@@ -755,7 +756,7 @@ function shaderFileName() {
 }
 
 function showShader() {
-  $("shaderCode").value = shaderSource($("shaderKind").value, shaderPacked());
+  $("shaderCode").value = shaderSource($("shaderKind").value, shaderPacked(), $("radiusInterpolation").checked);
 }
 
 function wire() {
@@ -860,7 +861,7 @@ function wire() {
     $("exposureOut").textContent = `${Math.pow(2, num("exposure")).toFixed(2)}×`;
     requestBlur();
   });
-  for (const id of ["blurOn", "layers", "showLayers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels"]) {
+  for (const id of ["blurOn", "layers", "showLayers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels", "radiusInterpolation"]) {
     $(id).addEventListener("input", () => {
       updateVaryingControls();
       requestBlur();
@@ -868,6 +869,7 @@ function wire() {
   }
   for (const id of ["tonemap", "precision"]) $(id).addEventListener("change", () => requestBlur());
   for (const id of ["precision", "shaderKind"]) $(id).addEventListener("change", showShader);
+  $("radiusInterpolation").addEventListener("input", showShader);
   $("copyShader").onclick = () => navigator.clipboard.writeText($("shaderCode").value);
   $("downloadShader").onclick = () => {
     const link = document.createElement("a");

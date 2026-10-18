@@ -13,7 +13,7 @@ export async function captureBaseline() {
   if (saved.blur.includes('radius-tables.js')) saved.tables = await raw('/src/radius-tables.js');
   sessionStorage.setItem('blur-baseline-b6c1470', JSON.stringify(saved));
 }
-export async function run(samples = 7) {
+export async function run(samples = 7, interpolate = false) {
   const saved = JSON.parse(sessionStorage.getItem('blur-baseline-b6c1470') ?? 'null');
   if (!saved) throw new Error('Capture the baseline source in this tab before running the benchmark.');
   const kernelURL = URL.createObjectURL(new Blob([saved.kernel], { type: 'text/javascript' }));
@@ -40,7 +40,7 @@ export async function run(samples = 7) {
     }
     for (const radius of [15, 69]) for (const precision of ['f32', 'f16']) {
       for (const renderer of renderers) renderer.setKernel(presetParams(3), radius, 0.2);
-      const options = { invFocus: 0.697019047240157 ** 2, precision, layers: 1, sizeBlur: 1, occlusion: 1 };
+      const options = { invFocus: 0.697019047240157 ** 2, precision, layers: 1, sizeBlur: 1, occlusion: 1, interpolate };
       for (let warmup = 0; warmup < 2; warmup++) for (const renderer of renderers) await renderer.render(options);
       const timings = [[], []];
       for (let i = 0; i < samples; i++) for (const index of (i % 2 ? [1, 0] : [0, 1])) {
@@ -49,7 +49,7 @@ export async function run(samples = 7) {
         timings[index].push({ ...gpu, total: Object.values(gpu).reduce((s, t) => s + t, 0) });
       }
       const medians = timings.map(rows => Object.fromEntries(Object.keys(rows[0]).map(k => [k, median(rows.map(r => r[k]))])));
-      results.push({ radius, precision, baseline: medians[0], current: medians[1], speedup: medians[0].total / medians[1].total,
+      results.push({ radius, precision, interpolate, baseline: medians[0], current: medians[1], speedup: medians[0].total / medians[1].total,
         tableBytes: renderers.map(r => r.kernel.size), samples: timings });
     }
     return results;

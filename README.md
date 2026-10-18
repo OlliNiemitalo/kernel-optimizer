@@ -199,11 +199,14 @@ relative inverse depth $v \in [0, 1]$ in one of two layouts:
   the color video while playing, and on the same frame when paused or stepping.
 
 Inverse depth suits 8-bit video, since the blur radius is linear in it: one gray level is a fixed
-fraction of $R$. Videos wider than 960 pixels are downscaled when read. Varying radii interpolate
-between **precomputed radius-node tap tables**: nodes at 1/32 pixel spacing through 4 pixels, then
-32 per octave. The per-pixel node index and fraction are prepared once; the inner loops read two
-complex taps at integer offsets and blend them, without rescaling a profile or normalizing each tap.
-Node radii are interpolation points, not quantized choices. The tables are built from a dense
+fraction of $R$. Videos wider than 960 pixels are downscaled when read. Varying radii use
+**precomputed radius-node tap tables**: nodes at 1/64 pixel spacing through 4 pixels, then
+64 per octave. **Interpolate blur radii** in the Varying blur controls is off by default:
+the faster nearest-node shader fetches one tap and one node-pair DC correction, using that node's
+support. Enable it for continuous radius changes: the per-pixel node index and fraction are
+prepared once; the inner loops read two complex taps at integer offsets and blend them, without
+rescaling a profile or normalizing each tap. The option is included in copied view states and
+shader exports; it has no effect on uniform blur. The tables are built from a dense
 complex reference profile (256 points per disc radius), with a continuous zero endpoint. Radii
 below one pixel blend with the exact zero-radius identity. The uniform path keeps its direct tables.
 
@@ -212,10 +215,11 @@ sharper pixels: those pixels neither look far enough nor use the highlight's ker
 *scatter as gather*:
 
 1. A prepass retains a coarse byte-per-pixel level map for depth classification (sign bit = in
-  front of focus), but computes conservative support bounds from the union of both radius nodes. Dilating
+  front of focus), but computes support bounds from the selected node (or the union of both nodes
+  when interpolating). Dilating
   the largest kernel half-width per 16×16 tile over the
    neighbouring tiles gives each tile's **reach**: how far its pixels must look.
-2. Every tap uses the continuous radius of the **source** pixel it reads, so each source spreads
+2. Every tap uses the radius table(s) selected by the **source** pixel it reads, so each source spreads
   its own disc. Profile samples outside its support are zero. The interpolating horizontal path
   processes four outputs per thread; the vertical and uniform paths process eight.
 3. After the horizontal pass, a pixel mixes light from sources with different radii, but the
@@ -301,8 +305,10 @@ shows through the object's semi-transparent edge, as in a real lens.
 GPU regression tests are available at `/test/gpu.html` on the development server. They read linear
 buffers and check visibility on either side of focus, both spatial axes and intermediate precisions,
 foreground spread, empty-layer identity, reused frame state, and the tetra scene at two scales.
-Continuous-radius tests compare GPU impulse responses with the CPU interpolant, check fractional
-vertical radii, and reject both jumps at the former sharp/blur boundary and within-bin plateaus.
+Radius tests compare GPU impulse responses and mixed-radius ramps with the CPU model in both
+nearest and interpolated modes, including the last node and both intermediate precisions. They
+check fractional vertical radii, default-off behavior, nearest-node plateaus, and continuity when
+interpolation is enabled.
 
 The **Layer view** selector shows the composite, the near layer's opacity (tinted, or as gray at
 half scale), the near layer alone, the hole-filled far layer alone, or, with one layer, the summed
@@ -330,7 +336,8 @@ mipmapping and does not yet add such prefiltering.
 baseline source. It warms both pipelines, shares one device, freezes the tetra camera, and reports
 per-pass medians and raw samples at radii 15 and 69 in f32 and f16. Keep other GPU workloads idle.
 
-Measured on Intel Gen9 at 960×600, preset 3, one layer, size blending and occlusion enabled:
+Historical 32-step interpolated-table measurements (`2cbb7fc`) on Intel Gen9 at 960×600,
+preset 3, one layer, size blending and occlusion enabled:
 nine alternating samples after two warmups, compared with the rescaled-profile sampler (`b6c1470`).
 Totals include scene rendering and preparation, not just convolution.
 
@@ -341,12 +348,21 @@ Totals include scene rendering and preparation, not just convolution.
 | 69 | f32 | 397.1 | 298.1 | 1.33× |
 | 69 | packed f16 | 399.4 | 276.9 | 1.44× |
 
-Kernel tables shrink from 1.12 to 0.52 MiB at radius 15 and from 2.08 to 1.63 MiB at radius 69.
+For that 32-step version, kernel tables shrink from 1.12 to 0.52 MiB at radius 15 and from 2.08 to 1.63 MiB at radius 69.
 Caching the vertical table coordinate adds one float per pixel (2.20 MiB here), so total GPU
 memory increases despite the smaller tables. In the sampled preset/radius quality sweep, the
 largest integrated absolute kernel difference was 0.00557, with a localized truncation-tail
 peak difference of 0.0311 after multiplying by radius squared. These are sampled results,
 not universal performance or error bounds.
+
+The current 64-step grid doubles the radius-node density. An 11-sample alternating comparison
+against the 32-step grid under the same conditions found up to 2% slowdown with interpolation,
+and up to 5% with nearest lookup. This modest cost was retained for the finer radius spacing.
+Current nearest-mode totals were about 56/53 ms at radius 15 and 208/198 ms at radius 69 (f32/f16).
+Table storage grows to 1.58/4.26 MiB respectively: taps grow roughly 2×, but the node-pair DC matrix
+grows roughly 4×. The sampled interpolated-kernel integrated error falls to 0.00111, with scaled
+peak error 0.00395. Nearest lookup deliberately retains small radius steps; these interpolation
+error measurements do not describe nearest-mode error.
 
 #### Truncation and corners
 

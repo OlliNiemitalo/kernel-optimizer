@@ -2,10 +2,17 @@ import { radiusTables } from '../src/radius-tables.js';
 import { presetParams, separableChannels } from '../src/problem.js';
 
 export async function continuousGPU(renderer, check, read) {
+  for (const interpolate of [true, false]) {
+    await samplerGPU(renderer, (name, ...args) => check(`${interpolate ? 'interpolated' : 'nearest (default)'}: ${name}`, ...args), read, interpolate);
+  }
+}
+
+async function samplerGPU(renderer, check, read, interpolate) {
+  const sampling = interpolate ? { interpolate: true } : {}; // exercise the renderer's default too
   const width = 49, height = 49, center = 24;
   const device = renderer.device;
   const params = presetParams(3), channels = separableChannels(params);
-  const reference = radiusTables(channels, 0.2, 12);
+  const reference = radiusTables(channels, 0.2, 12, interpolate);
   const source = new Float32Array(width * height * 4);
   source[4 * (center * width + center)] = 1;
   const radii = new Float32Array(width * height).fill(12);
@@ -14,14 +21,14 @@ export async function continuousGPU(renderer, check, read) {
   renderer.setKernel(params, 12, 0.2);
   const images = new Map();
   for (const precision of ['f32', 'f16']) for (const sizeBlur of [null, 1]) {
-    for (const r of [0, 0.2, 0.9438, 0.9439, 1, 2.123, 3.1, 3.11, 4, 8.05]) {
+    for (const r of [0, 0.2, 0.9438, 0.9439, 1, 2.123, 3.1, 3.11, 4, 8.05, reference.radii.at(-1)]) {
       radii.fill(r);
       device.queue.writeBuffer(renderer.radiusBuffer, 0, radii);
-      await renderer.render({ precision, sizeBlur, occlusion: 0 });
+      await renderer.render({ precision, sizeBlur, occlusion: 0, ...sampling });
       const data = await read(device, renderer.acc);
       const effective = radii[0]; // actual f32 radius uploaded to the GPU
       const [node] = reference.coordinate(effective);
-      const half = reference.halves[node + 1];
+      const half = reference.halves[node + (interpolate ? 1 : 0)];
       const taps = [0, 1].map(dir => channels.map((_, ch) =>
         Array.from({ length: 2 * half + 1 }, (_, i) => reference.tap(effective, dir, ch, i - half))));
       const sums = taps.map(dir => dir.map(t => t.reduce((s, z) => [s[0] + z[0], s[1] + z[1]], [0, 0])));
@@ -59,15 +66,19 @@ export async function continuousGPU(renderer, check, read) {
     for (let i = 0; i < x.length; i += 4) e = Math.max(e, Math.abs(x[i] / x[i + 3] - y[i] / y[i + 3]));
     return e;
   };
-  check('no jump at the former identity/blur cutoff', difference(0.9438, 0.9439), 0.0002);
-  check('different radii within one old quantization bin produce different images', difference(3.1, 3.11) > 1e-5 ? 0 : 1, 0);
+  if (interpolate) {
+    check('no jump at the former identity/blur cutoff', difference(0.9438, 0.9439), 0.0002);
+    check('different radii within one old quantization bin produce different images', difference(3.1, 3.11) > 1e-5 ? 0 : 1, 0);
+  } else {
+    check('radii in the same nearest-node bin produce identical images', difference(0.9438, 0.9439), 0);
+  }
 
   // A column-wise ramp forces the horizontal source radius to differ from the vertical radius
   // at each destination. For an isolated impulse, the unnormalized RGB has an explicit reference.
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) radii[y * width + x] = 0.2 + 0.16 * x;
   device.queue.writeBuffer(renderer.radiusBuffer, 0, radii);
   for (const precision of ['f32', 'f16']) {
-    await renderer.render({ precision, sizeBlur: null, occlusion: 0 });
+    await renderer.render({ precision, sizeBlur: null, occlusion: 0, ...sampling });
     const data = await read(device, renderer.acc);
     const hr = radii[center * width + center];
     let error = 0;
