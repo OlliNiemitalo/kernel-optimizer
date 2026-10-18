@@ -48,8 +48,8 @@ const FILL_LEVELS = 16; // hole-filling pyramid levels, enough for 65536 pixels
 const FILL_BASE = MAX_LAYERS * MAX_CHANNELS; // Params blocks: [layer][channel], then one per pyramid level
 const SMOOTH = 6; // radius of the smoothing of source levels within a layer, in pixels
 const CLOSE = 4; // radius of the closing of the near layer's mask, in pixels
-const SMOOTH_BASE = FILL_BASE + FILL_LEVELS; // then 2 depth-guided smoothing phases (x, y)
-const CLOSE_BASE = SMOOTH_BASE + 2; // then the 4 closing steps: erode | along y << 1
+const SMOOTH_BASE = FILL_BASE + FILL_LEVELS; // then 4 guarded phases (weighted median x, y; mean x, y)
+const CLOSE_BASE = SMOOTH_BASE + 4; // then the 4 closing steps: erode | along y << 1
 const COVER_CLOSE = 3; // radius of the closing of the near layer's coverage, its opacity, in pixels
 const COVER_BASE = CLOSE_BASE + 4; // then the 4 phases of the coverage closing
 const INSIDE_BASE = COVER_BASE + 4; // then the 2 phases of the inside fraction
@@ -61,6 +61,18 @@ const MAX_QUERIES = 2 * (13 + MAX_LAYERS * (10 + 2 * MAX_CHANNELS) + 2 * FILL_LE
 const J = Array.from({ length: ROWS }, (_, j) => j);
 const W = Array.from({ length: 2 * SMOOTH + 1 }, (_, i) => i);
 const Q = [0, 1, 2, 3]; // pixels per byte-map word
+// Batcher's odd-even merge sort; median filtering sorts values and their weights together.
+const SORT = 16;
+const SORT_NETWORK = [];
+for (let p = 1; p < SORT; p <<= 1) {
+  for (let k = p; k >= 1; k >>= 1) {
+    for (let j = k % p; j + k < SORT; j += 2 * k) {
+      for (let i = 0; i < Math.min(k, SORT - j - k); i++) {
+        if (Math.floor((i + j) / (2 * p)) === Math.floor((i + j + k) / (2 * p))) SORT_NETWORK.push([i + j, i + j + k]);
+      }
+    }
+  }
+}
 const each = (f) => J.map(f).join("\n    ");
 const HORIZONTAL_OUTPUTS = 4;
 
@@ -575,13 +587,13 @@ fn encodeLevel(s: i32) -> u32 {
   return select(u32(s), u32(-s) | 128u, s < 0);
 }
 
-// Layers prepass: two separable, depth-guided smoothing passes. Soft layer membership is NOT
-// a surface identifier: an in-focus edge and distant background can both have membership zero,
-// and thresholding at 128 makes smooth surfaces jump when the split moves. Guide both passes
-// with the original signed log radius instead. Compact range weights reject differences of an
-// octave; also gate the filtered value so the second pass cannot diffuse across a depth edge.
-// Preserve subpixel radii, gradually enabling denoising between 0.5 and 2 pixels. Phase 0 writes
-// scratch; phase 1 writes the shared source radius and per-layer reach. No extra working maps.
+// Layers prepass: weighted median x/y followed by weighted mean x/y. The median suppresses
+// narrow depth errors that averaging alone preserves as thin boundary artifacts. Soft mask
+// affinity m*n + (1-m)*(1-n) favors the same layer without a hard membership-128 boundary.
+// Membership alone is not a surface identifier: sharp edges and background may both be far.
+// Original signed log radius and each filtered input therefore also guide the weights, with
+// compact support at two octaves. Preserve subpixel radii and ramp smoothing from 0.5 to 2px.
+// Even phases write scratch; odd phases write source radii; phase 3 also records layer reach.
 fn windowPixel(x: u32, y: u32, d: i32, alongY: bool) -> vec2u {
   if (alongY) { return vec2u(x, u32(clamp(i32(y) + d, 0, i32(P.height) - 1))); }
   return vec2u(u32(clamp(i32(x) + d, 0, i32(P.width) - 1)), y);
@@ -591,6 +603,7 @@ fn windowPixel(x: u32, y: u32, d: i32, alongY: bool) -> vec2u {
 fn smoothLevels(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= P.rowWords || id.y >= P.height) { return; }
   let alongY = (P.level & 1u) == 1u;
+  let mean = P.level >= 2u;
   let output = select(scratchMap(), layerLevelMap(), alongY);
   let floatInput = select(0u, 1u, alongY);
   let floatOutput = select(1u, 0u, alongY);
@@ -610,28 +623,38 @@ fn smoothLevels(@builtin(global_invocation_id) id: vec3u) {
     }
     let original = radius[id.y * P.width + x];
     let guide = continuousLevel(original);
-    // An explicit original-center sample keeps the denominator positive even at sharp edges.
-    var total = guide;
-    var weight = 1.0;
-    ${W.map((i) => `{
-      let q = windowPixel(x, id.y, ${i - SMOOTH}, alongY);
-      let raw = radius[q.y * P.width + q.x];
-      var r = raw;
-      if (alongY) { r = loadRadius(floatInput, q.x, q.y); }
-      let v = continuousLevel(r);
-      let delta = max(abs(continuousLevel(raw) - guide), abs(v - guide)) / P.levelsPerOctave;
-      let range = max(0.0, 1.0 - delta * delta);
-      let w = ${((SMOOTH + 1 - Math.abs(i - SMOOTH)) / (SMOOTH + 1)).toFixed(8)} * range * range;
-      total += w * v;
-      weight += w;
-    }`).join("\n    ")}
+    let member = f32(levelByte(maskMap(), x, id.y)) / 255.0;
+    ${W.map((i) => `let q${i} = windowPixel(x, id.y, ${i - SMOOTH}, alongY);
+    let raw${i} = radius[q${i}.y * P.width + q${i}.x];
+    var r${i} = raw${i};
+    if (P.level > 0u) { r${i} = loadRadius(floatInput, q${i}.x, q${i}.y); }
+    let v${i} = continuousLevel(r${i});
+    let delta${i} = max(abs(continuousLevel(raw${i}) - guide), abs(v${i} - guide)) / (2.0 * P.levelsPerOctave);
+    let range${i} = max(0.0, 1.0 - delta${i} * delta${i});
+    let neighbor${i} = f32(levelByte(maskMap(), q${i}.x, q${i}.y)) / 255.0;
+    let affinity${i} = member * neighbor${i} + (1.0 - member) * (1.0 - neighbor${i});
+    let w${i} = affinity${i} * range${i} * range${i};`).join("\n    ")}
+    let weight = ${W.map(i => `w${i}`).join(" + ")};
+    var level = guide;
+    if (mean) {
+      // Average the cleaned values, not the original outlier again. Fall back to the guide
+      // only if no sample survives the depth/membership guards.
+      if (weight > 0.0) { level = (${W.map(i => `w${i} * v${i}`).join(" + ")}) / weight; }
+    } else {
+      ${W.map(i => `var s${i} = v${i}; var a${i} = w${i};`).join("\n      ")}
+      ${Array.from({ length: SORT - W.length }, (_, i) => `var s${W.length + i}: f32 = 1000.0; var a${W.length + i}: f32 = 0.0;`).join(" ")}
+      ${SORT_NETWORK.map(([a, b]) => `{ let swap = s${a} > s${b}; let va = s${a}; let wa = a${a}; s${a} = min(va, s${b}); s${b} = max(va, s${b}); a${a} = select(wa, a${b}, swap); a${b} = select(a${b}, wa, swap); }`).join("\n      ")}
+      var cumulative = 0.0;
+      var found = weight <= 0.0;
+      ${Array.from({ length: SORT }, (_, i) => `cumulative += a${i}; if (!found && cumulative >= 0.5 * weight) { level = s${i}; found = true; }`).join("\n      ")}
+    }
     let strength = smoothstep(0.5, 2.0, abs(original));
-    let r = continuousRadius(mix(guide, total / weight, strength));
+    let r = continuousRadius(mix(guide, level, strength));
     storeRadius(floatOutput, x, id.y, r);
     let coarse = i32(levelOf(abs(r)));
     let b = encodeLevel(select(coarse, -coarse, r < 0.0));
     word |= b << (j * 8u);
-    if (alongY) {
+    if (P.level == 3u) {
       let m = levelByte(maskMap(), x, id.y);
       let k = radiusHalf(abs(r)) + 1;
       if (m > 0u) { kNear = max(kNear, k); }
@@ -639,7 +662,7 @@ fn smoothLevels(@builtin(global_invocation_id) id: vec3u) {
     }
   }
   lv[output + id.y * P.rowWords + id.x] = word;
-  if (alongY) {
+  if (P.level == 3u) {
     let tile = tileOf(id.x * 4u, id.y);
     atomicMax(&tiles[layerKBase(0u) + tile], u32(kNear));
     atomicMax(&tiles[layerKBase(1u) + tile], u32(kFar));
@@ -1032,7 +1055,7 @@ ${displayShader}`;
 //     levels (also records the depth edges per tile), splits and spreadSplits (ceil(tilesX tilesY / 64) workgroups each),
 //     mask (as levels), closeMask (as levels) with blocks ${CLOSE_BASE} + step for step = 0, 2, 1, 3
 //     (dilate x, dilate y, erode x, erode y), smoothLevels with blocks ${SMOOTH_BASE} + phase,
-//     phase = 0, 1 (depth-guided x, y; as levels), then for layer k = 1 (far), 0 (near), with block (k, 0) for the
+//     phase = 0 .. 3 (weighted median x/y, mean x/y; as levels), then for layer k = 1 (far), 0 (near), with block (k, 0) for the
 //     prepasses: clear tiles words [tilesX tilesY, 2 tilesX tilesY), reachX, verticalLevels,
 //     reachY, the channel passes with blocks (k, n); for k = 1: pull for l = 1 .. top, then
 //     push for l = top - 1 .. 0 (ceil(size_l / 8)^2 workgroups, size_l = ceil(size / 2^l),
@@ -1466,7 +1489,7 @@ export class BlurRenderer {
       for (let ch = 0; ch < this.channels; ch++) writeBlock(layer * MAX_CHANNELS + ch, { ch, layer });
     }
     for (let level = 0; level <= fillSizes.length; level++) writeBlock(FILL_BASE + level, { level });
-    for (let level = 0; level < 2; level++) writeBlock(SMOOTH_BASE + level, { level });
+    for (let level = 0; level < 4; level++) writeBlock(SMOOTH_BASE + level, { level });
     for (let step = 0; step < 4; step++) writeBlock(CLOSE_BASE + step, { level: step });
     for (let phase = 0; phase < 4; phase++) writeBlock(COVER_BASE + phase, { level: phase });
     for (let phase = 0; phase < 2; phase++) writeBlock(INSIDE_BASE + phase, { level: phase });
@@ -1535,7 +1558,7 @@ export class BlurRenderer {
         pass(p.spreadSplits, 0, tileGroups, "layers");
         pass(p.mask, 0, rowGroups, "layers");
         for (const step of [0, 2, 1, 3]) pass(p.closeMask, CLOSE_BASE + step, rowGroups, "layers");
-        for (let phase = 0; phase < 2; phase++) pass(p.smoothLevels, SMOOTH_BASE + phase, rowGroups, "layers");
+        for (let phase = 0; phase < 4; phase++) pass(p.smoothLevels, SMOOTH_BASE + phase, rowGroups, "layers");
       }
       // Back to front, so the near layer composites over the complete light behind it.
       const tileBytes = 4 * this.tilesX * this.tilesY;

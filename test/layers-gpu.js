@@ -56,6 +56,40 @@ export async function layersGPU(renderer, check, read) {
     }
   }
 
+  // Thin depth-estimation streak inside an otherwise constant foreground surface. A range-only
+  // mean treats the one-octave outlier as an edge and leaves an underblurred line. The weighted
+  // median must suppress it, without changing an actually focused thin feature elsewhere.
+  for (const transpose of [false, true]) {
+    const w = transpose ? height : width, h = transpose ? width : height;
+    const index = (x, y) => transpose ? x * w + y : y * w + x;
+    const image = new Float32Array(w * h * 4).fill(1);
+    const radii = new Float32Array(w * h);
+    const streak = [], sharp = [];
+    for (let y = 8; y < height - 8; y++) for (let x = 8; x < width - 8; x++) {
+      const i = index(x, y);
+      radii[i] = -16;
+      if (x >= 48 && x <= 49 && y >= 20 && y <= 78) {
+        radii[i] = -8;
+        if (y >= 32 && y <= 66) streak.push(i);
+      }
+      if (x === 72 && y >= 20 && y <= 78) { radii[i] = 0; sharp.push(i); }
+    }
+    renderer.setImage(image, w, h);
+    renderer.setRadiusMap(radii);
+    renderer.varying.kind = 'depth';
+    renderer.setKernel(presetParams(3), 16, 0.2);
+    for (const interpolate of [false, true]) for (const precision of ['f32', 'f16']) {
+      await renderer.render({ layers: 2, interpolate, precision });
+      const { smooth } = await sourceMaps(renderer, read);
+      let residual = 0, focusError = 0;
+      for (const i of streak) residual = Math.max(residual, Math.abs(smooth[i] + 16));
+      for (const i of sharp) focusError = Math.max(focusError, Math.abs(smooth[i]));
+      const label = `transpose=${transpose}, ${precision}, interpolate=${interpolate}`;
+      check(`thin defocused depth streak is suppressed (${label})`, residual, 1e-4);
+      check(`thin focused feature survives median filtering (${label})`, focusError, 1e-6);
+    }
+  }
+
   // The reported tetra view: its blue silhouette used to acquire 67px radii, and its bottom
   // edge had an 8.47px radius jump exactly where membership crossed 128 despite smooth depth.
   const shapes = new Shapes(renderer.device);

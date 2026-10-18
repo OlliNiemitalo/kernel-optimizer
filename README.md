@@ -277,18 +277,19 @@ shows through the object's semi-transparent edge, as in a real lens.
   a function of the source pixel alone, each layer is a linear image and the separable passes
   stay exact.
 - **Depth-guided source-radius smoothing.** Estimated depth is noisy, and with scatter-as-gather,
-  neighbors with different disc sizes do not sum to unit weight. Two separable passes over ±6 px
-  denoise the signed log-radius using triangular spatial weights and compact range weights
-  $(\max(0,1-d^2))^2$, where $d$ is the signed-level difference divided by six (one octave away
-  from the subpixel region). Both passes use the **original depth** as their guide; the second
-  also checks its filtered input, preventing diffusion across rejected depth edges. An original
-  center sample anchors the average. Radii of magnitude at most 0.5 px are untouched; smoothing
-  strength rises continuously to full strength at 2 px. One floating-point map serves both layers.
-  Layer membership controls visibility, not which pixels belong to the same surface: thresholding
-  its soft mask at 50% previously mixed sharp silhouettes with distant background and made a
-  notch where a continuous surface crossed that threshold. The filter no longer reads membership.
-  Large depth outliers are deliberately not replaced by unrelated neighbors; this is denoising,
-  not reconstruction of missing or incorrect depth.
+  neighbors with different disc sizes do not sum to unit weight. A weighted median along x/y,
+  followed by a weighted mean along x/y, denoises signed log-radius over ±6 px. The median removes
+  thin depth streaks that averaging alone can preserve as underblurred lines. For center and
+  neighbor memberships $m,n$, the soft affinity $mn+(1-m)(1-n)$ favors the same layer without a
+  hard 50% boundary. Membership alone cannot identify a surface: sharp edges and distant
+  background may both be in the far layer. Each phase therefore also uses compact depth weights
+  $(\max(0,1-d^2))^2$, where $d$ is the maximum signed-level difference of the original and filtered
+  neighbor from the original center, divided by twelve (two octaves outside the subpixel region).
+  The mean averages the cleaned values, without reintroducing original outliers; an empty weighted
+  neighborhood falls back to the original center. Radii of magnitude at most 0.5 px are untouched;
+  smoothing strength rises continuously to full strength at 2 px. One floating-point map serves
+  both layers. This suppresses moderate depth errors, but is not reconstruction of missing or
+  arbitrarily incorrect depth; the weighted median can still change discretely as ranks change.
 - **Back to front.** The far layer runs first; where its coverage is below ½ (behind the near
   layer's sources), it is completed by pull-push (a pyramid of coverage-weighted averages built by
   halving, then filled from coarse to fine with bilinear upsampling). The near layer, its color
@@ -327,13 +328,14 @@ with a separate active foreground layer, both transposed axes, both lookup modes
 subpixel radius preservation, and foreground noise reduction. The reproduced 960×600 tetra view
 also checks the sharp vertices and the soft-membership boundary: the old smoother inflated
 near-focus radii by up to 67.0 px and introduced an 8.47 px adjacent-radius jump there; the guided
-filter measures 0.318 px and 0.111 px respectively, with subpixel radii unchanged. These are
-measurements for that view, not universal error bounds. All 796 GPU checks pass.
-The change replaces four smoothing dispatches with two and adds no buffers. In an 11-sample
-alternating Intel Gen9 comparison with the previous integrated-kernel revision (`ded76b1`),
-two-layer nearest-mode total GPU time improved by about 2–8% on the tetra scene; the frozen
-woman video ranged from 3% slower to 5% faster across radii 15/69 and f32/packed intermediates.
-Clocks varied during the run. This is primarily a correctness change, not a general speedup.
+median/mean measures 0.499 px and 0.136 px respectively, with subpixel radii unchanged. A thin
+depth-streak regression checks that an erroneous 8 px radius inside a 16 px foreground returns
+to within $10^{-4}$ px of its neighbors, while a truly focused thin feature remains focused.
+These are measurements for the fixtures, not universal error bounds. All 812 GPU checks pass.
+The bilateral-only two-pass trial (`45455ec`) passed the tetra checks but regressed thin video
+boundaries and failed the streak fixture. The current filter restores four smoothing dispatches
+and adds no buffers; its weighted median costs more than a simple mean. The earlier two-pass
+performance measurements do not describe this revision.
 
 The **Layer view** selector shows the composite, the near layer's opacity (tinted, or as gray at
 half scale), the near layer alone, the hole-filled far layer alone, or, with one layer, the summed
