@@ -478,7 +478,9 @@ checkbox governs the two explicit population-initialization buttons.
 Continue resumes it. A newly initialized population shows Start until it has run a generation.
 Changing **Target and error** settings pauses and re-scores the existing
 population, preserving its members, generation count and random state. This allows manual
-negative-gain ramps: pause, change gain, then continue. Convergence history is cleared because
+negative-gain ramps: pause, change gain, then continue. The faint population curves use a stable
+subset of members and do not reshuffle when re-scored. The highlighted best member can change
+under the new objective. Convergence history is cleared because
 costs under different objectives are not comparable. Frequency-band changes constrain future
 trial candidates without replacing existing members. Changes to component structure, population
 size, DE parameters or seed discard the population, so the button returns to Start.

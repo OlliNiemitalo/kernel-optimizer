@@ -3,6 +3,16 @@ import { PARAMS_PER_COMPONENT, componentProfile, profile } from "./problem.js";
 
 const COLORS = ["#4cc9f0", "#f72585", "#90be6d", "#f9c74f", "#b5179e", "#43aa8b", "#f3722c", "#577590"];
 
+// Stable, evenly spaced rows: re-scoring unchanged members must not reshuffle the preview.
+export function populationPreview(population, dimensions) {
+  const size = population.length / dimensions;
+  const count = Math.min(24, size);
+  return Array.from({ length: count }, (_, i) => {
+    const row = Math.floor(i * size / count);
+    return Array.from(population.subarray(row * dimensions, (row + 1) * dimensions));
+  });
+}
+
 export function setupCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth;

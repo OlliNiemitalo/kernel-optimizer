@@ -7,6 +7,7 @@ import { continuousKernel, integratedKernel, kernelProfile } from "../src/contin
 import { radiusTables } from "../src/radius-tables.js";
 import { FineTuner } from "../src/finetune.js";
 import { testViewControls } from './view-controls.js';
+import { populationPreview } from '../src/plots.js';
 import {
   bounds, defaultProblem, maxError, multiplicities, nonnegativePresetParams, parseParams, presetParams, profile, sampleGrid,
   separableChannels,
@@ -25,6 +26,19 @@ const problemFor = (multiplicity) => ({ ...defaultProblem(), components: multipl
 
 testViewControls();
 console.log('PASS view-dependent control availability and diagnostic selection');
+
+// Preview rows are stable across redraws, distinct, and cover small/large populations.
+for (const size of [0, 8, 24, 32, 512]) {
+  const rows = Float32Array.from({ length: size * 6 }, (_, i) => i);
+  const preview = populationPreview(rows, 6);
+  assert.equal(preview.length, Math.min(size, 24));
+  assert.equal(new Set(preview.map(row => row[0])).size, preview.length);
+  assert.deepEqual(preview, populationPreview(rows.slice(), 6));
+  for (let i = 0; i < preview.length; i++) {
+    const start = Math.floor(i * size / preview.length) * 6;
+    assert.deepEqual(preview[i], Array.from(rows.slice(start, start + 6)));
+  }
+}
 
 // Test whole-population local jitter, including centers outside the global initialization box.
 for (const multiplicity of [[1], [2]]) {
@@ -72,6 +86,7 @@ for (const multiplicity of [[1], [2]]) {
       de.updateProblem(grid, newBounds);
       const after = await de.snapshot();
       assert.deepEqual(after.population, before.population);
+      assert.deepEqual(populationPreview(after.population, de.D), populationPreview(before.population, de.D));
       assert.equal(de.generation, generation);
       assert.deepEqual(Array.from(await de.key.data()), key);
       const verifyCosts = (snapshot) => {

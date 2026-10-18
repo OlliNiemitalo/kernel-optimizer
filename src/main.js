@@ -54,7 +54,7 @@ const VIDEO_SAMPLES = [
   }]);
 import { DifferentialEvolution } from "./de.js";
 import { FineTuner } from "./finetune.js";
-import { drawConvergence, drawDisc, drawError, drawProfile } from "./plots.js";
+import { drawConvergence, drawDisc, drawError, drawProfile, populationPreview } from "./plots.js";
 import {
   PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, maxError, multiplicities, parseParams,
   presetParams, nonnegativePresetParams, PRESETS, sampleGrid, sortByFrequency,
@@ -239,7 +239,7 @@ function createDE({ centered = false, autoStart = false } = {}) {
   return true;
 }
 
-async function observe(startTime, generationsRun) {
+async function observe(startTime, generationsRun, { rescored = false } = {}) {
   const de = state.de;
   const revision = de.revision;
   let snap;
@@ -250,21 +250,17 @@ async function observe(startTime, generationsRun) {
     return;
   }
   if (de !== state.de || revision !== de.revision) return;
-  const D = de.D;
   state.history.push({ gen: de.generation, best: snap.bestCost, mean: snap.meanCost });
   if (state.history.length > 4000) state.history = state.history.filter((_, k) => k % 2 === 0);
-  const picks = Math.min(24, de.P);
-  state.populationSample = Array.from({ length: picks }, () => {
-    const k = Math.floor(Math.random() * de.P);
-    return Array.from(snap.population.subarray(k * D, (k + 1) * D));
-  });
+  state.populationSample = populationPreview(snap.population, de.D);
   setCurrent(snap.best, "differential evolution");
   const now = performance.now();
   const rate = generationsRun > 0 ? (generationsRun * de.P) / ((now - startTime) / 1000) : 0;
   setStatus(
     `Optimizer on ${state.backend} · generation ${de.generation} · ` +
       (rate ? `${Math.round(rate).toLocaleString()} evaluations/s · ` : "") +
-      `population best ±${snap.bestCost.toFixed(6)}, mean ${snap.meanCost.toFixed(5)}`,
+      `population best ±${snap.bestCost.toFixed(6)}, mean ${snap.meanCost.toFixed(5)}` +
+      (rescored ? " · Same population re-scored; convergence history restarted for the new objective." : ""),
   );
   drawAll();
 }
@@ -836,7 +832,7 @@ function wire() {
           state.de.updateProblem(sampleGrid(problem), bounds(problem));
           // Old costs are not comparable after changing the objective.
           state.history = [];
-          await observe(performance.now(), 0);
+          await observe(performance.now(), 0, { rescored: true });
         } catch (e) {
           setStatus(`Could not update optimizer: ${e.message}`);
         }
