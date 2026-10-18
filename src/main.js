@@ -441,7 +441,7 @@ function endHover() {
   easeFocus();
 }
 
-// Dragging on the tetrahedra scene turns the view; a drag is neither a focus hover nor a click.
+// Dragging on the tetra scene turns the view; a drag is neither a focus hover nor a click.
 const DRAG_START = 4; // CSS pixels of movement before a press becomes a drag
 const drag = { down: false, moved: false, x: 0, y: 0 };
 
@@ -467,6 +467,14 @@ function moveDrag(e) {
 
 function endDrag() {
   drag.down = false;
+}
+
+// The wheel scales the tetra scene; the focus distance scales with it, so it stays on the same spot.
+function wheelScale(e) {
+  if (state.source !== "shapes") return;
+  e.preventDefault();
+  const factor = state.shapes.zoom(Math.exp(e.deltaY * 0.001));
+  setFocusSlider(Math.min(1, num("focus") / Math.sqrt(factor)));
 }
 
 async function clickFocus(e) {
@@ -497,7 +505,7 @@ function viewState() {
       state.source === "video" ? `video: ${state.video.name}`
       : state.source === "image" ? `image: ${state.imageFile?.name}`
       : state.source,
-    ...(state.source === "shapes" && { camera: { yaw: state.shapes.yaw, pitch: state.shapes.pitch } }),
+    ...(state.source === "shapes" && { camera: { yaw: state.shapes.yaw, pitch: state.shapes.pitch, scale: state.shapes.scale } }),
     time: state.sceneTime,
     playing: state.playing,
     controls,
@@ -512,7 +520,10 @@ function viewState() {
 async function applyViewState(view) {
   if (view.scene === "world" && state.source !== "world") useWorld();
   if (view.scene === "shapes" && state.source !== "shapes") useShapes();
-  if (view.scene === "shapes" && view.camera) Object.assign(state.shapes, { yaw: Number(view.camera.yaw) || 0, pitch: Number(view.camera.pitch) || 0 });
+  if (view.scene === "shapes" && view.camera) {
+    const { yaw, pitch, scale } = view.camera;
+    Object.assign(state.shapes, { yaw: Number(yaw) || 0, pitch: Number(pitch) || 0, scale: Number(scale) || 1 });
+  }
   if (view.scene === "procedural") useImage(proceduralScene(), "procedural");
   const sample = VIDEO_SAMPLES.find((s) => view.scene === `video: ${s.label}`);
   if (sample && state.video?.name !== sample.label) await useVideo(sample);
@@ -598,7 +609,7 @@ async function renderBlur() {
       showLayers: Number($("showLayers").value),
       capture,
     });
-    const prefix = { world: "street", video: "video", shapes: "tetrahedra" }[state.source];
+    const prefix = { world: "street", video: "video", shapes: "tetras" }[state.source];
     if (r.png) download(r.png, prefix ? `${prefix}-t${state.sceneTime.toFixed(4)}s.png` : "blur.png");
     lastBlurTime = now;
     const gpu = r.gpuMs
@@ -662,7 +673,7 @@ function useShapes() {
   state.blur.setAnimated(state.shapes, 960, 600);
   state.source = "shapes";
   $("blurMode").value = "depth";
-  setFocusSlider(Math.sqrt(1 / state.shapes.distance)); // the middle tetrahedron
+  setFocusSlider(Math.sqrt(1 / (state.shapes.distance * state.shapes.scale))); // the middle tetra
   requestBlur(true);
 }
 
@@ -826,6 +837,7 @@ function wire() {
   $("blurCanvas").addEventListener("pointerdown", startDrag);
   $("blurCanvas").addEventListener("pointermove", moveDrag);
   for (const type of ["pointerup", "pointercancel"]) $("blurCanvas").addEventListener(type, endDrag);
+  $("blurCanvas").addEventListener("wheel", wheelScale, { passive: false });
   $("blurCanvas").addEventListener("click", clickFocus);
   $("exposure").addEventListener("input", () => {
     $("exposureOut").textContent = `${Math.pow(2, num("exposure")).toFixed(2)}×`;
