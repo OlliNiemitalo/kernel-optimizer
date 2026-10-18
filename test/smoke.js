@@ -1,6 +1,7 @@
 // Node smoke test (Wasm backend): kernel math, separable channels, DE, fine-tuning.
 import { defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
-import { DifferentialEvolution } from "../src/de.js";
+import { DifferentialEvolution, initialPopulation } from "../src/de.js";
+import assert from "node:assert/strict";
 import { tapTables } from "../src/blur.js";
 import { continuousKernel, integratedKernel, kernelProfile } from "../src/continuous-kernel.js";
 import { radiusTables } from "../src/radius-tables.js";
@@ -24,6 +25,74 @@ const problemFor = (multiplicity) => ({ ...defaultProblem(), components: multipl
 
 testViewControls();
 console.log('PASS view-dependent control availability and diagnostic selection');
+
+// Test whole-population local jitter, including centers outside the global initialization box.
+for (const multiplicity of [[1], [2]]) {
+  const problem = { ...problemFor(multiplicity), frequencyBands: false, passSamples: 32, stopSamples: 32 };
+  const limits = bounds(problem);
+  const center = [3, 2, 12, -8, multiplicity[0] === 2 ? 1 : 0, 0];
+  const options = { bounds: limits, populationSize: 32, dimensions: 6, seed: 123, center };
+  const population = initialPopulation(options);
+  assert.deepEqual(population, initialPopulation(options));
+  assert.notDeepEqual(population, initialPopulation({ ...options, seed: 124 }));
+  assert.deepEqual(Array.from(population.slice(0, 6)), center);
+  const withoutCenter = initialPopulation({ ...options, includeCenter: false });
+  assert.notDeepEqual(Array.from(withoutCenter.slice(0, 6)), center);
+  for (let k = 1; k < 32; k++) {
+    assert.ok(population.slice(k * 6, (k + 1) * 6).some((v, j) => v !== center[j]));
+    for (let j = 0; j < 6; j++) {
+      const v = population[k * 6 + j];
+      const radius = Math.min(0.05 * (limits.initHi[j] - limits.initLo[j]),
+        center[j] - limits.foldLo[j], limits.foldHi[j] - center[j]);
+      assert.ok(Math.abs(v - center[j]) <= radius + 1e-6);
+      assert.ok(v >= limits.foldLo[j] && v <= limits.foldHi[j]);
+    }
+  }
+  const edge = initialPopulation({ ...options, center: [3, 0, 12, -8, 0, 0] });
+  assert.equal(edge[7], 0);
+  assert.throws(() => initialPopulation({ ...options, center: [NaN, 2, 12, -8, 0, 0] }));
+  assert.throws(() => initialPopulation({ ...options, center: [0, 2, 12, -8, 0, 0] }));
+  assert.throws(() => initialPopulation({ ...options, center: [1] }));
+  if (multiplicity[0] === 1) assert.throws(() => initialPopulation({ ...options, center: [3, 2, 12, -8, 1, 0] }));
+  const de = new DifferentialEvolution({ components: 1, grid: sampleGrid(problem), bounds: limits,
+    populationSize: 32, F: 0.5, CR: 0.9, seed: 123, populationCenter: center });
+  try {
+    const snap = await de.snapshot();
+    assert.deepEqual(snap.population, population);
+    assert.ok(Array.from(snap.costs).every(Number.isFinite));
+    de.step();
+    assert.ok((await de.snapshot()).bestCost <= snap.bestCost);
+    for (const gain of [5, 30, 1]) {
+      const before = await de.snapshot();
+      const key = Array.from(await de.key.data());
+      const generation = de.generation;
+      const changedProblem = { ...problem, transition: 0.35, passSamples: 40, stopSamples: 50, negativeWeight: gain };
+      const grid = sampleGrid(changedProblem);
+      const newBounds = bounds({ ...changedProblem, frequencyBands: true });
+      de.updateProblem(grid, newBounds);
+      const after = await de.snapshot();
+      assert.deepEqual(after.population, before.population);
+      assert.equal(de.generation, generation);
+      assert.deepEqual(Array.from(await de.key.data()), key);
+      const verifyCosts = (snapshot) => {
+        for (let k = 0; k < de.P; k++) {
+          const expected = maxError(Array.from(snapshot.population.slice(k * de.D, (k + 1) * de.D)), grid);
+          assert.ok(Math.abs(snapshot.costs[k] - expected) < 1e-4 * Math.max(1, expected));
+        }
+      };
+      verifyCosts(after);
+      de.inject(center);
+      verifyCosts(await de.snapshot());
+      for (let step = 0; step < 3; step++) {
+        de.step();
+        verifyCosts(await de.snapshot());
+      }
+    }
+  } finally {
+    de.dispose();
+  }
+}
+console.log('PASS centered population, optional exact seed, objective re-scoring, retained population/RNG/generation and updated DE/injection costs');
 
 {
   let dcError = 0, channelError = 0, floatChannelError = 0, quadratureError = 0, integratedError = 0, continuity = 0;

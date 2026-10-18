@@ -7,24 +7,27 @@ export function viewControls({ ready, source, blur, mode, layers, sizeBlur, occl
   const varying = filtering && (depth || mode === 'tiltShift');
   const layered = depth && layers;
   const layerViews = layered ? ['0', '1', '2', '3', '5'] : ['0', '4'];
+  if (depth) layerViews.push('6');
   const view = filtering && layerViews.includes(String(showLayers)) ? String(showLayers) : '0';
+  const depthView = view === '6';
   const playback = ready && ['world', 'video'].includes(source);
   return {
     depthAvailable,
     layerViews,
     view,
     disabled: {
-      blurOn: !ready, blurMode: !filtering, radius: !filtering, focus: !depth,
-      varyingControls: !varying, radiusInterpolation: !varying,
-      layers: !depth, showLayers: !filtering,
+      blurOn: !ready, blurMode: !filtering, radius: !filtering || depthView, focus: !depth || depthView,
+      // Keep uniform kernel-weight diagnostics reachable inside this fieldset.
+      varyingControls: !filtering, radiusInterpolation: !varying || depthView,
+      layers: !depth || depthView, showLayers: !filtering,
       // Tilt-shift radii are constant along each row, so their horizontal average is unchanged.
-      sizeBlur: !depth, sizeBrightness: !depth || !sizeBlur,
-      occlusion: !depth, occlusionLevels: !depth || !occlusion,
+      sizeBlur: !depth || depthView, sizeBrightness: !depth || !sizeBlur || depthView,
+      occlusion: !depth || depthView, occlusionLevels: !depth || !occlusion || depthView,
       shapesScale: !ready || source !== 'shapes',
-      boost: !ready || !['video', 'image'].includes(source),
+      boost: !ready || !['video', 'image'].includes(source) || depthView,
       playPause: !playback, stepBack: !playback, stepForward: !playback, sceneTime: !playback,
-      precision: !filtering, follow: !filtering,
-      exposure: !ready, tonemap: !ready, saveFrame: !ready, copyView: !ready,
+      precision: !filtering || depthView, follow: !filtering || depthView,
+      exposure: !ready || depthView, tonemap: !ready || depthView, saveFrame: !ready, copyView: !ready,
     },
   };
 }

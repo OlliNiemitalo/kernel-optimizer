@@ -979,7 +979,8 @@ struct View {
   showSource: u32,
   layered: u32,   // 1: blurred is the hole-filled last layer, under the composited nearer layers
   showLayers: u32, // debug view: 0 composite, 1 nearer layers' opacity tinted red, 2 that opacity at
-                   // half scale, 3 near layer only, 5 far layer only; without layers, 4 the kernel weight sum at half scale
+                   // half scale, 3 near layer only, 5 far layer only; without layers, 4 the kernel weight sum at half scale;
+                   // 6 decoded inverse depth, mapped to gray as d / (1 + d), independent of exposure/tone mapping
 }
 
 @group(0) @binding(0) var<uniform> V: View;
@@ -1000,6 +1001,11 @@ fn toSrgb(c: vec3f) -> vec3f {
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let i = u32(pos.y) * V.width + u32(pos.x);
+  if (V.showLayers == 6u && V.showSource == 0u) {
+    // source.w is inverse depth in 1/m (relative units for estimated video depth).
+    let d = max(source[i].w, 0.0);
+    return vec4f(vec3f(d / (1.0 + d)), 1.0);
+  }
   let b = blurred[i];
   var c = b.rgb / b.w;
   if (V.layered == 1u) {

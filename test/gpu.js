@@ -4,6 +4,7 @@ import { presetParams } from '../src/problem.js';
 import { Shapes } from '../src/shapes.js';
 import { continuousGPU } from './continuous-gpu.js';
 import { layersGPU } from './layers-gpu.js';
+import { depthViewGPU } from './depth-view-gpu.js';
 
 async function read(device, buffer) {
   const staging = device.createBuffer({ size: buffer.size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -59,6 +60,7 @@ export async function run() {
     return data;
   }
   try {
+    await depthViewGPU(device, check);
     await continuousGPU(renderer, check, read);
     for (const transpose of [false, true]) for (const precision of ['f32', 'f16']) for (const sizeBlur of [null, 1]) {
       transposed = transpose;

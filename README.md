@@ -46,12 +46,18 @@ for the optimizer.
 available only for videos and the animated world; highlight boost only for images and videos.
 Focus, layers, blur-size blending and occlusion require depth mode with a depth source (world,
 video or Tetras). Brightness weight additionally requires blur-size blending, and the occlusion
-threshold requires occlusion. Radius interpolation is available only for varying blur. Tilt-shift
-has one radius per row, so blur-size blending and brightness weighting have no effect and are
-disabled. The **Layer view** selector is in **Display**: with blur enabled it offers the composite
+threshold requires occlusion. Radius interpolation is available only for varying blur.
+Tilt-shift has one radius per row, so blur-size blending and brightness weighting have no effect and are
+disabled. The general **View** selector is in **Varying blur**: with blur enabled it offers the composite
 and, for one layer, summed kernel weight; near/far diagnostics are available only with depth
 layers enabled. Disabled settings are retained, while an unavailable diagnostic resets to the
-composite.
+composite. **Depth map** is available for all depth sources in depth-of-field mode, with or without
+layers. It shows the decoded inverse depth used for focus picking and blur-radius generation,
+not the layer-smoothed radius. Brighter means nearer;
+inverse depth $d$ maps to display gray $d/(1+d)$ (black at infinity, half gray at $d=1$).
+This fixed diagnostic scale bypasses exposure and tone mapping. Controls that only affect blur or
+color are disabled in this view. The selector remains usable in uniform mode for kernel-weight
+diagnostics even though the varying-blur settings are disabled.
 
 **Image capture.** **Save PNG** downloads the rendered view; **Copy image** writes a freshly
 rendered PNG to the system clipboard for pasting into other applications. Copying requires a
@@ -221,7 +227,8 @@ relative inverse depth $v \in [0, 1]$ in one of two layouts:
   the color video while playing, and on the same frame when paused or stepping.
 
 Inverse depth suits 8-bit video, since the blur radius is linear in it: one gray level is a fixed
-fraction of $R$. Videos wider than 960 pixels are downscaled when read. Varying radii use
+fraction of $R$. Videos wider than 960 pixels are downscaled when read.
+Varying radii use
 **precomputed radius-node tap tables**: nodes at 1/64 pixel spacing through 4 pixels, then
 64 per octave. **Interpolate blur radii** in the Varying blur controls is off by default:
 the faster nearest-node shader fetches one tap, using that node's
@@ -358,7 +365,7 @@ regression checks that an erroneous 8 px radius inside a 16 px foreground return
 to within $10^{-4}$ px of its neighbors, while a truly focused thin feature remains focused.
 These are fixture-specific checks, not universal error bounds.
 
-The **Layer view** selector in **Display** shows the composite, the near layer's opacity (tinted,
+The **View** selector in **Varying blur** shows the composite, the depth map, the near layer's opacity (tinted,
 or as gray at half scale), the near layer alone, the hole-filled far layer alone, or, with one
 layer, the summed kernel weight per pixel.
 
@@ -452,6 +459,29 @@ $(c + d i)^2 e^{(a + bi)s}$; in this app's parameters that is $b \leftarrow -a$,
 $r = c^2 - d^2$, $i = -2cd$. They load with $w = 100$, at which the 1-component set is about
 equiripple, and without the per-slot frequency bands, which they don't follow (one of the
 2-component set's rates is almost real).
+
+**Population around current** replaces the population with a local search neighborhood around
+the current kernel. Members get independent uniform
+perturbations of up to ±5% of each parameter's normal initialization range. The width shrinks
+symmetrically near search bounds; pinned parameters remain fixed. It uses the displayed **Seed**
+for reproducibility and resumes only if optimization was already running. A kernel outside the
+current search bounds or with incompatible pinned parameters is rejected rather than silently
+changed; check the frequency-band and component settings. **New population** instead samples
+the global initialization ranges. **Include current kernel in a new population**, grouped with
+these two buttons, retains the exact current kernel as member zero in either mode when checked;
+when unchecked, every member is sampled. The local neighborhood limits initialization only;
+subsequent DE generations still use the full search bounds.
+An implicit Start after loading or fine-tuning a kernel can retain it automatically; the
+checkbox governs the two explicit population-initialization buttons.
+
+**Start / Pause / Continue.** Start creates a population if none exists. Pause keeps it, and
+Continue resumes it. A newly initialized population shows Start until it has run a generation.
+Changing **Target and error** settings pauses and re-scores the existing
+population, preserving its members, generation count and random state. This allows manual
+negative-gain ramps: pause, change gain, then continue. Convergence history is cleared because
+costs under different objectives are not comparable. Frequency-band changes constrain future
+trial candidates without replacing existing members. Changes to component structure, population
+size, DE parameters or seed discard the population, so the button returns to Start.
 
 **Differential evolution** ([`src/de.js`](src/de.js)) is generation-synchronous, so that each
 generation is one jitted GPU call with no data read back:

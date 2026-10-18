@@ -21,11 +21,22 @@ export function testViewControls() {
         assert.equal(!c.disabled.precision, blur);
         assert.equal(c.layerViews.includes('1'), depth && layers);
         assert.equal(c.layerViews.includes('4'), !(depth && layers));
+        assert.equal(c.layerViews.includes('6'), depth);
       }
     }
   }
   assert.equal(controls({ sizeBlur: false }).disabled.sizeBrightness, true);
   assert.equal(controls({ occlusion: false }).disabled.occlusionLevels, true);
+  const depthView = controls({ showLayers: '6' });
+  assert.equal(depthView.view, '6');
+  for (const id of ['radius', 'focus', 'layers', 'sizeBlur', 'sizeBrightness', 'occlusion',
+    'occlusionLevels', 'precision', 'follow', 'exposure', 'tonemap', 'boost', 'radiusInterpolation']) {
+    assert.equal(depthView.disabled[id], true, `depth view: ${id}`);
+  }
+  assert.equal(depthView.disabled.showLayers, false);
+  assert.equal(controls({ showLayers: '6', layers: true }).view, '6');
+  assert.equal(controls({ showLayers: '6', mode: 'uniform' }).view, '0');
+  assert.equal(controls({ mode: 'uniform' }).disabled.varyingControls, false);
   assert.equal(controls({ showLayers: '3' }).view, '0');
   assert.equal(controls({ showLayers: '3', layers: true }).view, '3');
   assert.equal(controls({ showLayers: '4', mode: 'uniform' }).view, '4');

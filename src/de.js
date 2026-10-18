@@ -16,7 +16,6 @@ import { PARAMS_PER_COMPONENT } from "./problem.js";
 export function batchCost(params, s2, target, components, negativeWeight = 1) {
   const prof = profileBatch(params, s2, components);
   const err = np.abs(prof.sub(target.reshape([1, -1])));
-  if (negativeWeight === 1) return err.max(1);
   return np.where(np.less(prof, 0), err.mul(negativeWeight), err).max(1);
 }
 
@@ -38,18 +37,46 @@ function mulberry32(seed) {
   };
 }
 
+// Centered initialization uses a symmetric neighborhood, clipped in width (not shifted) at
+// search bounds. Optionally keep the exact center as member zero. Global initialization is unchanged.
+export function initialPopulation({ bounds, populationSize, dimensions, seed, center = null, includeCenter = true }) {
+  const D = dimensions, P = populationSize;
+  if (center && (center.length !== D || Array.from(center).some((v, j) =>
+    !Number.isFinite(v) || v < bounds.foldLo[j] || v > bounds.foldHi[j]))) {
+    throw new Error("Current kernel must match the component structure and search bounds. Check frequency bands and pinned parameters.");
+  }
+  const rand = mulberry32(seed);
+  const init = new Float32Array(P * D);
+  for (let k = 0; k < P; k++) {
+    for (let j = 0; j < D; j++) {
+      if (center) {
+        const radius = Math.min(0.05 * (bounds.initHi[j] - bounds.initLo[j]),
+          center[j] - bounds.foldLo[j], bounds.foldHi[j] - center[j]);
+        init[k * D + j] = center[j] + (2 * rand() - 1) * radius;
+      } else {
+        init[k * D + j] = bounds.initLo[j] + (bounds.initHi[j] - bounds.initLo[j]) * rand();
+      }
+    }
+  }
+  if (center && includeCenter) init.set(center, 0);
+  return init;
+}
+
 export class DifferentialEvolution {
   // grid: { x, target } sample points; bounds: { foldLo, foldHi, initLo, initHi }.
-  constructor({ components, grid, bounds, populationSize, F, CR, seed, startingPoint }) {
+  constructor({ components, grid, bounds, populationSize, F, CR, seed, startingPoint, populationCenter = null, includeCenter = true }) {
     const P = populationSize;
     const D = components * PARAMS_PER_COMPONENT;
     if (P < 4) throw new Error("Population size must be at least 4.");
+    const init = initialPopulation({ bounds, populationSize: P, dimensions: D, seed, center: populationCenter, includeCenter });
+    if (!populationCenter && startingPoint && startingPoint.length === D) init.set(startingPoint, 0);
     this.P = P;
     this.D = D;
     this.generation = 0;
+    this.revision = 0;
 
     const s2 = Float32Array.from(grid.x, (x) => x * x);
-    const negativeWeight = grid.negativeWeight ?? 1;
+    this.negativeWeight = np.array(grid.negativeWeight ?? 1);
     this.s2 = np.array(s2);
     this.target = np.array(Float32Array.from(grid.target));
     this.lo = np.array(Float32Array.from(bounds.foldLo)).reshape([1, D]);
@@ -58,26 +85,17 @@ export class DifferentialEvolution {
     this.roll = [roll(1), roll(2), roll(3)];
     this.positions = np.array(Float32Array.from({ length: D }, (_, j) => j)).reshape([1, D]);
 
-    const rand = mulberry32(seed);
-    const init = new Float32Array(P * D);
-    for (let k = 0; k < P; k++) {
-      for (let j = 0; j < D; j++) {
-        init[k * D + j] = bounds.initLo[j] + (bounds.initHi[j] - bounds.initLo[j]) * rand();
-      }
-    }
-    if (startingPoint && startingPoint.length === D) init.set(startingPoint, 0);
-
-    this.costFn = jit((pop, s2v, tv) => batchCost(pop, s2v, tv, components, negativeWeight));
+    this.costFn = jit((pop, s2v, tv, weight) => batchCost(pop, s2v, tv, components, weight));
     {
       using foldFn = jit(fold);
       using raw = np.array(init).reshape([P, D]);
       this.pop = foldFn(raw, this.lo, this.hi);
     }
-    this.cost = this.costFn(this.pop, this.s2, this.target);
+    this.cost = this.costFn(this.pop, this.s2, this.target, this.negativeWeight);
     this.key = random.key(seed >>> 0);
 
     const logCR = CR < 1 ? Math.log(CR) : 0;
-    this.stepFn = jit((pop, cost, key, s2v, tv, lo, hi, r1, r2, r3, positions) => {
+    this.stepFn = jit((pop, cost, key, s2v, tv, lo, hi, r1, r2, r3, positions, weight) => {
       const keys = random.split(key, 4);
       const sub = (i) => {
         using idx = np.array([i], { dtype: np.int32 });
@@ -101,7 +119,7 @@ export class DifferentialEvolution {
       const offset = np.remainder(positions.sub(start).add(D), D);
       const trial = fold(np.where(np.less(offset, length), mutant, targets), lo, hi);
 
-      const trialCost = batchCost(trial, s2v, tv, components, negativeWeight);
+      const trialCost = batchCost(trial, s2v, tv, components, weight);
       const better = np.less(trialCost, targetCost);
       const nextPop = np.where(better.reshape([P, 1]), trial, targets);
       const nextCost = np.where(better, trialCost, targetCost);
@@ -109,21 +127,47 @@ export class DifferentialEvolution {
     });
 
     this.index = np.array(Int32Array.from({ length: P }, (_, k) => k), { dtype: np.int32 });
-    this.injectFn = jit((pop, cost, row, s2v, tv, lo, hi, index) => {
+    this.injectFn = jit((pop, cost, row, s2v, tv, lo, hi, index, weight) => {
       const r = fold(row.reshape([1, D]), lo, hi);
       const hit = np.equal(index, np.argmax(cost));
-      return [np.where(hit.reshape([P, 1]), r, pop), np.where(hit, batchCost(r, s2v, tv, components, negativeWeight), cost)];
+      return [np.where(hit.reshape([P, 1]), r, pop), np.where(hit, batchCost(r, s2v, tv, components, weight), cost)];
     });
+  }
+
+  // Re-score existing members without changing population, generation, or random-key state.
+  // New search bounds constrain subsequent trials, not the retained population.
+  updateProblem(grid, bounds) {
+    const s2 = np.array(Float32Array.from(grid.x, x => x * x));
+    const target = np.array(Float32Array.from(grid.target));
+    const weight = np.array(grid.negativeWeight ?? 1);
+    const lo = np.array(Float32Array.from(bounds.foldLo)).reshape([1, this.D]);
+    const hi = np.array(Float32Array.from(bounds.foldHi)).reshape([1, this.D]);
+    let cost;
+    try {
+      cost = this.costFn(this.pop, s2, target, weight);
+    } catch (e) {
+      for (const a of [s2, target, weight, lo, hi]) a.dispose();
+      throw e;
+    }
+    for (const a of [this.s2, this.target, this.negativeWeight, this.lo, this.hi, this.cost]) a.dispose();
+    this.s2 = s2;
+    this.target = target;
+    this.negativeWeight = weight;
+    this.lo = lo;
+    this.hi = hi;
+    this.cost = cost;
+    this.revision++;
   }
 
   // Replace the worst member with the given parameter vector (e.g. a fine-tuned kernel).
   inject(params) {
     using row = np.array(Float32Array.from(params));
-    const [pop, cost] = this.injectFn(this.pop, this.cost, row, this.s2, this.target, this.lo, this.hi, this.index);
+    const [pop, cost] = this.injectFn(this.pop, this.cost, row, this.s2, this.target, this.lo, this.hi, this.index, this.negativeWeight);
     this.pop.dispose();
     this.cost.dispose();
     this.pop = pop;
     this.cost = cost;
+    this.revision++;
   }
 
   // Enqueue generations without reading back.
@@ -131,7 +175,7 @@ export class DifferentialEvolution {
     for (let g = 0; g < generations; g++) {
       const [pop, cost, key] = this.stepFn(
         this.pop, this.cost, this.key, this.s2, this.target, this.lo, this.hi,
-        this.roll[0], this.roll[1], this.roll[2], this.positions,
+        this.roll[0], this.roll[1], this.roll[2], this.positions, this.negativeWeight,
       );
       this.pop.dispose();
       this.cost.dispose();
@@ -140,6 +184,7 @@ export class DifferentialEvolution {
       this.cost = cost;
       this.key = key;
       this.generation++;
+      this.revision++;
     }
   }
 
@@ -161,7 +206,7 @@ export class DifferentialEvolution {
   }
 
   dispose() {
-    for (const a of [this.pop, this.cost, this.key, this.s2, this.target, this.lo, this.hi, this.positions, this.index, ...this.roll]) {
+    for (const a of [this.pop, this.cost, this.key, this.s2, this.target, this.negativeWeight, this.lo, this.hi, this.positions, this.index, ...this.roll]) {
       a.dispose();
     }
     this.costFn.dispose();

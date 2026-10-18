@@ -149,6 +149,7 @@ function describeRanges(problem) {
 // ---- current kernel -------------------------------------------------------------------
 
 function setCurrent(params, source) {
+  $("centerPopulation").disabled = state.busy;
   const problem = readProblem();
   state.current = {
     params: Array.from(params),
@@ -190,6 +191,7 @@ function drawAll() {
 function discardDE({ include = null } = {}) {
   state.de?.dispose();
   state.de = null;
+  updateRunButton();
   if (include) state.include = include;
   state.history = [];
   state.populationSample = [];
@@ -203,17 +205,16 @@ function discardDE({ include = null } = {}) {
   drawAll();
 }
 
-function createDE() {
-  state.de?.dispose();
-  state.de = null;
+function createDE({ centered = false, autoStart = false } = {}) {
   const problem = readProblem();
   describeRanges(problem);
   const D = problem.components * PARAMS_PER_COMPONENT;
-  const candidate = state.include ?? ($("seedWithCurrent").checked ? state.current?.params : null);
+  // An implicit Start can keep a loaded/fine-tuned kernel; explicit population buttons
+  // always honor their checkbox instead.
+  const candidate = (autoStart ? state.include : null) ?? ($("seedWithCurrent").checked ? state.current?.params : null);
   const seedWith = candidate?.length === D ? candidate : null;
-  state.include = null;
   try {
-    state.de = new DifferentialEvolution({
+    const de = new DifferentialEvolution({
       components: problem.components,
       grid: sampleGrid(problem),
       bounds: bounds(problem),
@@ -222,7 +223,13 @@ function createDE() {
       CR: num("CR"),
       seed: Math.round(num("seed")) >>> 0,
       startingPoint: seedWith && Float32Array.from(seedWith),
+      populationCenter: centered ? state.current?.params : null,
+      includeCenter: $("seedWithCurrent").checked,
     });
+    state.de?.dispose();
+    state.de = de;
+    state.include = null;
+    updateRunButton();
   } catch (e) {
     setStatus(`Could not create optimizer: ${e.message}`);
     return false;
@@ -234,14 +241,15 @@ function createDE() {
 
 async function observe(startTime, generationsRun) {
   const de = state.de;
+  const revision = de.revision;
   let snap;
   try {
     snap = await de.snapshot();
   } catch (e) {
-    if (de === state.de) setStatus(`Optimizer failed: ${e.message}`);
+    if (de === state.de && revision === de.revision) setStatus(`Optimizer failed: ${e.message}`);
     return;
   }
-  if (de !== state.de) return;
+  if (de !== state.de || revision !== de.revision) return;
   const D = de.D;
   state.history.push({ gen: de.generation, best: snap.bestCost, mean: snap.meanCost });
   if (state.history.length > 4000) state.history = state.history.filter((_, k) => k % 2 === 0);
@@ -261,8 +269,9 @@ async function observe(startTime, generationsRun) {
   drawAll();
 }
 
-async function runLoop() {
-  while (state.running && state.de) {
+let runVersion = 0;
+async function runLoop(version) {
+  while (state.running && state.de && version === runVersion) {
     const t0 = performance.now();
     const gens = Math.max(1, Math.round(num("gensPerFrame")));
     state.de.step(gens);
@@ -271,10 +280,15 @@ async function runLoop() {
   }
 }
 
+function updateRunButton() {
+  $("run").textContent = state.running ? "Pause" : state.de?.generation > 0 ? "Continue" : "Start";
+}
+
 function setRunning(running) {
   state.running = running;
-  $("run").textContent = running ? "Pause" : "Start";
-  if (running) runLoop();
+  updateRunButton();
+  const version = ++runVersion;
+  if (running) runLoop(version);
 }
 
 // ---- gradient fine-tuning -------------------------------------------------------------------
@@ -285,6 +299,7 @@ async function fineTune() {
   setRunning(false);
   state.busy = true;
   $("finetune").disabled = true;
+  $("centerPopulation").disabled = true;
   const problem = readProblem();
   const grid = denseGrid(problem);
   const components = state.current.params.length / PARAMS_PER_COMPONENT;
@@ -326,6 +341,7 @@ async function fineTune() {
     }
     state.busy = false;
     $("finetune").disabled = false;
+    $("centerPopulation").disabled = !state.current;
     if (wasRunning) setRunning(true);
   }
 }
@@ -389,7 +405,7 @@ const PICK_RADIUS = 8; // image pixels
 const FOCUS_EASE = 0.12; // time constant, s
 const hover = { active: false, x: 0, y: 0, saved: 0, target: 0, value: 0, picking: false, easing: false };
 
-const canPick = () => state.blur && $("blurOn").checked && $("blurMode").value === "depth" && hasDepth();
+const canPick = () => state.blur && $("blurOn").checked && $("blurMode").value === "depth" && $("showLayers").value !== "6" && hasDepth();
 
 function canvasPixel(e) {
   const rect = $("blurCanvas").getBoundingClientRect();
@@ -784,7 +800,7 @@ function showShader() {
 
 function wire() {
   $("run").onclick = () => {
-    if (!state.running && !state.de && !createDE()) return;
+    if (!state.running && !state.de && !createDE({ autoStart: true })) return;
     setRunning(!state.running);
   };
   $("reset").onclick = () => {
@@ -795,7 +811,39 @@ function wire() {
     observe(performance.now(), 0);
     if (wasRunning) setRunning(true);
   };
-  for (const id of ["components", "multiplicity", "transition", "passSamples", "stopSamples", "frequencyBands", "negGain", "population", "F", "CR", "seed"]) {
+  $("centerPopulation").onclick = async () => {
+    if (!state.current || state.busy || $("centerPopulation").disabled) return;
+    const wasRunning = state.running;
+    setRunning(false);
+    $("centerPopulation").disabled = true;
+    try {
+      if (!createDE({ centered: true })) return;
+      await observe(performance.now(), 0);
+      if (wasRunning) setRunning(true);
+    } finally {
+      $("centerPopulation").disabled = state.busy || !state.current;
+    }
+  };
+  for (const id of ["transition", "passSamples", "stopSamples", "frequencyBands", "negGain"]) {
+    $(id).addEventListener("change", async () => {
+      setRunning(false);
+      const problem = readProblem();
+      describeRanges(problem);
+      if (state.current) setCurrent(state.current.params, state.current.source);
+      if (id === "transition") requestBlur(true);
+      if (state.de) {
+        try {
+          state.de.updateProblem(sampleGrid(problem), bounds(problem));
+          // Old costs are not comparable after changing the objective.
+          state.history = [];
+          await observe(performance.now(), 0);
+        } catch (e) {
+          setStatus(`Could not update optimizer: ${e.message}`);
+        }
+      } else drawAll();
+    });
+  }
+  for (const id of ["components", "multiplicity", "population", "F", "CR", "seed"]) {
     // The component count reacts while typing or stepping, not only when the field loses focus.
     $(id).addEventListener(id === "components" ? "input" : "change", () => {
       if (id === "components" && !(num("components") >= 1)) return;

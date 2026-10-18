@@ -98,6 +98,17 @@
 
             <fieldset id="varyingControls">
               <legend>Varying blur</legend>
+              <label title="General diagnostic view. Depth map shows decoded inverse depth: brighter is nearer, black is infinitely far. Near/far views require layers; kernel weight requires one layer.">View
+                <select id="showLayers" class="wide">
+                  <option value="0">Composite</option>
+                  <option value="6">Depth map</option>
+                  <option value="1">Near layer in red</option>
+                  <option value="2">Near layer's opacity (half scale)</option>
+                  <option value="3">Near layer only</option>
+                  <option value="5">Far layer only (hole-filled)</option>
+                  <option value="4">1 layer: kernel weight sum (half scale)</option>
+                </select>
+              </label>
               <label class="check" title="Blend adjacent radius tables for continuous radius changes. Off (default): use the nearest table for faster rendering."><input id="radiusInterpolation" type="checkbox" /> Interpolate blur radii</label>
               <label class="check" title="Depth of field only: blur near and far objects as two separate layers, the near one composited over the far one, so a blurry foreground spreads over what is behind it. The depth split is chosen locally, per 16-pixel tile, so the same layers serve different depths in different places."><input id="layers" type="checkbox" /> Layers (experimental)</label>
               <label class="check" title="Approximate the vertical radius from reaching row sources, weighted by luminance and disc overlap. Helps bright highlights retain their shape when radii mix horizontally; not exact variable-radius convolution. Off: use the source pixel's own radius. Disabled for tilt-shift because each row already has a single radius."><input id="sizeBlur" type="checkbox" checked /> Blur the blur size</label>
@@ -109,16 +120,6 @@
 
             <fieldset>
               <legend>Display</legend>
-              <label title="Diagnostic views: near/far views require layers; the kernel weight sum requires one layer. Unavailable options are disabled.">Layer view
-                <select id="showLayers" class="wide">
-                  <option value="0">Composite</option>
-                  <option value="1">Near layer in red</option>
-                  <option value="2">Near layer's opacity (half scale)</option>
-                  <option value="3">Near layer only</option>
-                  <option value="5">Far layer only (hole-filled)</option>
-                  <option value="4">1 layer: kernel weight sum (half scale)</option>
-                </select>
-              </label>
               <label class="slider">Exposure <input id="exposure" type="range" min="-4" max="4" step="0.1" value="0" /> <output id="exposureOut">1.0×</output></label>
               <label>Tone map
                 <select id="tonemap"><option value="1">Reinhard</option><option value="0">Clip</option></select>
@@ -195,14 +196,20 @@
               <legend>Differential evolution</legend>
               <div class="row">
                 <button id="run" class="primary grow">Start</button>
-                <button id="reset" class="grow">New population</button>
               </div>
+              <fieldset>
+                <legend>Initialize population</legend>
+                <div class="row">
+                  <button id="reset" class="grow">New population</button>
+                  <button id="centerPopulation" class="grow" disabled title="Replace the population with seeded perturbations around the current kernel. Each parameter varies by up to ±5% of its normal initialization range, reduced symmetrically near search bounds. Uses the current Seed. The checkbox below controls exact current-kernel inclusion.">Population around current</button>
+                </div>
+                <label class="check" title="Applies to both population buttons. For Population around current, unchecked means every member is perturbed; checked retains the exact current kernel as one member."><input id="seedWithCurrent" type="checkbox" /> Include current kernel in a new population</label>
+              </fieldset>
               <label>Population <input id="population" type="number" min="8" max="16384" step="8" value="512" /></label>
               <label>Differential weight F <input id="F" type="number" min="0.05" max="2" step="0.01" value="0.76" /></label>
               <label>Crossover continuation CR <input id="CR" type="number" min="0" max="1" step="0.001" value="0.999" /></label>
               <label>Seed <input id="seed" type="number" min="0" step="1" value="1" /></label>
               <label>Generations per frame <input id="gensPerFrame" type="number" min="1" max="1000" step="1" value="10" /></label>
-              <label class="check"><input id="seedWithCurrent" type="checkbox" /> Include the current kernel in a new population</label>
             </fieldset>
 
             <fieldset>
