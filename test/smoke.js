@@ -6,6 +6,7 @@ import { tapTables } from "../src/blur.js";
 import { continuousKernel, integratedKernel, kernelProfile } from "../src/continuous-kernel.js";
 import { radiusTables } from "../src/radius-tables.js";
 import { FineTuner } from "../src/finetune.js";
+import { chebyshev, optimalWeights, remezPolish } from "../src/remez.js";
 import { testViewControls } from './view-controls.js';
 import { populationPreview } from '../src/plots.js';
 import {
@@ -376,4 +377,66 @@ for (const multiplicity of [[1, 1], [2, 1]]) {
   console.log(`fine-tune: ±${startErr.toFixed(6)} → ±${err.toFixed(6)} (article preset ±${maxError(presetParams(3), dense).toFixed(6)})`);
   check("fine-tune improves", err < startErr ? 0 : 1, 0);
   check("fine-tune keeps x² weights of single components zero", Math.max(...[4, 5, 10, 11, 16, 17].map((j) => Math.abs(params[j]))), 0);
+}
+
+// Linear exchange: best line for x² on [0, 1] is x − 1/8; with sign-dependent weights the
+// solution is no worse than any random perturbation (the problem is convex).
+{
+  const xs = Array.from({ length: 1001 }, (_, k) => k / 1000);
+  const rows = xs.map((x) => Float64Array.of(1, x));
+  const t = Float64Array.from(xs, (x) => x * x);
+  const ones = new Float64Array(xs.length).fill(1);
+  const line = chebyshev(rows, t, ones, ones);
+  check("exchange: best line for x² (level, intercept, slope)",
+    Math.max(Math.abs(line.delta - 0.125), Math.abs(line.z[0] + 0.125), Math.abs(line.z[1] - 1)), 1e-12);
+  const wPlus = new Float64Array(xs.length).fill(3);
+  const sol = chebyshev(rows, t, wPlus, ones);
+  const cost = (z) => Math.max(...xs.map((x, j) => {
+    const e = t[j] - z[0] - z[1] * x;
+    return Math.abs(e) * (e > 0 ? 3 : 1);
+  }));
+  check("exchange: weighted level equals max error", Math.abs(cost(sol.z) - sol.delta), 1e-12);
+  let rand = 1;
+  const next = () => ((rand = (rand * 16807) % 2147483647) / 2147483647) * 2 - 1;
+  let worse = 0;
+  for (let k = 0; k < 2000; k++) {
+    const h = 10 ** (-1 - (k % 6));
+    worse = Math.max(worse, sol.delta - cost([sol.z[0] + h * next(), sol.z[1] + h * next()]));
+  }
+  check("exchange: no perturbation improves the weighted optimum", Math.max(0, worse), 1e-14);
+}
+
+// Optimal weights for fixed rates; full Remez refinement of presets, a merged pair and the
+// negative-gain objective.
+{
+  const problem = problemFor([1, 1, 1, 1, 1]);
+  const dense = sampleGrid(problem, 1000, 1000);
+  const preset = maxError(presetParams(5), dense);
+  const weights = optimalWeights(presetParams(5), dense);
+  console.log(`exchange weights for preset 5 rates: ±${preset.toFixed(6)} → ±${weights.error.toFixed(6)}`);
+  check("exchange weights beat preset weights", weights.error < preset ? 0 : 1, 0);
+  check("exchange level equals grid max error", Math.abs(weights.error - weights.level), 1e-12);
+  check("exchange weights keep rates", Math.max(...[0, 1, 6, 7, 24, 25].map((j) => Math.abs(weights.params[j] - presetParams(5)[j]))), 0);
+  const polished = remezPolish(presetParams(5), dense);
+  console.log(`Remez preset 5: ±${polished.error.toFixed(6)} in ${polished.history.length - 1} iterations`);
+  check("Remez refines preset 5 below ±0.0036", polished.error, 0.0036);
+  check("Remez keeps x² weights of single components zero", Math.max(...[4, 5, 10, 11, 16, 17, 22, 23, 28, 29].map((j) => Math.abs(polished.params[j]))), 0);
+
+  const three = sampleGrid(problemFor([1, 1, 1]), 1000, 1000);
+  const start = presetParams(3).map((v, j) => v * (1 + 0.01 * Math.sin(j * 1.7)));
+  const r3 = remezPolish(start, three);
+  console.log(`Remez perturbed preset 3: ±${maxError(start, three).toFixed(6)} → ±${r3.error.toFixed(6)}`);
+  check("Remez recovers perturbed preset 3 below ±0.02655", r3.error, 0.02655);
+
+  const merged = [...presetParams(2)];
+  [merged[4], merged[5]] = [0.05, -0.05];
+  const m2 = sampleGrid(problemFor([2, 1]), 1000, 1000);
+  const rm = remezPolish(merged, m2);
+  console.log(`Remez merged [2, 1]: ±${maxError(merged, m2).toFixed(6)} → ±${rm.error.toFixed(6)}`);
+  check("Remez improves a merged pair and keeps its structure", rm.error < maxError(merged, m2) && multiplicities(rm.params).join() === "2,1" ? 0 : 1, 0);
+
+  const nn = sampleGrid({ ...problemFor([1, 1]), negativeWeight: 100 }, 1000, 1000);
+  const rn = remezPolish(nonnegativePresetParams(2), nn);
+  console.log(`Remez non-negative preset 2 (gain 100): ±${maxError(nonnegativePresetParams(2), nn).toFixed(6)} → ±${rn.error.toFixed(6)}`);
+  check("Remez improves the negative-gain objective", rn.error < maxError(nonnegativePresetParams(2), nn) ? 0 : 1, 0);
 }

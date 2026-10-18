@@ -54,6 +54,7 @@ const VIDEO_SAMPLES = [
   }]);
 import { DifferentialEvolution } from "./de.js";
 import { FineTuner } from "./finetune.js";
+import { remezSteps } from "./remez.js";
 import { drawConvergence, drawDisc, drawError, drawProfile, populationPreview } from "./plots.js";
 import {
   PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, maxError, multiplicities, parseParams,
@@ -295,6 +296,7 @@ async function fineTune() {
   setRunning(false);
   state.busy = true;
   $("finetune").disabled = true;
+  $("remez").disabled = true;
   $("centerPopulation").disabled = true;
   const problem = readProblem();
   const grid = denseGrid(problem);
@@ -337,6 +339,47 @@ async function fineTune() {
     }
     state.busy = false;
     $("finetune").disabled = false;
+    $("remez").disabled = false;
+    $("centerPopulation").disabled = !state.current;
+    if (wasRunning) setRunning(true);
+  }
+}
+
+// ---- Remez exchange refinement ----------------------------------------------------------------
+
+async function remezRefine() {
+  if (!state.current || state.busy) return;
+  const wasRunning = state.running;
+  setRunning(false);
+  state.busy = true;
+  for (const id of ["remez", "finetune", "centerPopulation"]) $(id).disabled = true;
+  const grid = denseGrid(readProblem());
+  const start = { params: state.current.params, error: state.current.denseError };
+  let best = start;
+  const t0 = performance.now();
+  try {
+    for (const step of remezSteps(start.params, grid, { iterations: Math.max(1, Math.round(num("remezIterations"))) })) {
+      if (step.error < best.error) {
+        best = step;
+        setCurrent(step.params, "Remez exchange");
+        drawAll();
+      }
+      setStatus(
+        `Remez exchange · iteration ${step.iteration}` + (step.method ? ` (${step.method})` : "") +
+          ` · ${step.exchanges} exchanges · ${((performance.now() - t0) / 1000).toFixed(2)} s · ` +
+          `dense-grid ripple ±${best.error.toFixed(6)} (started ±${start.error.toFixed(6)})`,
+      );
+      await nextFrame();
+    }
+  } catch (e) {
+    setStatus(`Remez exchange failed: ${e.message}`);
+  } finally {
+    if (best !== start) {
+      if (state.de?.D === best.params.length) state.de.inject(best.params);
+      else if (!state.de) state.include = best.params;
+    }
+    state.busy = false;
+    $("remez").disabled = $("finetune").disabled = false;
     $("centerPopulation").disabled = !state.current;
     if (wasRunning) setRunning(true);
   }
@@ -882,6 +925,7 @@ function wire() {
     discardDE({ include: state.current.params });
   };
   $("finetune").onclick = fineTune;
+  $("remez").onclick = remezRefine;
   $("ftLr").addEventListener("input", () => delete $("ftLr").dataset.auto);
   $("copy").onclick = () => navigator.clipboard.writeText($("output").value);
   $("applyPasted").onclick = () => {

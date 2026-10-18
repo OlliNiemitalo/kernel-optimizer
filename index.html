@@ -213,6 +213,16 @@
             </fieldset>
 
             <fieldset>
+              <legend>Remez exchange refinement</legend>
+              <div class="row"><button id="remez" class="grow">Remez-optimize current kernel</button></div>
+              <label>Iterations <input id="remezIterations" type="number" min="1" max="1000" step="1" value="50" /></label>
+              <details class="help">
+                <summary>How it works</summary>
+                <p class="note">Minimax on the dense grid (Dense grid samples per band, below), in double precision on the CPU. First solves the optimal weights for the current decays and frequencies exactly by an exchange (dual simplex) algorithm. Then each iteration tries a trust-region Gauss–Newton step whose linearized minimax problem is solved by exchange, and Newton steps on the equal-ripple (Remez) equations of the extremal points, keeping whichever lowers the ripple. Stops when no step improves. Usually converges in a few iterations from a kernel near a local optimum.</p>
+              </details>
+            </fieldset>
+
+            <fieldset>
               <legend>Gradient fine-tuning</legend>
               <div class="row"><button id="finetune" class="grow">Fine-tune current kernel</button></div>
               <label>Steps <input id="ftSteps" type="number" min="100" max="100000" step="100" value="3000" /></label>

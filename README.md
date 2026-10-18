@@ -6,7 +6,8 @@ pass, at a cost proportional to the blur radius rather than its area.
 
 - **Optimizer**: differential evolution (global search) and gradient fine-tuning, both running on
   [jax-js-nonconsuming](https://github.com/hamk-uas/jax-js-nonconsuming) (WebGPU, with a WebAssembly
-  fallback).
+  fallback), and a Remez exchange refinement (float64 on the CPU) that converges to a local minimax
+  optimum in a few iterations.
 - **Live visualizations**: radial cross-section with the evolving population, error curve,
   convergence, and the 2-D kernel.
 - **Blur demo**: hand-written WGSL compute shaders processing one channel at a time, so memory
@@ -520,6 +521,81 @@ learning rate suits both decays and large weights. The optimizer is Adam (optax)
 learning rate $10^{-3} / 3^{N_\text{ch} - 2}$ halving every third of the run; decays are kept at
 $b \ge 0.05$. The best kernel by true maximum error is kept. Gradients come from jax-js autodiff.
 
+**Remez exchange refinement** ([`src/remez.js`](src/remez.js)) solves the same minimax problem on
+the dense grid, in float64 on the CPU, using its structure: the profile is linear in the weights
+$w = (r, i, r_1, i_1)$ and nonlinear only in the rates $\theta = (b, c)$:
+
+$$
+K(x) = \sum_k w_k \varphi_k(s; \theta), \qquad \varphi \in \{e^{-bs}\cos cs,\ e^{-bs}\sin cs,\ s e^{-bs}\cos cs,\ s e^{-bs}\sin cs\},\quad s = x^2.
+$$
+
+*1. Optimal weights for fixed rates* are a discrete linear Chebyshev problem,
+$\min_w \max_j W_j |t_j - \Phi_j w|$, with the negative gain as a sign-dependent weight
+($W_j = w_-$ where $e_j = t_j - K_j > 0$ in the stop band, i.e. where $K < 0$; else 1). Its LP dual is
+
+$$
+\delta = \max_\lambda \sum_j \lambda_j t_j \quad \text{s.t.} \quad \sum_j \lambda_j \Phi_j = 0,\quad \sum_j |\lambda_j| / W_j(\operatorname{sign}\lambda_j) = 1,
+$$
+
+and a basic solution has $m + 1$ nonzero $\lambda_j$ ($m$ weights): the *reference* $R$. On $R$, $\lambda$
+is the left null vector $v$ of $\Phi_R$ (from a QR factorization), oriented so that $\sum v t \ge 0$;
+the level is $\delta = \sum_R v_k t_k / \sum_R |v_k| / W_k$, the levelled errors are
+$e_k = \delta \operatorname{sign}(v_k) / W_k$, and the weights solve $\Phi_R w = t_R - e_R$. If some grid
+point $j^*$ has weighted error above $\delta$, it enters: with $\Phi_R^\mathsf{T} \nu = -\Phi_{j^*}$ and
+$s^* = \operatorname{sign} e_{j^*}$, the dual vectors $s^*(\nu, 1) + \alpha v$ on $R \cup \{j^*\}$ keep the
+constraints, and lowering $\alpha$ until a reference multiplier reaches zero picks the leaving
+point. The new level is
+$\delta' = \delta + (|e_{j^*}| - \delta / W_{j^*}) / \sum |\lambda'| / W > \delta$, so the level rises
+monotonically to the optimum, where it equals the grid maximum (the certificate). This is Stiefel's
+exchange, i.e. the dual simplex method. The classical Remez rule (keep alternating signs) needs a
+Haar system, which complex Gaussians are not; here the signs come from the dual vector instead.
+From any start, 9–23 exchanges (tens of milliseconds for 4000 grid points) solve the weights of
+2–6 components.
+
+*2. Gauss–Newton (Osborne–Watson)*: linearize in the rates around the current kernel; the unknowns
+are the new weights and the rate increments, the columns are $\varphi_k$ and $\partial K / \partial \theta$.
+The subproblem is again linear minimax and is solved by the same exchange, warm-started from the
+previous reference. Extra rows $|\mu \tilde{\Delta\theta}_i| \le \delta$ (in units of the column's
+maximum kernel change) form a trust region, with $\mu$ adapted from the ratio of actual to
+predicted reduction.
+
+*3. Second-order Remez steps.* Gauss–Newton converges quadratically only when the error has
+$\dim(w, \theta) + 1$ extremal points at the ripple level. Starting from the article's 5-component set
+there are 17–19 of 21, and Gauss–Newton creeps along a curved valley (4000 iterations took it
+from ±0.00408 only to ±0.00376). So each iteration also tries Newton steps on the KKT system of
+$\min \delta$ subject to equal ripple on the near-active extrema $k$ (band-local maxima within 5% of
+the maximum):
+
+$$
+c_k(p) = \sigma_k W_k \bigl(t_k - K(s_k(p); p)\bigr) = \delta,\qquad \sum_k \lambda_k \nabla c_k = 0,\qquad \sum_k \lambda_k = 1,
+$$
+
+where $s_k(p)$ follows the continuous local extremum ($K_s = 0$) unless it is a band end, giving the
+reduced Hessian $\nabla^2 c_k = -\sigma_k W_k (K_{pp} - K_{ps} K_{ps}^\mathsf{T} / K_{ss})$. With
+$\dim + 1$ points this is the classical Remez second algorithm (the multipliers are then
+determined by the constraints). Points that get negative multipliers are dropped, Levenberg damping
+keeps steps safe, and a second-order correction (minimum-norm projections back onto
+$c_k = \delta$) is essential: the equal-ripple manifold is strongly curved because large weights
+cancel. A step is kept only if it lowers the grid maximum. The run stops when nothing improves.
+
+From the article's sets (dense 2000 + 2000 grid; re-checked on 40,000 + 40,000 points, within
+$10^{-6}$):
+
+| Components | Article | Optimal weights for the article's rates | Remez refined | Iterations, time (Node) |
+|---|---|---|---|---|
+| 2 | ±0.07729 | ±0.07693 | ±0.07593 | 4, 0.4 s |
+| 3 | ±0.02745 | ±0.02714 | ±0.02653 | 5, 0.3 s |
+| 4 | ±0.01093 | ±0.01090 | ±0.009646 | 6, 0.4 s |
+| 5 | ±0.004116 | ±0.004082 | ±0.003592 | 5, 0.6 s |
+| 6 | ±0.001966 | ±0.001941 | ±0.001359 | 12, 2.4 s |
+
+In the browser, preset 5 took 6.4 s (with the blur re-rendering every improvement), where 3000
+gradient fine-tuning steps took 75 s to reach ±0.004084. The refined kernels also have smaller
+weights (5 components: $\sum |r| + |i|$ 81 instead of 190). Refinement is local and ignores the
+frequency bands. From far-off starts it can be slow or end in a worse optimum: the 6-component set
+with 1% parameter noise (ripple ±1.5) reached only ±0.00197 in 50 iterations. Use differential
+evolution to get near a good basin first.
+
 ### 7. Reference results
 
 All ripples below are measured on the dense grid ($\tau = 0.2$):
@@ -532,6 +608,8 @@ All ripples below are measured on the dense grid ($\tau = 0.2$):
 | Article's 3-component set, perturbed by ±1% and then fine-tuned | ±0.02666 |
 | Article's 5-component set | ±0.004116 |
 | Article's 5-component set, fine-tuned | ±0.004084 |
+| Article's 5-component set, Remez refined | ±0.003592 |
+| Article's 6-component set, Remez refined | ±0.001359 |
 
 The article's own ripple figures were measured on its sparser 200 + 200 grid, which is why they
 look slightly better.
@@ -546,6 +624,7 @@ candidates per second.
 | `src/problem.js` | Kernel model, sample grids, bounds and heuristics, separable channels, export and import |
 | `src/model.js`, `src/trig.js` | Traced (jax-js) kernel profile and accurate sine and cosine |
 | `src/de.js`, `src/finetune.js` | Differential evolution and gradient fine-tuning |
+| `src/remez.js` | Exchange (dual simplex) linear minimax solver and Remez refinement of all parameters |
 | `src/blur.js` | WebGPU blur: WGSL compute and display shaders |
 | `src/world.js` | Animated 3D night street ray-cast on the GPU: procedural textures, puddles with traced reflections, glossy highlights; adaptive 4× antialiasing and procedural patterns box-filtered over the pixel footprint; the circle of confusion from the z-buffer |
 | `src/shapes.js` | Test scene ("Tetras"): three tetrahedra in a row against a black, starry background at infinity, ray-cast with 4× antialiasing; drag the picture to turn the view; the Scale slider (or the wheel over the picture) scales the tetrahedra about the middle one |
@@ -553,7 +632,7 @@ candidates per second.
 | `tools/tum_rgbd_video.py` | Converts a [TUM RGB-D](https://cvg.cit.tum.de/data/datasets/rgbd-dataset) sequence to that format (fills depth holes, H.264) |
 | `public/tum-sitting-rgbd.mp4` | 15 s of TUM RGB-D fr3/sitting_static, converted with the tool above |
 | `src/plots.js`, `src/scene.js`, `src/main.js` | Plots, procedural HDR test scene, user interface |
-| `test/smoke.js` | Checks the math and runs the optimizer and fine-tuner in Node |
+| `test/smoke.js` | Checks the math and runs the optimizer, fine-tuner and Remez refinement in Node |
 | `test/merged-de.js` | Experiment: DE convergence with and without merged pairs |
 | `vendor/jax-js-nonconsuming/` | jax-js-nonconsuming v0.12.14 TypeScript sources (MIT), compiled by Vite |
 | `public/coi-serviceworker.js` | coi-serviceworker v0.1.7 (MIT), served unbundled at the site root; cross-origin requests bypass it to support video range requests |
