@@ -33,7 +33,8 @@ async function samplerGPU(renderer, check, read, interpolate) {
         Array.from({ length: 2 * half + 1 }, (_, i) => reference.tap(effective, dir, ch, i - half))));
       const sums = taps.map(dir => dir.map(t => t.reduce((s, z) => [s[0] + z[0], s[1] + z[1]], [0, 0])));
       const dc = sums[0].reduce((s, h, ch) => s + h[0] * sums[1][ch][0] - h[1] * sums[1][ch][1], 0);
-      let error = 0, coverageError = 0;
+      const expectedCoverage = dc * reference.correction(effective, effective, true);
+      let error = 0, coverageError = 0, normalizationError = 0;
       for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
         const dx = x - center, dy = y - center;
         let expected = 0;
@@ -46,10 +47,12 @@ async function samplerGPU(renderer, check, read, interpolate) {
         const i = 4 * (y * width + x);
         error = Math.max(error, Math.abs(data[i] / data[i + 3] - expected / dc));
         coverageError = Math.max(coverageError, Math.abs(data[i + 3] - 1));
+        normalizationError = Math.max(normalizationError, Math.abs(data[i + 3] - expectedCoverage));
       }
       const label = `r=${r}, ${precision}, size blur ${sizeBlur}`;
       check(`continuous impulse agrees with CPU interpolant (${label})`, error, precision === 'f32' ? 2e-5 : 0.003);
       check(`continuous unit coverage (${label})`, coverageError, precision === 'f32' ? 0.005 : 0.008);
+      check(`raw coverage matches reciprocal-and-fade reference (${label})`, normalizationError, precision === 'f32' ? 2e-5 : 0.003);
       if (precision === 'f32' && sizeBlur === null) images.set(r, data);
       // The vertical averaging path must retain fractional radii too, not just interpolate
       // horizontally while silently rounding back to the old ladder before the vertical pass.

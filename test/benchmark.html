@@ -3,6 +3,7 @@
 <title>Blur sampler benchmark</title>
 <button id="capture">Capture current sampler as baseline</button>
 <label><input id="interpolate" type="checkbox"> Interpolate blur radii</label>
+<label>Scene <select id="scene"><option value="shapes">Frozen tetrahedra</option><option value="woman">Frozen woman in field (network video)</option></select></label>
 <button id="run">Run alternating sampler benchmark</button>
 <pre id="results">Capture a baseline before changing sampler revisions, then run the comparison in this same tab.</pre>
 <script type="module">
@@ -15,7 +16,7 @@
   document.querySelector('#run').onclick = async () => {
     const output = document.querySelector('#results');
     output.textContent = 'Running…';
-    try { output.textContent = JSON.stringify(await run(7, document.querySelector('#interpolate').checked), null, 2); }
+    try { output.textContent = JSON.stringify(await run(7, document.querySelector('#interpolate').checked, document.querySelector('#scene').value), null, 2); }
     catch (error) { output.textContent = error.stack; }
   };
 </script>

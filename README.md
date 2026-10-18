@@ -221,7 +221,8 @@ sharper pixels: those pixels neither look far enough nor use the highlight's ker
    neighbouring tiles gives each tile's **reach**: how far its pixels must look.
 2. Every tap uses the radius table(s) selected by the **source** pixel it reads, so each source spreads
   its own disc. Profile samples outside its support are zero. The interpolating horizontal path
-  processes four outputs per thread; the vertical and uniform paths process eight.
+  processes four outputs per thread; short nearest-mode kernels (half-width ≤ 32) process two
+  to reduce register pressure. The vertical and uniform paths process eight.
 3. After the horizontal pass, a pixel mixes light from sources with different radii, but the
    vertical pass can apply only one kernel per pixel. The prepass therefore "blurs the blur size":
   the **vertical radius** is derived from the continuous log-radius average of row sources that reach the pixel, weighted by
@@ -295,8 +296,10 @@ shows through the object's semi-transparent edge, as in a real lens.
 - **Cost.** Per-tile reach is stored as K + 1, with 0 for tiles that no source of the layer
   reaches, so the passes skip them; the near layer is cheap where it is empty. The radius-table
   interpolant avoids the former rescaled-profile path's per-tap division, coordinate arithmetic,
-  identity blend, and normalization factor. Four horizontal outputs per thread were faster than
-  two or eight in the tested Intel Gen9 configuration. Older nearest-node timings are not directly
+  identity blend, and normalization factor. Four horizontal outputs work well for interpolation
+  and long kernels; two improve the short nearest-mode video case on the tested Intel Gen9 GPU.
+  The one-layer pipeline specializes away layer membership and map-selection branches.
+  Older nearest-node timings are not directly
   comparable; the benchmark page alternates frozen-scene renders on the same device.
 - **Empty-layer identity.** The final mask pass records whether the near layer contains any
   members. When it is empty, source-level smoothing and far-layer hole filling are bypassed;
@@ -323,6 +326,9 @@ interpolation is linear, the mixed DC is exactly the bilinear interpolation of t
 matrix. Its **reciprocal is taken after interpolation**. Interpolating reciprocal corrections
 would not normalize the blended taps. Where DC stays within 0.3% of one for every source node,
 the correction fades smoothly to one over an octave, after which a fast loop omits its reads.
+Nearest mode precomputes both the reciprocal and fade in the DC table's previously unused second
+lane. It needs only one correction fetch, with no per-tap reciprocal or fade arithmetic and no
+extra table memory. This optimization does not disable or approximate mixed-radius normalization.
 This normalizes fixed radius pairs, not arbitrary spatially varying source/intermediate fields.
 
 The numerical tests compare against the previous dense-profile reference as well as checking exact
@@ -335,6 +341,10 @@ mipmapping and does not yet add such prefiltering.
 `/test/benchmark.html` provides an opt-in alternating GPU-timestamp comparison against captured
 baseline source. It warms both pipelines, shares one device, freezes the tetra camera, and reports
 per-pass medians and raw samples at radii 15 and 69 in f32 and f16. Keep other GPU workloads idle.
+The scene selector also offers the default woman-in-field video from Video Depth Anything: both
+RGB and depth are paused at the middle of the first frame, and shared by both renderers. Network
+loading and shader warmup are outside the samples. Capture the baseline before editing sampler
+revisions; select the same interpolation mode for the comparison.
 
 Historical 32-step interpolated-table measurements (`2cbb7fc`) on Intel Gen9 at 960×600,
 preset 3, one layer, size blending and occlusion enabled:
@@ -363,6 +373,23 @@ Table storage grows to 1.58/4.26 MiB respectively: taps grow roughly 2×, but th
 grows roughly 4×. The sampled interpolated-kernel integrated error falls to 0.00111, with scaled
 peak error 0.00395. Nearest lookup deliberately retains small radius steps; these interpolation
 error measurements do not describe nearest-mode error.
+
+The nearest reciprocal/fade lookup, cached-key reuse, one-layer specialization, and short-kernel
+two-output blocking were compared against `25bb7b3` on that frozen 960×540 video (21 alternating
+samples, radius 15, default focus 0.675, preset 3, one layer):
+
+| Intermediate | Horizontal before → after (ms) | Total GPU before → after (ms) |
+| --- | ---: | ---: |
+| f32 | 26.7 → 23.1 | 50.5 → 46.8 |
+| packed f16 | 25.9 → 23.0 | 47.6 → 44.6 |
+
+Reciprocal precomputation alone gave only a small improvement, not the whole gain. At radius 69,
+the combined total improvement was about 1–2%; on tetrahedra it ranged from about 1% slower at
+radius 15 to 2–3% faster at radius 69. Interpolated video timings were essentially unchanged.
+This does **not** restore published-main performance: that older renderer has no mixed-radius
+correction, far fewer radius nodes, and smaller working maps. Removing the correction is not a
+correctness-preserving optimization. Regression tests check raw coverage and mixed-radius RGB
+against the independent CPU reciprocal/fade calculation, in addition to normalized output.
 
 #### Truncation and corners
 

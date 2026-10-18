@@ -74,10 +74,10 @@ for (let p = 1; p < SORT; p <<= 1) {
 }
 const each = (f) => J.map(f).join("\n    ");
 const HORIZONTAL_OUTPUTS = 4;
-const HJ = Array.from({ length: HORIZONTAL_OUTPUTS }, (_, j) => j);
-const eachV = (f) => HJ.map(f).join("\n    ");
 
-function computeShader(packed, interpolate = false) {
+function computeShader(packed, interpolate = false, horizontalOutputs = HORIZONTAL_OUTPUTS) {
+  const HJ = Array.from({ length: horizontalOutputs }, (_, j) => j);
+  const eachV = (f) => HJ.map(f).join("\n    ");
   // One channel's complex intermediate per pixel, lanes (r, g, b, w):
   //   f32:    two vec4f (re, im)                      32 bytes per pixel
   //   packed: vec4u, lane = pack2x16float(re, im)     16 bytes per pixel
@@ -192,14 +192,19 @@ fn tableCoordinate(key: f32) -> vec2f {
 fn radiusFixAt(a: vec2f, b: vec2f, fade: f32) -> f32 {
   let n = u32(kern[HALVES + 1u].y);
   let i = u32(kern[HALVES + 2u].y) + u32(a.x) * n + u32(b.x);
-  let f = ${interpolate ? "mix(mix(kern[i].x, kern[i + n].x, a.y), mix(kern[i + 1u].x, kern[i + n + 1u].x, a.y), b.y)" : "kern[i].x"};
+  ${interpolate ? `let f = mix(mix(kern[i].x, kern[i + n].x, a.y), mix(kern[i + 1u].x, kern[i + n + 1u].x, a.y), b.y);
   // Fade out the already-small correction before the fast path, not a threshold jump.
-  return mix(1.0 / f, 1.0, fade);
+  return mix(1.0 / f, 1.0, fade);` : `// Nearest nodes need no runtime reciprocal or fade arithmetic.
+  return kern[i].y;`}
 }
 
 fn radiusBase(q: vec2f, dir: u32) -> u32 {
   let stride = u32(kern[HALVES + 1u].x);
   return u32(kern[HALVES + 3u].y) + ((dir * P.channels + P.channel) * u32(kern[HALVES + 1u].y) + u32(q.x)) * stride;
+}
+// Nearest keys are already clamped and rounded by the prepass.
+fn cachedCoordinate(key: f32) -> vec2f {
+  return ${interpolate ? "tableCoordinate(key)" : "vec2f(key, 0.0)"};
 }
 fn radiusTap(base: u32, fraction: f32, t: i32) -> vec2f {
   let i = base + u32(abs(t));
@@ -914,12 +919,12 @@ fn verticalLevels(@builtin(global_invocation_id) id: vec3u) {
   atomicMax(&tiles[n + tileOf(id.x * 4u, id.y)], u32(kmax));
 }
 
-// Four outputs per thread keep register pressure bounded for interpolated taps and normalization.
+// Two outputs for short nearest kernels, otherwise four, balance shared reads and register pressure.
 // A source reaches output j through its continuous-radius tap at u - (x0 + j). A separate loop
 // skips the small-radius correction once it has faded completely to 1 for every output.
 @compute @workgroup_size(64, 1)
 fn horizontalVarying(@builtin(global_invocation_id) id: vec3u) {
-  let x0 = i32(id.x) * ${HORIZONTAL_OUTPUTS};
+  let x0 = i32(id.x) * ${horizontalOutputs};
   if (x0 >= i32(P.width) || id.y >= P.height) { return; }
   let reached = atomicLoad(&tiles[2u * P.tilesX * P.tilesY + tileOf(u32(x0), id.y)]);
   let last = i32(P.width) - 1;
@@ -929,12 +934,12 @@ fn horizontalVarying(@builtin(global_invocation_id) id: vec3u) {
     return;
   }
   let r = i32(reached) - 1;
-  ${eachV((j) => `let px${j} = u32(min(x0 + ${j}, last)); let d${j} = signedLevel(sourceLevelByte(px${j}, id.y)); let k${j} = radiusHalf(sourceRadius(px${j}, id.y)); let o${j} = occlusionLimit(d${j}, px${j}, id.y); let v${j} = loadRadius(3u, px${j}, id.y); let vn${j} = tableCoordinate(v${j}); let fade${j} = smoothstep(kern[HALVES - 1u].x, kern[HALVES - 1u].y, v${j}); var re${j} = vec4f(0.0); var im${j} = vec4f(0.0);`)}
+  ${eachV((j) => `let px${j} = u32(min(x0 + ${j}, last)); let d${j} = signedLevel(sourceLevelByte(px${j}, id.y)); let k${j} = radiusHalf(sourceRadius(px${j}, id.y)); let o${j} = occlusionLimit(d${j}, px${j}, id.y); let v${j} = loadRadius(3u, px${j}, id.y); let vn${j} = cachedCoordinate(v${j}); let fade${j} = smoothstep(kern[HALVES - 1u].x, kern[HALVES - 1u].y, v${j}); var re${j} = vec4f(0.0); var im${j} = vec4f(0.0);`)}
   ${[false, true].map(fix => `${fix ? "else" : `if (${HJ.map(j => `v${j} >= kern[HALVES - 1u].y`).join(" && ")})`} {
-  for (var u = x0 - r; u < x0 + ${HORIZONTAL_OUTPUTS} + r; u++) {
+  for (var u = x0 - r; u < x0 + ${horizontalOutputs} + r; u++) {
     let x = u32(clamp(u, 0, last));
     let ls = signedLevel(sourceLevelByte(x, id.y));
-    let sn = tableCoordinate(loadRadius(1u, x, id.y));
+    let sn = cachedCoordinate(loadRadius(1u, x, id.y));
     let base = radiusBase(sn, 0u);
     let p = vec4f(src[row + x].rgb, 1.0) * sourceWeight(x, id.y);
     ${eachV((j) => `{ let h = select(radiusTap(base, sn.y, u - x0 - ${j}), vec2f(0.0), hidden(ls, o${j}, u - x0 - ${j}, k${j}))${fix ? ` * radiusFixAt(sn, vn${j}, fade${j})` : ""}; re${j} += p * h.x; im${j} += p * h.y; }`)}
@@ -958,7 +963,7 @@ fn verticalVarying(@builtin(global_invocation_id) id: vec3u) {
   for (var u = y0 - r; u < y0 + ROWS + r; u++) {
     let y = u32(clamp(u, 0, last));
     let ls = signedLevel(sourceLevelByte(id.x, y));
-    let vn = tableCoordinate(loadRadius(3u, id.x, y));
+    let vn = cachedCoordinate(loadRadius(3u, id.x, y));
     let base = radiusBase(vn, 1u);
     let m = loadMid(y * P.width + id.x);
     ${each((j) => `{ let h = select(radiusTap(base, vn.y, u - y0 - ${j}), vec2f(0.0), hidden(ls, o${j}, u - y0 - ${j}, k${j})); a${j} += m.re * h.x - m.im * h.y; }`)}
@@ -1087,10 +1092,13 @@ ${displayShader}`;
 //   entry ${HALVES + 1} = even tap stride, radius node count N
 //   entry ${HALVES + 2} = node support offset, mixed DC matrix offset
 //   entry ${HALVES + 3} = unused, tap offset (all offsets in vec2f entries).
-// Supports: N entries in .x. Mixed DC: N*N entries in .x, row = source node, column = vertical
-// node. Bilinearly interpolate DC then take its reciprocal, NOT interpolation of reciprocals.
+// Supports: N entries in .x. Mixed DC: N*N vec2f entries, row = source node, column = vertical
+// node. .x holds DC; .y holds its pre-faded reciprocal for nearest sampling. Interpolated sampling
+// bilinearly interpolates DC then takes its reciprocal, NOT interpolation of reciprocals.
 // Key = r*${RADIUS_LINEAR_DENSITY} below ${RADIUS_LINEAR_LIMIT}px, ${RADIUS_LINEAR_LIMIT * RADIUS_LINEAR_DENSITY}+${RADIUS_LEVELS_PER_OCTAVE}*log2(r/${RADIUS_LINEAR_LIMIT}) above.
 // Nearest mode rounds this key, fetches one node and its DC correction, and uses that node's support.
+// The application specializes non-layered shaders by substituting 0u for P.layered. This export
+// retains the generic layered shader and four-output horizontal blocking; use its dispatch above.
 // Taps: [direction][channel][node][stride], complex vec2f, even (nonnegative offsets only),
 // normalized at each node and zero-padded. Gather support is the union of the adjacent nodes.
 // Node zero is identity; subpixel nodes blend it continuously with the radius-one profile.
@@ -1239,10 +1247,13 @@ export class BlurRenderer {
     this.animated = null;
   }
 
-  computePipelines(packed, interpolate = false) {
-    const key = `${packed ? "packed" : "f32"}-${interpolate ? "linear" : "nearest"}`;
+  computePipelines(packed, interpolate = false, layered = false, horizontalOutputs = HORIZONTAL_OUTPUTS) {
+    const key = `${packed ? "packed" : "f32"}-${interpolate ? "linear" : "nearest"}-${layered ? "layers" : "single"}-${horizontalOutputs}`;
     if (!this.pipelines[key]) {
-      const module = this.device.createShaderModule({ code: computeShader(packed, interpolate) });
+      // Without layers, eliminate membership reads/branches and smoothed-map selection from
+      // the inner loops. The generic shader remains available for the layered pipeline/export.
+      const code = computeShader(packed, interpolate, horizontalOutputs);
+      const module = this.device.createShaderModule({ code: layered ? code : code.replaceAll("P.layered", "0u") });
       const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.computeLayout] });
       const make = (entryPoint) => this.device.createComputePipeline({ layout, compute: { module, entryPoint } });
       this.pipelines[key] = {
@@ -1409,7 +1420,13 @@ export class BlurRenderer {
     data.set([0, c.support, c.stride, c.count, norm, fix, 0, profile], 2 * HALVES);
     data.set([c.fadeStart, c.fadeEnd], 2 * (HALVES - 1));
     c.halves.forEach((half, i) => { data[2 * (norm + i)] = half; });
-    c.cross.forEach((row, i) => row.forEach((f, j) => { data[2 * (fix + i * c.count + j)] = f; }));
+    c.cross.forEach((row, i) => row.forEach((f, j) => {
+      const t = Math.max(0, Math.min(1, (j - c.fadeStart) / (c.fadeEnd - c.fadeStart)));
+      const fade = t * t * (3 - 2 * t);
+      // Preserve DC in x for interpolation; use the previously unused y for nearest lookup.
+      data[2 * (fix + i * c.count + j)] = f;
+      data[2 * (fix + i * c.count + j) + 1] = (1 - fade) / f + fade;
+    }));
     for (let dir = 0; dir < 2; dir++) for (let ch = 0; ch < n; ch++) for (let i = 0; i < c.count; i++) {
       data.set(c.tables[i][dir][ch], 2 * (profile + ((dir * n + ch) * c.count + i) * c.stride));
     }
@@ -1495,9 +1512,11 @@ export class BlurRenderer {
     new Uint32Array(v, 12, 4).set([tonemap, showSource ? 1 : 0, layered ? 1 : 0, showLayers]);
     device.queue.writeBuffer(this.view, 0, v);
 
-    const p = this.computePipelines(packed, varying && interpolate);
+    // Short nearest kernels benefit from less register state; longer kernels need source reuse.
+    const horizontalOutputs = varying && !interpolate && this.K <= 32 ? 2 : HORIZONTAL_OUTPUTS;
+    const p = this.computePipelines(packed, varying && interpolate, layered, horizontalOutputs);
     const [horizontal, vertical] = varying ? [p.horizontalVarying, p.verticalVarying] : [p.horizontal, p.vertical];
-    const groups = { h: [Math.ceil(Math.ceil(width / (varying ? HORIZONTAL_OUTPUTS : ROWS)) / 64), height], v: [Math.ceil(width / 64), Math.ceil(height / ROWS)] };
+    const groups = { h: [Math.ceil(Math.ceil(width / (varying ? horizontalOutputs : ROWS)) / 64), height], v: [Math.ceil(width / 64), Math.ceil(height / ROWS)] };
     const bindGroup = device.createBindGroup({
       layout: this.computeLayout,
       entries: [
