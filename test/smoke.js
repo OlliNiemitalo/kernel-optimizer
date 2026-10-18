@@ -19,21 +19,35 @@ function check(name, value, tolerance) {
 const problemFor = (multiplicity) => ({ ...defaultProblem(), components: multiplicity.length, multiplicity });
 
 // Varying-radius tap tables: a source's horizontal taps at one level followed by vertical taps at
-// another weigh C[l1][l2]; the renderer divides by it, so it must stay well away from 0. The identity
-// level must stay exact (a single center tap, 2-D weight 1).
+// another weigh C[l1][l2]; it must stay well away from 0. The tables are scaled so that every mix
+// has unit weight within tolerance, except at a small vertical level, where the renderer applies
+// fix[l1][l2]. The identity level must stay exact (a single center tap, 2-D weight 1).
 {
   const radii = [null, ...Array.from({ length: 37 }, (_, l) => 2 ** (l / 6))];
+  const tapSum = (taps) => {
+    let re = 0, im = 0;
+    for (let i = 0; i < taps.length; i += 2) { re += taps[i]; im += taps[i + 1]; }
+    return [re, im];
+  };
   let worstCross = 0;
+  let worstMix = 0;
   let worstIdentity = 0;
   for (const n of [1, 2, 3, 4, 5, 6]) {
-    const { tables, cross, halves } = tapTables(separableChannels(presetParams(n)), radii, 0.2);
+    const { tables, cross, fix, small, halves } = tapTables(separableChannels(presetParams(n)), radii, 0.2);
     for (const row of cross) for (const c of row) worstCross = Math.max(worstCross, Math.abs(Math.log(c)));
-    worstIdentity = Math.max(worstIdentity, halves[0], Math.abs(cross[0][0] - 1));
-    for (let level = 1; level < radii.length; level++) worstIdentity = Math.max(worstIdentity, Math.abs(cross[level][level] - 1));
+    const sums = tables.map((byDir) => byDir.map((byChannel) => byChannel.map(tapSum)));
+    tables.forEach((_, ls) => tables.forEach((_, lv) => {
+      let w = 0;
+      sums[ls][0].forEach(([hr, hi], ch) => { const [vr, vi] = sums[lv][1][ch]; w += hr * vr - hi * vi; });
+      if (lv >= 1 && lv < small) w *= fix[ls][lv];
+      worstMix = Math.max(worstMix, Math.abs(Math.log(w)));
+    }));
+    worstIdentity = Math.max(worstIdentity, halves[0]);
     if (tables[0][0][0].length !== 2) worstIdentity = Infinity;
   }
-  check("varying-radius levels mix with weights within a factor of 1.5 of 1 (|log|)", worstCross, Math.log(1.5));
-  check("identity and each level alone have unit weight", worstIdentity, 1e-12);
+  check("varying-radius levels mix with raw weights within a factor of 1.5 of 1 (|log|)", worstCross, Math.log(1.5));
+  check("varying-radius mixes, scaled and fixed, have unit weight (|log|)", worstMix, 0.0051);
+  check("identity is a single tap", worstIdentity, 0);
 }
 
 // A merged pair is the limit of two coinciding rates: (B + A s) e^{λs} = lim Re[B e^{λs} + (A/δ)(e^{(λ+δ)s} − e^{λs})].

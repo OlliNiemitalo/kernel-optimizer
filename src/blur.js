@@ -24,10 +24,10 @@
 // With a signed radius (negative = in front of the focus, as from a z-buffer), an in-focus or
 // background destination hides sources more than an octave of blur behind it, beyond its own blur.
 //
-// Depth layers (z-buffer radius): sources are split into up to MAX_LAYERS layers by depth, with
-// splits chosen per tile where a blurrier group lies in front of a sharper one, and memberships
-// interpolated between tiles. The layers run through the same passes one after another, nearest
-// first, and are composited front to back; the last one's holes are filled by pull-push.
+// Depth layers (z-buffer radius): sources are split into a near and a far layer by depth, with
+// the split chosen per tile where a blurrier group lies in front of a sharper one, and membership
+// interpolated between tiles. The layers run through the same passes one after another, far
+// first; its holes are filled by pull-push, and the near layer is composited over it.
 //
 // Uniform radius uses a faster register-blocked path: each thread computes ROWS consecutive
 // outputs along the pass, every input sample and tap is read once per thread (the ROWS taps in
@@ -41,24 +41,38 @@ const PAD = ROWS - 1; // zero taps around each table so the sliding window needs
 const LEVELS_PER_OCTAVE = 6;
 const RADIUS_MIN = 1; // smallest blurring level, in pixels; smaller radii map to the identity level
 const TILE = 16; // pixels per side of the tiles used to bound the gather reach
-export const MAX_LAYERS = 4;
+export const MAX_LAYERS = 2;
 const HALVES = 128; // kern entries before the tap tables, holding each level's K (levels <= 127)
-const HIST = 128; // signed-level bins per tile of the depth-edge histogram, for choosing the layer splits
-const MAX_SPLITS = MAX_LAYERS - 1;
+const HIST = 128; // signed-level bins per tile of the depth-edge histogram, for choosing the layer split
 const FILL_LEVELS = 16; // hole-filling pyramid levels, enough for 65536 pixels
 const FILL_BASE = MAX_LAYERS * MAX_CHANNELS; // Params blocks: [layer][channel], then one per pyramid level
 const SMOOTH = 6; // radius of the smoothing of source levels within a layer, in pixels
-const CLOSE = 4; // radius of the closing of the cumulative layer masks, in pixels
+const CLOSE = 4; // radius of the closing of the near layer's mask, in pixels
 const SMOOTH_BASE = FILL_BASE + FILL_LEVELS; // then the 4 smoothing phases (median x, y; mean x, y)
-const CLOSE_BASE = SMOOTH_BASE + 4; // then the closing steps: erode | along y << 1 | split << 2
-const COVER_CLOSE = 3; // radius of the closing of a nearer layer's coverage, its opacity, in pixels
-const COVER_BASE = CLOSE_BASE + 4 * MAX_SPLITS; // then the 4 phases of the coverage closing
+const CLOSE_BASE = SMOOTH_BASE + 4; // then the 4 closing steps: erode | along y << 1
+const COVER_CLOSE = 3; // radius of the closing of the near layer's coverage, its opacity, in pixels
+const COVER_BASE = CLOSE_BASE + 4; // then the 4 phases of the coverage closing
 const INSIDE_BASE = COVER_BASE + 4; // then the 2 phases of the inside fraction
 const BLOCKS = INSIDE_BASE + 2;
-const MAPS = 5 + MAX_SPLITS; // byte maps: level, vertical level, layer weight, layer level, scratch, cumulative masks
-const MAX_QUERIES = 2 * (4 + 4 * MAX_SPLITS + MAX_LAYERS * (15 + 2 * MAX_CHANNELS) + 2 * FILL_LEVELS);
+const MAPS = 5; // byte maps: level, vertical level, smoothed level, scratch, near layer mask
+const TILE_ARRAYS = 4 + HIST + 2 + MAX_LAYERS; // max K, max vertical K, reach x, reach y, histogram, split, max K per layer
+const MAX_QUERIES = 2 * (12 + MAX_LAYERS * (10 + 2 * MAX_CHANNELS) + 2 * FILL_LEVELS);
 
 const J = Array.from({ length: ROWS }, (_, j) => j);
+const W = Array.from({ length: 2 * SMOOTH + 1 }, (_, i) => i);
+const Q = [0, 1, 2, 3]; // pixels per byte-map word
+// Batcher's odd-even merge sort of SORT values: compare-exchange index pairs.
+const SORT = 16;
+const SORT_NETWORK = [];
+for (let p = 1; p < SORT; p <<= 1) {
+  for (let k = p; k >= 1; k >>= 1) {
+    for (let j = k % p; j + k < SORT; j += 2 * k) {
+      for (let i = 0; i < Math.min(k, SORT - j - k); i++) {
+        if (Math.floor((i + j) / (2 * p)) === Math.floor((i + j + k) / (2 * p))) SORT_NETWORK.push([i + j, i + j + k]);
+      }
+    }
+  }
+}
 const each = (f) => J.map(f).join("\n    ");
 
 function computeShader(packed) {
@@ -107,14 +121,13 @@ const PAD = ${PAD}u;
 const TILE = ${TILE}u;
 const HALVES = ${HALVES}u;
 const HIST = ${HIST}u;
-const MAX_SPLITS = ${MAX_SPLITS}u;
 const MIN_SEPARATION = ${LEVELS_PER_OCTAVE}.0; // a nearer layer must be blurrier by an octave, in levels
 const EDGE_STEP = 4u; // pixel distance of the pairs compared for depth edges
 const MIN_SUPPORT = 16; // depth-edge pairs needed around a tile to split there
 const SOFT = 1.5; // smallest half-width of the soft step between layers, in levels
 const MAX_SOFT = ${LEVELS_PER_OCTAVE}.0; // largest half-width, for surfaces that continue across the split
 const SMOOTH = ${SMOOTH}; // pixels of the smoothing of source levels within a layer
-const CLOSE = ${CLOSE}; // pixels of the closing of the cumulative layer masks
+const CLOSE = ${CLOSE}; // pixels of the closing of the near layer's mask
 const COVER_CLOSE = ${COVER_CLOSE}; // pixels of the closing of a nearer layer's coverage
 const FILL_COVERAGE = 0.5; // last-layer coverage from which its own color is fully trusted
 
@@ -159,10 +172,15 @@ fn tableStart(level: u32, dir: u32) -> u32 {
   return HALVES + P.levels * P.levels + ((level * 2u + dir) * P.channels + P.channel) * P.stride + PAD;
 }
 
-// 1 / weight of a source's horizontal taps at level ls followed by vertical taps at level lv, so a
-// source keeps unit weight whatever vertical level its light meets.
-fn crossScale(ls: u32, lv: u32) -> f32 {
+// Correction of a source's weight through horizontal taps at level ls and vertical taps at level
+// lv, so it keeps unit weight whatever vertical level its light meets; within tolerance of 1
+// unless lv is a small level, 1 .. smallLevels() - 1.
+fn crossFix(ls: u32, lv: u32) -> f32 {
   return kern[HALVES + ls * P.levels + lv].x;
+}
+
+fn isSmall(lv: u32) -> bool {
+  return lv - 1u < u32(kern[HALVES - 1u].x) - 1u;
 }
 
 fn halfAt(level: u32) -> i32 {
@@ -254,13 +272,24 @@ fn verticalMap() -> u32 {
   return P.height * P.rowWords;
 }
 
-fn weightMap() -> u32 {
+// Byte maps after the level and vertical level maps: the source levels smoothed within each
+// layer, a scratch map, and the mask of the near layer (its membership; the far layer has the rest).
+fn layerLevelMap() -> u32 {
   return 2u * P.height * P.rowWords;
+}
+
+fn scratchMap() -> u32 {
+  return 3u * P.height * P.rowWords;
+}
+
+fn maskMap() -> u32 {
+  return 4u * P.height * P.rowWords;
 }
 
 // Membership of a pixel in the current layer, 0..255.
 fn weightByte(x: u32, y: u32) -> u32 {
-  return levelByte(weightMap(), x, y);
+  let m = levelByte(maskMap(), x, y);
+  return select(255u - m, m, P.layer == 0u);
 }
 
 fn sourceWeight(x: u32, y: u32) -> f32 {
@@ -278,6 +307,11 @@ fn histBase() -> u32 {
 
 fn splitBase() -> u32 {
   return (4u + HIST) * tileCount();
+}
+
+// Largest K per tile among the members of a layer, from the smoothed levels.
+fn layerKBase(layer: u32) -> u32 {
+  return (6u + HIST + layer) * tileCount();
 }
 
 // Prepass 1: level map, and the largest K per tile. One thread per 4 pixels of a row. With
@@ -313,7 +347,7 @@ fn levels(@builtin(global_invocation_id) id: vec3u) {
     let r = radius[id.y * P.width + x];
     let level = levelOf(abs(r));
     word |= (level | select(0u, 128u, r < 0.0)) << (j * 8u);
-    kmax = max(kmax, halfAt(level));
+    kmax = max(kmax, halfAt(level) + 1);
     if (P.layered == 1u) {
       let s = select(i32(level), -i32(level), r < 0.0);
       let tile = tileOf(x, id.y);
@@ -325,20 +359,21 @@ fn levels(@builtin(global_invocation_id) id: vec3u) {
   atomicMax(&tiles[tileOf(id.x * 4u, id.y)], u32(kmax));
 }
 
-// Layers prepass, one thread per tile: up to layerCount - 1 depth splits from the depth edges of
-// the surrounding 5 x 5 tiles. The support of a split position is the number of edge pairs that
-// it separates; splits are made only where it reaches MIN_SUPPORT, so a connected surface, however
-// steep, is never split. Each split goes in the middle of the well-supported range (at least half
-// the peak support), and the soft step between the layers is as wide as that range (SOFT to
-// MAX_SOFT): a silhouette jumps across it, while a surface that continues across the split, such
-// as a body meeting the ground, fades smoothly from one layer to the other. Further splits use the
-// next highest peaks outside the ranges already taken. Unused splits come first, at -infinity,
-// so the nearest layers are empty where fewer layers are needed. Each split is (level, half-width).
+// Layers prepass, one thread per tile: the depth split from the depth edges of the surrounding
+// 5 x 5 tiles. The support of a split position is the number of edge pairs that it separates; a
+// split is made only where it reaches MIN_SUPPORT, so a connected surface, however steep, is never
+// split. It goes in the middle of the well-supported range (at least half the peak support), and
+// the soft step between the layers is as wide as that range (SOFT to MAX_SOFT): a silhouette jumps
+// across it, while a surface that continues across the split, such as a body meeting the ground,
+// fades smoothly from one layer to the other. Without a split, it is at -infinity, so the near
+// layer is empty there. The split is (level, half-width).
 @compute @workgroup_size(64, 1)
 fn splits(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= tileCount()) { return; }
   let tx = i32(id.x % P.tilesX);
   let ty = i32(id.x / P.tilesX);
+  // Only bins within the levels on either side of the center are used.
+  let used = min(P.levels, HIST / 2u);
   var d: array<u32, ${HIST}>;
   for (var dy = -2; dy <= 2; dy++) {
     for (var dx = -2; dx <= 2; dx++) {
@@ -346,134 +381,110 @@ fn splits(@builtin(global_invocation_id) id: vec3u) {
       let sy = ty + dy;
       if (sx < 0 || sy < 0 || sx >= i32(P.tilesX) || sy >= i32(P.tilesY)) { continue; }
       let base = histBase() + (u32(sy) * P.tilesX + u32(sx)) * HIST;
-      for (var b = 0u; b < HIST; b++) { d[b] += atomicLoad(&tiles[base + b]); }
+      for (var b = HIST / 2u - used; b < min(HIST / 2u + used + 1u, HIST); b++) { d[b] += atomicLoad(&tiles[base + b]); }
     }
   }
   // support[c]: edge pairs separated by a split between bins c - 1 and c.
   var support: array<i32, ${HIST}>;
   var run = 0u;
+  var best = MIN_SUPPORT - 1;
+  var peak = 0u;
   for (var b = 0u; b < HIST; b++) {
     run += d[b];
     support[b] = bitcast<i32>(run);
-  }
-  var cuts: array<vec2f, ${MAX_SPLITS}>;
-  var found = 0u;
-  for (var k = 0u; k + 1u < P.layerCount; k++) {
-    var best = MIN_SUPPORT - 1;
-    var peak = 0u;
-    for (var c = 1u; c < HIST; c++) {
-      if (support[c] > best) {
-        best = support[c];
-        peak = c;
-      }
+    if (b > 0u && support[b] > best) {
+      best = support[b];
+      peak = b;
     }
-    if (peak == 0u) { break; }
+  }
+  var value = vec2f(-1.0e6, SOFT);
+  if (peak > 0u) {
     var lo = peak;
     while (lo > 1u && 2 * support[lo - 1u] >= best) { lo--; }
     var hi = peak;
     while (hi + 1u < HIST && 2 * support[hi + 1u] >= best) { hi++; }
-    let level = 0.5 * f32(lo + hi) - f32(HIST / 2u) - 0.5;
-    cuts[found] = vec2f(level, clamp(0.5 * f32(hi - lo + 1u), SOFT, MAX_SOFT));
-    found++;
-    for (var c = lo; c <= hi; c++) { support[c] = 0; }
+    value = vec2f(0.5 * f32(lo + hi) - f32(HIST / 2u) - 0.5, clamp(0.5 * f32(hi - lo + 1u), SOFT, MAX_SOFT));
   }
-  for (var i = 1u; i < found; i++) {
-    for (var j = i; j > 0u && cuts[j - 1u].x > cuts[j].x; j--) {
-      let t = cuts[j];
-      cuts[j] = cuts[j - 1u];
-      cuts[j - 1u] = t;
-    }
-  }
-  let used = P.layerCount - 1u;
-  let unused = used - found;
-  for (var i = 0u; i < used; i++) {
-    var value = vec2f(-1.0e6, SOFT);
-    if (i >= unused) { value = cuts[i - unused]; }
-    let o = splitBase() + (id.x * MAX_SPLITS + i) * 2u;
-    atomicStore(&tiles[o], bitcast<u32>(value.x));
-    atomicStore(&tiles[o + 1u], bitcast<u32>(value.y));
-  }
+  atomicStore(&tiles[splitBase() + id.x * 2u], bitcast<u32>(value.x));
+  atomicStore(&tiles[splitBase() + id.x * 2u + 1u], bitcast<u32>(value.y));
 }
 
-fn splitStep(s: f32, tile: u32, i: u32) -> f32 {
-  let o = splitBase() + (tile * MAX_SPLITS + i) * 2u;
+fn splitStep(s: f32, tile: u32) -> f32 {
+  let o = splitBase() + tile * 2u;
   let width = bitcast<f32>(atomicLoad(&tiles[o + 1u]));
   return smoothstep(-width, width, s - bitcast<f32>(atomicLoad(&tiles[o])));
 }
 
-// Byte maps after the level, vertical level and weight maps: the source levels of the current layer
-// (smoothed), a scratch map, then the cumulative mask of each split.
-fn layerLevelMap() -> u32 {
-  return 3u * P.height * P.rowWords;
-}
-
-fn scratchMap() -> u32 {
-  return 4u * P.height * P.rowWords;
-}
-
-fn cumulativeMap(i: u32) -> u32 {
-  return (5u + i) * P.height * P.rowWords;
-}
-
-// Level byte of a source as blurred: with layers, the current layer's smoothed level map.
+// Level byte of a source as blurred: with layers, the smoothed level map.
 fn sourceLevelByte(x: u32, y: u32) -> u32 {
   return levelByte(select(0u, layerLevelMap(), P.layered == 1u), x, y);
 }
 
-// Layers prepass, once per frame: for each split i, the mask of the pixels in front of it (in
-// layers 0..i), 0..255, bilinear between the four nearest tile centers so the splits vary smoothly.
+// Layers prepass: the near layer's mask, 0..255, bilinear between the four nearest tile centers so
+// the split varies smoothly.
 @compute @workgroup_size(64, 1)
-fn cumulative(@builtin(global_invocation_id) id: vec3u) {
+fn mask(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= P.rowWords || id.y >= P.height) { return; }
   let last = vec2i(i32(P.tilesX) - 1, i32(P.tilesY) - 1);
-  for (var i = 0u; i + 1u < P.layerCount; i++) {
-    var word = 0u;
-    for (var j = 0u; j < 4u; j++) {
-      let x = id.x * 4u + j;
-      if (x >= P.width) { break; }
-      let s = f32(signedLevel(levelByte(0u, x, id.y)));
-      let f = (vec2f(f32(x), f32(id.y)) + 0.5) / f32(TILE) - 0.5;
-      let i0 = vec2i(floor(f));
-      let a = f - floor(f);
-      var w = 0.0;
-      for (var c = 0; c < 4; c++) {
-        let o = vec2i(c & 1, c >> 1);
-        let t = clamp(i0 + o, vec2i(0), last);
-        let bw = select(1.0 - a, a, o == vec2i(1));
-        w += bw.x * bw.y * (1.0 - splitStep(s, u32(t.y) * P.tilesX + u32(t.x), i));
-      }
-      word |= u32(round(clamp(w, 0.0, 1.0) * 255.0)) << (j * 8u);
+  var word = 0u;
+  for (var j = 0u; j < 4u; j++) {
+    let x = id.x * 4u + j;
+    if (x >= P.width) { break; }
+    let s = f32(signedLevel(levelByte(0u, x, id.y)));
+    let f = (vec2f(f32(x), f32(id.y)) + 0.5) / f32(TILE) - 0.5;
+    let i0 = vec2i(floor(f));
+    let a = f - floor(f);
+    var w = 0.0;
+    for (var c = 0; c < 4; c++) {
+      let o = vec2i(c & 1, c >> 1);
+      let t = clamp(i0 + o, vec2i(0), last);
+      let bw = select(1.0 - a, a, o == vec2i(1));
+      w += bw.x * bw.y * (1.0 - splitStep(s, u32(t.y) * P.tilesX + u32(t.x)));
     }
-    lv[cumulativeMap(i) + id.y * P.rowWords + id.x] = word;
+    word |= u32(round(clamp(w, 0.0, 1.0) * 255.0)) << (j * 8u);
   }
+  lv[maskMap() + id.y * P.rowWords + id.x] = word;
 }
 
-// Morphological closing of the cumulative masks (dilation, then erosion, CLOSE pixels along x and
-// y): thin details inside a nearer surface whose estimated depth fell behind it (a zipper on a
-// coat) join the nearer layer, while silhouettes stay in place. Closing never shrinks a mask and
-// keeps nested masks nested, so the layer weights stay non-negative. One pass per step, P.level =
-// erode (bit 0) | along y (bit 1) | split << 2; along x from the mask to the scratch map, along y
-// back.
+// Morphological closing of the mask (dilation, then erosion, CLOSE pixels along x and y): thin
+// details inside a near surface whose estimated depth fell behind it (a zipper on a coat) join the
+// near layer, while silhouettes stay in place. One pass per step, P.level = erode (bit 0) | along
+// y (bit 1); along x from the mask to the scratch map, along y back. One thread per 4 pixels of a
+// row, each reading the window's words once.
 @compute @workgroup_size(64, 1)
 fn closeMask(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= P.rowWords || id.y >= P.height) { return; }
   let erode = (P.level & 1u) != 0u;
   let alongY = (P.level & 2u) != 0u;
-  let mask = cumulativeMap(P.level >> 2u);
-  let input = select(mask, scratchMap(), alongY);
-  let output = select(scratchMap(), mask, alongY);
+  let input = select(maskMap(), scratchMap(), alongY);
+  let output = select(scratchMap(), maskMap(), alongY);
   var word = 0u;
-  for (var j = 0u; j < 4u; j++) {
-    let x = id.x * 4u + j;
-    if (x >= P.width) { break; }
-    var v = select(0u, 255u, erode);
+  if (alongY) {
+    var v = select(vec4u(0u), vec4u(255u), erode);
     for (var d = -CLOSE; d <= CLOSE; d++) {
-      let sx = u32(clamp(i32(x) + select(d, 0, alongY), 0, i32(P.width) - 1));
-      let sy = u32(clamp(i32(id.y) + select(0, d, alongY), 0, i32(P.height) - 1));
-      let b = levelByte(input, sx, sy);
+      let w = lv[input + u32(clamp(i32(id.y) + d, 0, i32(P.height) - 1)) * P.rowWords + id.x];
+      let b = (vec4u(w) >> vec4u(0u, 8u, 16u, 24u)) & vec4u(0xffu);
       v = select(max(v, b), min(v, b), erode);
     }
-    word |= v << (j * 8u);
+    word = v.x | (v.y << 8u) | (v.z << 16u) | (v.w << 24u);
+  } else {
+    // Bytes of words id.x - 2 .. id.x + 2 cover x - CLOSE .. x + CLOSE for the 4 pixels.
+    var bytes: array<u32, 20>;
+    let row = input + id.y * P.rowWords;
+    for (var k = 0; k < 5; k++) {
+      let w = lv[row + u32(clamp(i32(id.x) - 2 + k, 0, i32(P.rowWords) - 1))];
+      for (var c = 0u; c < 4u; c++) { bytes[4 * k + i32(c)] = (w >> (8u * c)) & 0xffu; }
+    }
+    let first = i32(id.x) * 4 - 8;
+    for (var j = 0u; j < 4u; j++) {
+      let x = i32(id.x * 4u + j);
+      var v = select(0u, 255u, erode);
+      for (var d = -CLOSE; d <= CLOSE; d++) {
+        let b = bytes[clamp(x + d, 0, i32(P.width) - 1) - first];
+        v = select(max(v, b), min(v, b), erode);
+      }
+      word |= v << (j * 8u);
+    }
   }
   lv[output + id.y * P.rowWords + id.x] = word;
 }
@@ -482,15 +493,22 @@ fn encodeLevel(s: i32) -> u32 {
   return select(u32(s), u32(-s) | 128u, s < 0);
 }
 
-// Layers prepass per layer, after layerWeights: the source levels of the layer's pixels, smoothed
-// over pixels mostly in the layer within SMOOTH pixels: a median (removing outliers, such as a
+// Layers prepass: the source levels smoothed within each layer, over the pixels on the same side
+// of the split (by the closed mask) within SMOOTH pixels: a median (removing outliers, such as a
 // zipper on a coat whose estimated depth fell behind it), then a mean (so the level varies
 // gradually rather than in patches), each along x, then y. Phases (P.level): 0 median x, level map
 // to scratch; 1 median y, scratch to layer level map; 2 mean x, layer level map to scratch; 3 mean
-// y, scratch to layer level map. With scatter-as-gather, neighbors of different blur levels do not
-// sum to unit weight, which the layer's coverage (its opacity) would show as holes; within a
-// layer, the level varies smoothly instead, and sources never take the level of another layer, so
-// silhouettes keep their depth jumps.
+// y, scratch to layer level map, and the largest K per tile of each layer's members. With
+// scatter-as-gather, neighbors of different blur levels do not sum to unit weight, which a
+// layer's coverage (its opacity) would show as holes; within a layer, the level varies smoothly
+// instead, and sources never take the level of the other layer, so silhouettes keep their depth
+// jumps. One thread per 4 pixels of a row; the window is unrolled, so it stays in registers, and
+// the median is the value whose rank among the same-side values is the middle one.
+fn windowPixel(x: u32, y: u32, d: i32, alongY: bool) -> vec2u {
+  if (alongY) { return vec2u(x, u32(clamp(i32(y) + d, 0, i32(P.height) - 1))); }
+  return vec2u(u32(clamp(i32(x) + d, 0, i32(P.width) - 1)), y);
+}
+
 @compute @workgroup_size(64, 1)
 fn smoothLevels(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= P.rowWords || id.y >= P.height) { return; }
@@ -499,57 +517,42 @@ fn smoothLevels(@builtin(global_invocation_id) id: vec3u) {
   let input = select(select(0u, layerLevelMap(), mean), scratchMap(), alongY);
   let output = select(scratchMap(), layerLevelMap(), alongY);
   var word = 0u;
-  var kmax = 0;
+  var kNear = 0;
+  var kFar = 0;
   for (var j = 0u; j < 4u; j++) {
     let x = id.x * 4u + j;
     if (x >= P.width) { break; }
-    var b = levelByte(input, x, id.y);
-    if (weightByte(x, id.y) >= 128u) {
-      var values: array<i32, ${2 * SMOOTH + 1}>;
-      var count = 0u;
-      var total = 0;
-      for (var d = -SMOOTH; d <= SMOOTH; d++) {
-        let sx = u32(clamp(i32(x) + select(d, 0, alongY), 0, i32(P.width) - 1));
-        let sy = u32(clamp(i32(id.y) + select(0, d, alongY), 0, i32(P.height) - 1));
-        if (weightByte(sx, sy) >= 128u) {
-          let v = signedLevel(levelByte(input, sx, sy));
-          total += v;
-          // Insertion sort, for the median.
-          var k = count;
-          while (k > 0u && values[k - 1u] > v) {
-            values[k] = values[k - 1u];
-            k--;
-          }
-          values[k] = v;
-          count++;
-        }
-      }
-      b = encodeLevel(select(values[count / 2u], i32(round(f32(total) / f32(count))), mean));
+    let front = levelByte(maskMap(), x, id.y) >= 128u;
+    ${W.map((i) => `let q${i} = windowPixel(x, id.y, ${i - SMOOTH}, alongY); let v${i} = signedLevel(levelByte(input, q${i}.x, q${i}.y)); let in${i} = (levelByte(maskMap(), q${i}.x, q${i}.y) >= 128u) == front;`).join("\n    ")}
+    let n = ${W.map((i) => `select(0, 1, in${i})`).join(" + ")};
+    var level: i32;
+    if (mean) {
+      level = i32(round(f32(${W.map((i) => `select(0, v${i}, in${i})`).join(" + ")}) / f32(n)));
+    } else {
+      // Values of the other side become -BIG (the first ${SMOOTH} - n / 2 of them) or +BIG, so the
+      // middle of all of them is the middle of the same-side values; a sorting network finds it.
+      let low = ${SMOOTH} - n / 2;
+      var seen = 0;
+      ${W.map((i) => `var s${i} = select(select(1000, -1000, seen < low), v${i}, in${i}); seen += select(1, 0, in${i});`).join("\n      ")}
+      ${W.length < SORT ? Array.from({ length: SORT - W.length }, (_, i) => `var s${W.length + i} = 1000;`).join(" ") : ""}
+      ${SORT_NETWORK.map(([a, b]) => `{ let t = min(s${a}, s${b}); s${b} = max(s${a}, s${b}); s${a} = t; }`).join("\n      ")}
+      level = s${SMOOTH};
     }
+    let b = encodeLevel(level);
     word |= b << (j * 8u);
-    if (P.level == 3u && weightByte(x, id.y) > 0u) { kmax = max(kmax, halfAt(b & 127u)); }
+    if (P.level == 3u) {
+      let m = levelByte(maskMap(), x, id.y);
+      let k = halfAt(b & 127u) + 1;
+      if (m > 0u) { kNear = max(kNear, k); }
+      if (m < 255u) { kFar = max(kFar, k); }
+    }
   }
   lv[output + id.y * P.rowWords + id.x] = word;
-  if (P.level == 3u) { atomicMax(&tiles[tileOf(id.x * 4u, id.y)], u32(kmax)); }
-}
-
-// Layers prepass per layer: each pixel's membership, the difference of the cumulative masks on
-// either side of the layer, into the weight map. One thread per 4 pixels of a row.
-@compute @workgroup_size(64, 1)
-fn layerWeights(@builtin(global_invocation_id) id: vec3u) {
-  if (id.x >= P.rowWords || id.y >= P.height) { return; }
-  var word = 0u;
-  for (var j = 0u; j < 4u; j++) {
-    let x = id.x * 4u + j;
-    if (x >= P.width) { break; }
-    var inside = 255u;
-    if (P.layer + 1u < P.layerCount) { inside = levelByte(cumulativeMap(P.layer), x, id.y); }
-    var before = 0u;
-    if (P.layer > 0u) { before = levelByte(cumulativeMap(P.layer - 1u), x, id.y); }
-    let q = inside - min(before, inside);
-    word |= q << (j * 8u);
+  if (P.level == 3u) {
+    let tile = tileOf(id.x * 4u, id.y);
+    atomicMax(&tiles[layerKBase(0u) + tile], u32(kNear));
+    atomicMax(&tiles[layerKBase(1u) + tile], u32(kFar));
   }
-  lv[weightMap() + id.y * P.rowWords + id.x] = word;
 }
 
 // Opacity of a nearer layer: its coverage acc.w (the summed kernel weight of its sources) after a
@@ -709,19 +712,22 @@ fn push(@builtin(global_invocation_id) id: vec3u) {
 }
 
 // Prepasses 2 and 4: reach of each tile = the largest K among tiles whose discs can touch it,
-// along x (from max K) or along y (from max vertical K).
+// along x (from max K) or along y (from max vertical K). The per-tile K arrays and the reach hold
+// K + 1, and 0 where no light is (a layer's sources do not cover the whole image), so the passes
+// skip those tiles.
 fn reach(tile: u32, alongX: bool) {
   let n = P.tilesX * P.tilesY;
   let tx = i32(tile % P.tilesX);
   let ty = i32(tile / P.tilesX);
   let span = (P.halfTaps + i32(TILE) - 1) / i32(TILE);
+  let kBase = select(n, select(0u, layerKBase(P.layer), P.layered == 1u), alongX);
   var best = 0u;
   for (var d = -span; d <= span; d++) {
     let sx = select(tx, tx + d, alongX);
     let sy = select(ty + d, ty, alongX);
     if (sx < 0 || sy < 0 || sx >= i32(P.tilesX) || sy >= i32(P.tilesY)) { continue; }
-    let k = atomicLoad(&tiles[select(n, 0u, alongX) + u32(sy) * P.tilesX + u32(sx)]);
-    if (i32(k) > (abs(d) - 1) * i32(TILE)) { best = max(best, k); }
+    let k = atomicLoad(&tiles[kBase + u32(sy) * P.tilesX + u32(sx)]);
+    if (i32(k) - 1 > (abs(d) - 1) * i32(TILE)) { best = max(best, k); }
   }
   atomicStore(&tiles[select(3u, 2u, alongX) * n + tile], best);
 }
@@ -751,55 +757,73 @@ fn marginal(level: u32, t: i32) -> f32 {
 fn verticalLevels(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= P.rowWords || id.y >= P.height) { return; }
   let n = P.tilesX * P.tilesY;
-  let r = i32(atomicLoad(&tiles[2u * n + tileOf(id.x * 4u, id.y)]));
+  let reached = atomicLoad(&tiles[2u * n + tileOf(id.x * 4u, id.y)]);
+  if (reached == 0u) {
+    lv[verticalMap() + id.y * P.rowWords + id.x] = 0u;
+    return;
+  }
+  // The 4 pixels share the row sources, so each source's brightness is computed once.
+  let r = select(-1, i32(reached) - 1, P.sizeBlur == 1u); // -1: no sources, keep the own level
   let row = id.y * P.width;
+  let x0 = i32(id.x * 4u);
+  let last = i32(P.width) - 1;
+  ${Q.map((j) => `let me${j} = sourceLevelByte(u32(min(x0 + ${j}, last)), id.y); let ld${j} = signedLevel(me${j}); let kd${j} = halfOf(ld${j}); let limit${j} = occlusionLimit(ld${j}, 0u, 0u); var sum${j} = 0.0; var weight${j} = 0.0; var any${j} = false;`).join("\n  ")}
+  for (var u = x0 - r; u <= x0 + 3 + r; u++) {
+    let xs = u32(clamp(u, 0, last));
+    let s = sourceLevelByte(xs, id.y);
+    let level = s & 127u;
+    let ls = signedLevel(s);
+    let hk = halfAt(level);
+    let bright = sourceWeight(xs, id.y) * pow(dot(src[row + xs].rgb, vec3f(0.2126, 0.7152, 0.0722)) + 0.01, P.sizeBrightness);
+    ${Q.map((j) => `{ let t = u - x0 - ${j}; if (abs(t) <= min(r, hk) && !hidden(ls, limit${j}, t, kd${j})) { let w = bright * marginal(level, t); sum${j} += w * f32(level); weight${j} += w; any${j} = any${j} || bright > 0.0; } }`).join("\n    ")}
+  }
   var word = 0u;
   var kmax = 0;
-  for (var j = 0u; j < 4u; j++) {
-    let x = id.x * 4u + j;
-    if (x >= P.width) { break; }
-    let me = sourceLevelByte(x, id.y);
-    let ld = signedLevel(me);
-    let kd = halfOf(ld);
-    let limit = occlusionLimit(ld, x, id.y);
-    var sum = 0.0;
-    var weight = 0.0;
-    let span = select(-1, r, P.sizeBlur == 1u); // -1: no sources, keep the own level
-    for (var t = -span; t <= span; t++) {
-      let xs = u32(clamp(i32(x) + t, 0, i32(P.width) - 1));
-      let s = sourceLevelByte(xs, id.y);
-      let level = s & 127u;
-      if (abs(t) > halfAt(level) || hidden(signedLevel(s), limit, t, kd)) { continue; }
-      let w = sourceWeight(xs, id.y) * pow(dot(src[row + xs].rgb, vec3f(0.2126, 0.7152, 0.0722)) + 0.01, P.sizeBrightness) * marginal(level, t);
-      sum += w * f32(level);
-      weight += w;
-    }
-    let v = select(me & 127u, min(u32(round(sum / weight)), P.levels - 1u), weight > 0.0);
-    word |= v << (j * 8u);
-    kmax = max(kmax, halfAt(v));
-  }
+  ${Q.map((j) => `if (x0 + ${j} <= last) {
+    // Without layers, every pixel gets light; with them, only where the layer's sources reach.
+    let lit = any${j} || P.layered == 0u || P.sizeBlur == 0u;
+    let v = select(0u, select(me${j} & 127u, min(u32(round(sum${j} / weight${j})), P.levels - 1u), weight${j} > 0.0), lit);
+    word |= v << ${8 * j}u;
+    if (lit) { kmax = max(kmax, halfAt(v) + 1); }
+  }`).join("\n  ")}
   lv[verticalMap() + id.y * P.rowWords + id.x] = word;
   atomicMax(&tiles[n + tileOf(id.x * 4u, id.y)], u32(kmax));
 }
 
 // ROWS outputs per thread, as in the uniform path. A source u reaches output j through tap
 // t = u - (x0 + j), read from the source's own level table; the PAD zeros cover |t| <= K + PAD.
-// Each contribution is scaled by crossScale for the output's vertical level.
+// Each contribution is scaled by crossFix for the output's vertical level when that is small.
 @compute @workgroup_size(64, 1)
 fn horizontalVarying(@builtin(global_invocation_id) id: vec3u) {
   let x0 = i32(id.x) * ROWS;
   if (x0 >= i32(P.width) || id.y >= P.height) { return; }
-  let r = i32(atomicLoad(&tiles[2u * P.tilesX * P.tilesY + tileOf(u32(x0), id.y)]));
+  let reached = atomicLoad(&tiles[2u * P.tilesX * P.tilesY + tileOf(u32(x0), id.y)]);
   let last = i32(P.width) - 1;
-  ${each((j) => `let px${j} = u32(min(x0 + ${j}, last)); let d${j} = signedLevel(sourceLevelByte(px${j}, id.y)); let k${j} = halfOf(d${j}); let o${j} = occlusionLimit(d${j}, px${j}, id.y); let v${j} = levelByte(verticalMap(), px${j}, id.y); var re${j} = vec4f(0.0); var im${j} = vec4f(0.0);`)}
   let row = id.y * P.width;
-  for (var u = x0 - r; u < x0 + ROWS + r; u++) {
-    let x = u32(clamp(u, 0, last));
-    let s = sourceLevelByte(x, id.y);
-    let ls = signedLevel(s);
-    let base = tableStart(s & 127u, 0u) + u32(P.halfTaps + u - x0);
-    let p = vec4f(src[row + x].rgb, 1.0) * sourceWeight(x, id.y);
-    ${each((j) => `{ let h = select(kern[base - ${j}u], vec2f(0.0), hidden(ls, o${j}, u - x0 - ${j}, k${j})) * crossScale(s & 127u, v${j}); re${j} += p * h.x; im${j} += p * h.y; }`)}
+  if (reached == 0u) {
+    ${each((j) => `if (x0 + ${j} <= last) { storeMid(row + u32(x0 + ${j}), vec4f(0.0), vec4f(0.0)); }`)}
+    return;
+  }
+  let r = i32(reached) - 1;
+  ${each((j) => `let px${j} = u32(min(x0 + ${j}, last)); let d${j} = signedLevel(sourceLevelByte(px${j}, id.y)); let k${j} = halfOf(d${j}); let o${j} = occlusionLimit(d${j}, px${j}, id.y); let v${j} = levelByte(verticalMap(), px${j}, id.y); var re${j} = vec4f(0.0); var im${j} = vec4f(0.0);`)}
+  if (!(${J.map((j) => `isSmall(v${j})`).join(" || ")})) {
+    for (var u = x0 - r; u < x0 + ROWS + r; u++) {
+      let x = u32(clamp(u, 0, last));
+      let s = sourceLevelByte(x, id.y);
+      let ls = signedLevel(s);
+      let base = tableStart(s & 127u, 0u) + u32(P.halfTaps + u - x0);
+      let p = vec4f(src[row + x].rgb, 1.0) * sourceWeight(x, id.y);
+      ${each((j) => `{ let h = select(kern[base - ${j}u], vec2f(0.0), hidden(ls, o${j}, u - x0 - ${j}, k${j})); re${j} += p * h.x; im${j} += p * h.y; }`)}
+    }
+  } else {
+    for (var u = x0 - r; u < x0 + ROWS + r; u++) {
+      let x = u32(clamp(u, 0, last));
+      let s = sourceLevelByte(x, id.y);
+      let ls = signedLevel(s);
+      let base = tableStart(s & 127u, 0u) + u32(P.halfTaps + u - x0);
+      let p = vec4f(src[row + x].rgb, 1.0) * sourceWeight(x, id.y);
+      ${each((j) => `{ let h = select(kern[base - ${j}u], vec2f(0.0), hidden(ls, o${j}, u - x0 - ${j}, k${j})) * crossFix(s & 127u, v${j}); re${j} += p * h.x; im${j} += p * h.y; }`)}
+    }
   }
   ${each((j) => `if (x0 + ${j} <= last) { storeMid(row + u32(x0 + ${j}), re${j}, im${j}); }`)}
 }
@@ -808,8 +832,13 @@ fn horizontalVarying(@builtin(global_invocation_id) id: vec3u) {
 fn verticalVarying(@builtin(global_invocation_id) id: vec3u) {
   let y0 = i32(id.y) * ROWS;
   if (id.x >= P.width || y0 >= i32(P.height)) { return; }
-  let r = i32(atomicLoad(&tiles[3u * P.tilesX * P.tilesY + tileOf(id.x, u32(y0))]));
+  let reached = atomicLoad(&tiles[3u * P.tilesX * P.tilesY + tileOf(id.x, u32(y0))]);
   let last = i32(P.height) - 1;
+  if (reached == 0u) {
+    if (P.first == 1u) { ${each((j) => `if (y0 + ${j} <= last) { acc[u32(y0 + ${j}) * P.width + id.x] = vec4f(0.0); }`)} }
+    return;
+  }
+  let r = i32(reached) - 1;
   ${each((j) => `let py${j} = u32(min(y0 + ${j}, last)); let d${j} = signedLevel(sourceLevelByte(id.x, py${j})); let k${j} = halfOf(d${j}); let o${j} = occlusionLimit(d${j}, id.x, py${j}); var a${j} = vec4f(0.0);`)}
   for (var u = y0 - r; u < y0 + ROWS + r; u++) {
     let y = u32(clamp(u, 0, last));
@@ -901,19 +930,18 @@ ${displayShader}`;
 //     varying radius:  horizontalVarying, verticalVarying, same workgroup counts
 // then draw with the display shader (acc.rgb / acc.w).
 //
-// Depth layers (z-buffer radius, layerCount L >= 2; Params block (layer, channel) at index
+// Depth layers (z-buffer radius, layerCount 2; Params block (layer, channel) at index
 // layer * ${MAX_CHANNELS} + channel, pyramid level l at ${FILL_BASE} + l): clear tiles, then
 //     levels (also records the depth edges per tile), splits (ceil(tilesX tilesY / 64) workgroups),
-//     cumulative (as levels), then for each split i: closeMask (as levels) with blocks
-//     ${CLOSE_BASE} + (step | i << 2) for step = 0, 2, 1, 3 (dilate x, dilate y, erode x, erode y),
-//     for each layer k = L - 1 (farthest) .. 0, with block (k, 0) for the prepasses:
-//       clear tiles words [0, 4 tilesX tilesY), layerWeights (as levels), smoothLevels with blocks
-//       ${SMOOTH_BASE} + phase, phase = 0 .. 3 (as levels), reachX, verticalLevels,
-//       reachY, the channel passes with blocks (k, n); for k = L - 1: pull for l = 1 .. top, then
-//       push for l = top - 1 .. 0 (ceil(size_l / 8)^2 workgroups, size_l = ceil(size / 2^l),
-//       top = first level of 1 x 1); for k < L - 1: closeCoverage with blocks ${COVER_BASE} + phase,
-//       phase = 0 .. 3, and insideFraction with blocks ${INSIDE_BASE} + phase, phase = 0, 1; then
-//       composite (ceil(width height / 64) workgroups each);
+//     mask (as levels), closeMask (as levels) with blocks ${CLOSE_BASE} + step for step = 0, 2, 1, 3
+//     (dilate x, dilate y, erode x, erode y), smoothLevels with blocks ${SMOOTH_BASE} + phase,
+//     phase = 0 .. 3 (as levels), then for layer k = 1 (far), 0 (near), with block (k, 0) for the
+//     prepasses: clear tiles words [tilesX tilesY, 2 tilesX tilesY), reachX, verticalLevels,
+//     reachY, the channel passes with blocks (k, n); for k = 1: pull for l = 1 .. top, then
+//     push for l = top - 1 .. 0 (ceil(size_l / 8)^2 workgroups, size_l = ceil(size / 2^l),
+//     top = first level of 1 x 1); for k = 0: closeCoverage with blocks ${COVER_BASE} + phase,
+//     phase = 0 .. 3, and insideFraction with blocks ${INSIDE_BASE} + phase, phase = 0, 1; then
+//     composite (ceil(width height / 64) workgroups each);
 // then draw with layered = 1: layer.rgb.
 //
 // Params (80 bytes): width u32 @0, height u32 @4, halfTaps i32 @8 (largest K), channel u32 @12,
@@ -927,12 +955,14 @@ ${displayShader}`;
 // keeps 1 / depth there for focus picking); acc vec4f;
 // mid ${packed ? "16" : "32"} bytes; radius f32, signed: negative in front of the focus (varying only).
 // Varying only (else any 4-byte buffers): lv u32[${MAPS} height rowWords] (byte maps: level, vertical
-// level, layer weight, scratch, closed cumulative mask per split),
-// tiles u32[(4 + ${HIST}) tilesX tilesY + 2 ${MAX_SPLITS} tilesX tilesY]. Layers only (else any 16-byte buffer):
+// level, smoothed level, scratch, near layer mask),
+// tiles u32[${TILE_ARRAYS} tilesX tilesY]. Layers only (else any 16-byte buffer):
 // layer vec4f[width height + pyramid levels 1 .. top].
 // kern: vec2f; entries 0 .. ${HALVES - 1} hold K of each level in .x (taps -K..K); the next levels^2
-// hold in .x the cross scale 1 / C[ls][lv] (row = source level, column = vertical level), where
-// C[ls][lv] = sum over channels of Re[(sum of h taps of ls)(sum of v taps of lv)]; then the tap
+// hold in .x the cross fix a[ls] b[lv] / C[ls][lv] (row = source level, column = vertical level), where
+// C[ls][lv] = sum over channels of Re[(sum of h taps of ls)(sum of v taps of lv)] before the
+// tables are divided by a and b (see tapTables), and entry ${HALVES - 1} holds the first level
+// that is not small, from which the fix is within tolerance of 1; then the tap
 // tables (re, im), layout [level][dir][channel][stride],
 // dir 0 = horizontal, 1 = vertical, stride = 2 halfTaps + 1 + ${2 * PAD}. Entry ${PAD} + halfTaps + t,
 // |t| <= K, holds g (k0 + k2 s) exp((-b + i c) s),  s = (t / R)^2,  K = ceil(R (1 + transition
@@ -943,9 +973,10 @@ ${displayShader}`;
 // Uniform radius: one level, R = disc radius. Varying radius: level 0 is the identity (K = 0; its
 // center tap in channel n, per direction, is the sum of that channel's taps of the largest level,
 // so it is the identity alone and mixes with blur levels at weights near 1), level l >= 1 has
-// R = radiusMin 2^((l - 1) / levelsPerOctave) up to the largest radius. horizontalVarying scales a
-// source's taps by the cross scale for the output pixel's vertical level, so each source's light
-// keeps unit weight whatever vertical level it meets.
+// R = radiusMin 2^((l - 1) / levelsPerOctave) up to the largest radius, and its horizontal and
+// vertical taps are divided by a[l] and b[l]. Where any of its outputs has a small vertical level,
+// horizontalVarying scales a source's taps by the cross fix for the output pixel's vertical level,
+// so each source's light keeps unit weight whatever vertical level it meets.
 ${computeShader(packed)}`;
 }
 
@@ -955,7 +986,8 @@ ${computeShader(packed)}`;
 // passes mix levels, though: horizontal taps at each source's level, vertical at a per-pixel level,
 // and a mixed pair (l1, l2) weighs cross[l1][l2] = sum over channels of Re[(sum of h taps of l1)
 // (sum of v taps of l2)], which is not 1 (0.3 for the identity with a blur level), because the
-// per-channel sums differ between levels. The horizontal pass divides by it.
+// per-channel sums differ between levels. It is returned as `cross` (before the scaling below);
+// the tables are scaled so that the renderer needs a correction (`fix`) only for small levels.
 export function tapTables(channels, radii, transition) {
   const halves = radii.map((r) => (r === null ? 0 : Math.max(1, Math.ceil(r * (1 + transition)))));
   const sum = (taps) => {
@@ -1012,8 +1044,23 @@ export function tapTables(channels, radii, transition) {
     }, 0);
   }
   const cross = tables.map(([h]) => tables.map(([, v]) => weight(h, v)));
-  return { halves, tables, cross };
+  // C is nearly a[ls] b[lv] (the weights against the largest level) except where both levels are
+  // small (below `small`, radius of a few pixels), so the horizontal and vertical tables are
+  // divided by a and b, and only outputs with a small vertical level need fix[ls][lv] = a b / C per
+  // source.
+  const last = tables.length - 1;
+  const a = cross.map((row) => row[last]);
+  const b = cross[last];
+  tables.forEach(([h, v], level) => {
+    for (const [byChannel, f] of [[h, 1 / a[level]], [v, 1 / b[level]]]) for (const taps of byChannel) for (let i = 0; i < taps.length; i++) taps[i] *= f;
+  });
+  const fix = cross.map((row, ls) => row.map((c, lv) => (a[ls] * b[lv]) / c));
+  let small = 1;
+  while (small < tables.length && fix.some((row) => row.slice(small).some((f) => Math.abs(Math.log(f)) > SMALL_TOLERANCE))) small++;
+  return { halves, tables, cross, fix, small };
 }
+
+const SMALL_TOLERANCE = 0.005; // largest |log| of the cross weights left uncorrected
 
 export class BlurRenderer {
   static async create(canvas) {
@@ -1090,12 +1137,11 @@ export class BlurRenderer {
         reachX: make("reachX"),
         reachY: make("reachY"),
         splits: make("splits"),
-        cumulative: make("cumulative"),
+        mask: make("mask"),
         smoothLevels: make("smoothLevels"),
         closeMask: make("closeMask"),
         closeCoverage: make("closeCoverage"),
         insideFraction: make("insideFraction"),
-        layerWeights: make("layerWeights"),
         composite: make("composite"),
         pull: make("pull"),
         push: make("push"),
@@ -1141,7 +1187,7 @@ export class BlurRenderer {
     const { width, height, device } = this;
     this.radiusBuffer ??= device.createBuffer({ size: width * height * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.levelMaps ??= device.createBuffer({ size: MAPS * height * this.rowWords * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    this.tiles ??= device.createBuffer({ size: (4 + HIST + 2 * MAX_SPLITS) * this.tilesX * this.tilesY * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.tiles ??= device.createBuffer({ size: TILE_ARRAYS * this.tilesX * this.tilesY * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
   }
 
   // Pyramid levels 1 .. top of the hole filling: sizes and the first 1 x 1 level.
@@ -1209,14 +1255,15 @@ export class BlurRenderer {
     } else {
       radii.push(radius);
     }
-    const { halves, tables, cross } = tapTables(channels, radii, transition);
+    const { halves, tables, fix, small } = tapTables(channels, radii, transition);
     const Kmax = Math.max(...halves);
     const stride = 2 * Kmax + 1 + 2 * PAD;
     const n = channels.length;
     const L = radii.length;
     const data = new Float32Array((HALVES + L * L + L * 2 * n * stride) * 2);
     halves.forEach((K, level) => (data[2 * level] = K));
-    cross.forEach((row, ls) => row.forEach((f, lv) => (data[2 * (HALVES + ls * L + lv)] = 1 / f)));
+    data[2 * (HALVES - 1)] = small;
+    fix.forEach((row, ls) => row.forEach((f, lv) => (data[2 * (HALVES + ls * L + lv)] = f)));
     tables.forEach((byDir, level) => {
       const K = halves[level];
       byDir.forEach((byChannel, dir) => {
@@ -1255,7 +1302,7 @@ export class BlurRenderer {
   // `invFocus` (1 / focus distance in 1/m) drive the animated source. `capture` returns the frame as a
   // PNG data URL. Varying radius: `sizeBlur` is the brightness exponent of the blur-size smoothing
   // (null = off); `occlusion` is the depth-of-field occlusion threshold in octaves (0 = off).
-  // Depth of field: `layers` (1 .. MAX_LAYERS) depth layers with locally chosen splits.
+  // Depth of field: `layers` (1 or 2) depth layers with a locally chosen split.
   async render({
     exposure = 1, tonemap = 1, precision = "f32", showSource = false, time = 0, invFocus = 0, capture = false,
     sizeBlur = 1, occlusion = 1, layers = 1, showLayers = 0,
@@ -1296,7 +1343,7 @@ export class BlurRenderer {
     }
     for (let level = 0; level <= fillSizes.length; level++) writeBlock(FILL_BASE + level, { level });
     for (let level = 0; level < 4; level++) writeBlock(SMOOTH_BASE + level, { level });
-    for (let step = 0; step < 4 * MAX_SPLITS; step++) writeBlock(CLOSE_BASE + step, { level: step });
+    for (let step = 0; step < 4; step++) writeBlock(CLOSE_BASE + step, { level: step });
     for (let phase = 0; phase < 4; phase++) writeBlock(COVER_BASE + phase, { level: phase });
     for (let phase = 0; phase < 2; phase++) writeBlock(INSIDE_BASE + phase, { level: phase });
     device.queue.writeBuffer(this.params, 0, block);
@@ -1358,19 +1405,15 @@ export class BlurRenderer {
       pass(p.levels, 0, rowGroups, "prepare");
       if (layered) {
         pass(p.splits, 0, tileGroups, "layers");
-        pass(p.cumulative, 0, rowGroups, "layers");
-        for (let split = 0; split < layerCount - 1; split++) {
-          for (const step of [0, 2, 1, 3]) pass(p.closeMask, CLOSE_BASE + (step | (split << 2)), rowGroups, "layers");
-        }
+        pass(p.mask, 0, rowGroups, "layers");
+        for (const step of [0, 2, 1, 3]) pass(p.closeMask, CLOSE_BASE + step, rowGroups, "layers");
+        for (let phase = 0; phase < 4; phase++) pass(p.smoothLevels, SMOOTH_BASE + phase, rowGroups, "layers");
       }
-      // Back to front, so each nearer layer composites over the complete light behind it.
+      // Back to front, so the near layer composites over the complete light behind it.
+      const tileBytes = 4 * this.tilesX * this.tilesY;
       for (let layer = layerCount - 1; layer >= 0; layer--) {
         const first = layer * MAX_CHANNELS;
-        if (layered) {
-          encoder.clearBuffer(this.tiles, 0, 4 * this.tilesX * this.tilesY * 4);
-          pass(p.layerWeights, first, rowGroups, "layers");
-          for (let phase = 0; phase < 4; phase++) pass(p.smoothLevels, SMOOTH_BASE + phase, rowGroups, "layers");
-        }
+        if (layered) encoder.clearBuffer(this.tiles, tileBytes, tileBytes); // max vertical K
         pass(p.reachX, first, tileGroups, "prepare");
         pass(p.verticalLevels, first, rowGroups, "prepare");
         pass(p.reachY, first, tileGroups, "prepare");

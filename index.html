@@ -96,13 +96,13 @@
 
             <fieldset id="varyingControls">
               <legend>Varying blur</legend>
-              <label title="Depth of field only: blur near and far objects as separate layers composited front to back, so a blurry foreground spreads over what is behind it. Depth splits are chosen locally, per 16-pixel tile, so the same layers serve different depths in different places. 1 = no layering.">Depth layers <input id="layers" type="number" min="1" max="4" step="1" value="1" /></label>
+              <label title="Depth of field only: 2 = blur near and far objects as separate layers, the near one composited over the far one, so a blurry foreground spreads over what is behind it. The depth split is chosen locally, per 16-pixel tile, so the same layers serve different depths in different places. 1 = no layering.">Depth layers <input id="layers" type="number" min="1" max="2" step="1" value="1" /></label>
               <label title="Debug views of the depth layers">Layer view
                 <select id="showLayers" class="wide">
                   <option value="0">Composite</option>
-                  <option value="1">Nearer layers in red</option>
-                  <option value="2">Nearer layers' opacity (half scale)</option>
-                  <option value="3">Nearest layer only</option>
+                  <option value="1">Near layer in red</option>
+                  <option value="2">Near layer's opacity (half scale)</option>
+                  <option value="3">Near layer only</option>
                   <option value="4">1 layer: kernel weight sum (half scale)</option>
                 </select>
               </label>

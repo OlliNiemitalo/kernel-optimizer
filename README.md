@@ -237,57 +237,62 @@ one compute pass were not reliably ordered, which made the output vary from fram
 With one layer, a blurry object in front of the focus (a person, with the focus behind them) keeps
 a sharp silhouette: in-focus background pixels have the identity kernel, so nothing spreads into
 the object, and the normalization rescales the object's half discs at its edge back to full
-strength. With **depth layers** (z-buffer only, 1–4), near layers are blurred separately and
-composited over the farther ones, so the silhouette spreads over the background, and the
-background shows through the object's semi-transparent edge, as in a real lens.
+strength. With **depth layers** (z-buffer only, 2 layers), a near layer is blurred separately and
+composited over the far one, so the silhouette spreads over the background, and the background
+shows through the object's semi-transparent edge, as in a real lens.
 
-- **Local splits, at depth edges.** Which depths need separating varies across the image, so the
-  splits are chosen per 16×16 tile from the depth edges of the surrounding 5×5 tiles: pairs of
+- **Local split, at depth edges.** Which depths need separating varies across the image, so the
+  split is chosen per 16×16 tile from the depth edges of the surrounding 5×5 tiles: pairs of
   pixels 4 px apart whose nearer pixel lies in front of the focus and is at least an octave
   blurrier. Each pair supports every split between its two blur levels; a tile splits in the
   middle of the range supported by at least half the peak (and 16 pairs). A connected surface,
-  however steep, has no such edges and is not split. Elsewhere the tile needs fewer layers, and
-  the unused near layers are empty there, so one layer in memory serves different depths in
-  different places.
-- **Membership depends only on the source.** Each pixel's membership in front of each split comes
-  from the four nearest tile centers, bilinearly interpolated, with a soft step as wide as the
+  however steep, has no such edges and is not split. Elsewhere the near layer is empty, and the
+  passes skip its empty tiles.
+- **Membership depends only on the source.** Each pixel's membership in the near layer comes from
+  the four nearest tile centers, bilinearly interpolated, with a soft step as wide as the
   supported range (a surface that continues across the split, such as feet on the ground, fades
-  between the layers). These masks are then closed morphologically (4 px), so thin details whose
+  between the layers). The mask is then closed morphologically (4 px), so thin details whose
   estimated depth fell behind (a zipper on a coat) stay with their surface. Because membership is
   a function of the source pixel alone, each layer is a linear image and the separable passes
   stay exact.
 - **Smooth blur levels within a layer.** Estimated depth is noisy, and with scatter-as-gather,
-  neighbors with different disc sizes do not sum to unit weight. Within each layer, the source
-  levels are smoothed by a median and then a mean over ±6 px of the layer's own pixels, never
-  across a split, so silhouettes keep their depth jumps.
-- **Back to front.** Layers run one after another, farthest first, through the same passes,
-  buffers and accumulator. The farthest layer lacks the sources that nearer layers took; where its
-  coverage is below ½, it is completed by pull-push (a pyramid of coverage-weighted averages built
-  by halving, then filled from coarse to fine with bilinear upsampling). Each nearer layer, its
-  color normalized by its coverage $w$, then goes over the composite with opacity
+  neighbors with different disc sizes do not sum to unit weight. The source levels are smoothed
+  by a median (a sorting network over the window) and then a mean over ±6 px of the pixels on the
+  same side of the split, never across it, so silhouettes keep their depth jumps. One smoothed
+  map serves both layers.
+- **Back to front.** The far layer runs first; where its coverage is below ½ (behind the near
+  layer's sources), it is completed by pull-push (a pyramid of coverage-weighted averages built by
+  halving, then filled from coarse to fine with bilinear upsampling). The near layer, its color
+  normalized by its coverage $w$, then goes over it with opacity
   $\alpha = \min(\max(\operatorname{close}(w), m f),\ 3w)$: the coverage after a 3 px
   morphological closing, which fills narrow dips from mixed disc sizes but keeps the smooth ramp
   around a silhouette, and, on the layer's own pixels (membership $m$), the fraction $f$ of the
   layer's pixels within the pixel's own blur radius (a square window), which makes the layer
   opaque deeper inside than its blur reaches. The cap $3w$ keeps the noisy color of the kernels'
-  fading tails, a ratio of two tiny sums, from showing as a sharp, speckled fringe. The memory for
-  any number of
-  layers is two extra buffers (the composite, and debug data; 16 bytes per pixel each) plus the
-  pyramid, about a third more, and two more byte maps per split.
+  fading tails, a ratio of two tiny sums, from showing as a sharp, speckled fringe. The layers
+  take two extra buffers (the composite, and debug data; 16 bytes per pixel each) plus the
+  pyramid, about a third more, and two more byte maps.
+- **Cost.** Per-tile reach is stored as K + 1, with 0 for tiles that no source of the layer
+  reaches, so the passes skip them; the near layer is cheap where it is empty. On the Intel GPU,
+  on the Video Depth Anything clip of a woman in a field (960×540, radius 15), two layers took
+  about 2× the GPU time of one (94 vs. 47 ms).
 
-The **Layer view** selector shows the composite, the nearer layers' opacity (tinted, or as gray at
-half scale), the nearest layer alone, or, with one layer, the summed kernel weight per pixel.
+The **Layer view** selector shows the composite, the near layer's opacity (tinted, or as gray at
+half scale), the near layer alone, or, with one layer, the summed kernel weight per pixel.
 
 **Mixing blur levels.** The horizontal pass uses each source's level and the vertical pass a
 per-pixel level, but each level's tables are normalized only as a pair: a source's horizontal taps
 at level $l_1$ followed by vertical taps at $l_2$ weigh
 $C_{l_1 l_2} = \sum_n \mathrm{Re}[\Sigma h_n^{(l_1)}\,\Sigma v_n^{(l_2)}]$, which is not 1 (the
 in-focus identity, all in channel 0, mixed with a blur level gave 0.3). The identity's center tap
-now carries, per channel, the tap sums of the largest level (it is still exactly the identity
-alone, and mixes with blur levels at 0.92–1.14), and the horizontal pass divides each source's taps
-by $C$ for the output pixel's vertical level (a levels × levels table after the K table in the
-kernel buffer). The smoke test checks that $C$ stays within a factor of 1.5 of 1 for the article's
-presets.
+carries, per channel, the tap sums of the largest level (it is still exactly the identity alone).
+Beyond the smallest radii, $C$ is nearly a product $a_{l_1} b_{l_2}$ (its row and column against
+the largest level), so the horizontal and vertical tables are divided by $a$ and $b$. Only where
+an output's vertical level is small (a few pixels, where $C/(a b)$ is off by more than 0.5%) does
+the horizontal pass also multiply each source's taps by the remaining correction from a
+levels × levels table; that loop is separate, so the common case reads no extra table. The smoke
+test checks that $C$ stays within a factor of 1.5 of 1 for the article's presets and that every
+mix has unit weight within 0.5% after scaling and correction.
 
 #### Truncation and corners
 
