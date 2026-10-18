@@ -248,12 +248,14 @@ fn signedLevel(b: u32) -> i32 {
   return select(i32(b & 127u), -i32(b & 127u), (b & 128u) != 0u);
 }
 
-// A source well behind an in-focus or background destination is hidden by it, except within the
-// destination's own blur (destHalf = its K): sources above the destination's limit are hidden.
-// Foreground (blurry, in front of the focus) destinations hide nothing: they cover only part of
-// the aperture, so with layers, farther light keeps flowing behind them.
+// Depth order does not change at the focus plane: signed levels increase from near to far.
+// A destination hides sufficiently farther sources beyond its own blur support, for EITHER
+// sign of CoC. Within that support, partial aperture coverage still allows farther light.
+// A destination absent from the current layer must not occlude it: inter-layer visibility is
+// handled by compositing, and the far layer must remain available behind near-layer sources.
 fn occlusionLimit(dest: i32, x: u32, y: u32) -> i32 {
-  if (P.occlusion <= 0 || dest < 0) { return 1000; }
+  if (P.occlusion <= 0) { return 1000; }
+  if (P.layered == 1u && weightByte(x, y) == 0u) { return 1000; }
   return dest + P.occlusion;
 }
 
@@ -300,6 +302,12 @@ fn sourceWeight(x: u32, y: u32) -> f32 {
 
 fn tileCount() -> u32 {
   return P.tilesX * P.tilesY;
+}
+
+// One flag after the tile arrays, reset with them each frame and set by the final mask pass.
+// Adding an empty near layer must be the identity, not a depth denoiser or a hole filler.
+fn nearPresent() -> bool {
+  return atomicLoad(&tiles[${TILE_ARRAYS}u * tileCount()]) != 0u;
 }
 
 fn histBase() -> u32 {
@@ -533,6 +541,7 @@ fn closeMask(@builtin(global_invocation_id) id: vec3u) {
     }
   }
   lv[output + id.y * P.rowWords + id.x] = word;
+  if (P.level == 3u && word != 0u) { atomicStore(&tiles[${TILE_ARRAYS}u * tileCount()], 1u); }
 }
 
 fn encodeLevel(s: i32) -> u32 {
@@ -568,6 +577,12 @@ fn smoothLevels(@builtin(global_invocation_id) id: vec3u) {
   for (var j = 0u; j < 4u; j++) {
     let x = id.x * 4u + j;
     if (x >= P.width) { break; }
+    if (!nearPresent()) {
+      let b = levelByte(0u, x, id.y);
+      word |= b << (j * 8u);
+      kFar = max(kFar, halfAt(b & 127u) + 1);
+      continue;
+    }
     let front = levelByte(maskMap(), x, id.y) >= 128u;
     ${W.map((i) => `let q${i} = windowPixel(x, id.y, ${i - SMOOTH}, alongY); let v${i} = signedLevel(levelByte(input, q${i}.x, q${i}.y)); let in${i} = (levelByte(maskMap(), q${i}.x, q${i}.y) >= 128u) == front;`).join("\n    ")}
     let n = ${W.map((i) => `select(0, 1, in${i})`).join(" + ")};
@@ -716,6 +731,7 @@ fn texel(l: u32, x: u32, y: u32) -> vec4f {
 
 @compute @workgroup_size(8, 8)
 fn pull(@builtin(global_invocation_id) id: vec3u) {
+  if (!nearPresent()) { return; }
   let s = levelSize(P.level);
   if (id.x >= s.x || id.y >= s.y) { return; }
   let below = levelSize(P.level - 1u);
@@ -735,6 +751,7 @@ fn filledColor(l: u32, x: u32, y: u32) -> vec3f {
 // Coarse to fine: complete each texel's missing coverage with the bilinearly upsampled level above.
 @compute @workgroup_size(8, 8)
 fn push(@builtin(global_invocation_id) id: vec3u) {
+  if (!nearPresent()) { return; }
   let s = levelSize(P.level);
   if (id.x >= s.x || id.y >= s.y) { return; }
   let above = levelSize(P.level + 1u);
@@ -814,7 +831,7 @@ fn verticalLevels(@builtin(global_invocation_id) id: vec3u) {
   let row = id.y * P.width;
   let x0 = i32(id.x * 4u);
   let last = i32(P.width) - 1;
-  ${Q.map((j) => `let me${j} = sourceLevelByte(u32(min(x0 + ${j}, last)), id.y); let ld${j} = signedLevel(me${j}); let kd${j} = halfOf(ld${j}); let limit${j} = occlusionLimit(ld${j}, 0u, 0u); var sum${j} = 0.0; var weight${j} = 0.0; var any${j} = false;`).join("\n  ")}
+  ${Q.map((j) => `let px${j} = u32(min(x0 + ${j}, last)); let me${j} = sourceLevelByte(px${j}, id.y); let ld${j} = signedLevel(me${j}); let kd${j} = halfOf(ld${j}); let limit${j} = occlusionLimit(ld${j}, px${j}, id.y); var sum${j} = 0.0; var weight${j} = 0.0; var any${j} = false;`).join("\n  ")}
   for (var u = x0 - r; u <= x0 + 3 + r; u++) {
     let xs = u32(clamp(u, 0, last));
     let s = sourceLevelByte(xs, id.y);
@@ -1004,8 +1021,9 @@ ${displayShader}`;
 // mid ${packed ? "16" : "32"} bytes; radius f32, signed: negative in front of the focus (varying only).
 // Varying only (else any 4-byte buffers): lv u32[${MAPS} height rowWords] (byte maps: level, vertical
 // level, smoothed level, scratch, near layer mask),
-// tiles u32[${TILE_ARRAYS} tilesX tilesY]. Layers only (else any 16-byte buffer):
-// layer vec4f[width height + pyramid levels 1 .. top].
+// tiles u32[${TILE_ARRAYS} tilesX tilesY + 1]; last word is the near-occupancy flag, set by
+// closeMask phase 3. Clear it with the tile arrays each frame. Layers only (else any 16-byte buffer):
+// layer vec4f[2 width height + pyramid levels 1 .. top].
 // kern: vec2f; entries 0 .. ${HALVES - 1} hold K of each level in .x (taps -K..K); the next levels^2
 // hold in .x the cross fix a[ls] b[lv] / C[ls][lv] (row = source level, column = vertical level), where
 // C[ls][lv] = sum over channels of Re[(sum of h taps of ls)(sum of v taps of lv)] before the
@@ -1236,7 +1254,7 @@ export class BlurRenderer {
     const { width, height, device } = this;
     this.radiusBuffer ??= device.createBuffer({ size: width * height * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.levelMaps ??= device.createBuffer({ size: MAPS * height * this.rowWords * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    this.tiles ??= device.createBuffer({ size: TILE_ARRAYS * this.tilesX * this.tilesY * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.tiles ??= device.createBuffer({ size: (TILE_ARRAYS * this.tilesX * this.tilesY + 1) * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
   }
 
   // Pyramid levels 1 .. top of the hole filling: sizes and the first 1 x 1 level.
@@ -1252,7 +1270,7 @@ export class BlurRenderer {
 
   ensureLayerBuffer() {
     const texels = 2 * this.width * this.height + this.fillLevels().reduce((n, [w, h]) => n + w * h, 0);
-    this.layerBuffer ??= this.device.createBuffer({ size: texels * 16, usage: GPUBufferUsage.STORAGE });
+    this.layerBuffer ??= this.device.createBuffer({ size: texels * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   }
 
   releaseVaryingBuffers() {

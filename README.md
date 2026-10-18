@@ -222,11 +222,13 @@ sharper pixels: those pixels neither look far enough nor use the highlight's ker
    pixel then uses its own level, cutting the discs of blurry highlights next to sharper pixels),
    and the brightness weight is raised to an adjustable power: 0 counts all sources equally,
    1 (the default) in proportion to brightness, larger values let highlights dominate.
-4. **Occlusion** (z-buffer only, optional): an in-focus or background pixel hides sources more than an
-   adjustable threshold of blur behind it (default one octave, i.e. twice the radius), beyond its own blur radius, so background highlights do not bleed over
-   sharp foreground edges. Blurry foreground pixels hide nothing, because they cover only part of the
-   lens aperture. Light hidden behind a small blurry foreground object is missing from the image, so
-   such objects' discs come out somewhat brighter in the middle (see depth layers below).
+4. **Occlusion** (z-buffer only, optional): a destination hides sources farther than an adjustable
+  signed-level threshold behind it (default six levels), beyond its own kernel support. This
+  depth order applies on **both sides of focus**; a slightly defocused foreground surface must
+  still block distant highlights. Within its support, farther light is allowed, approximating
+  partial aperture coverage. A destination with zero membership in the current layer does not
+  occlude it: inter-layer visibility belongs to compositing, so far light remains available
+  behind the near layer. This separable visibility test is an approximation, not aperture ray tracing.
 
 The extra memory is the radius map (4 bytes per pixel) and three level maps (1 byte per pixel each).
 Each prepass step runs in its own compute pass: on the tested Intel GPU, dependent dispatches within
@@ -281,6 +283,13 @@ shows through the object's semi-transparent edge, as in a real lens.
   reaches, so the passes skip them; the near layer is cheap where it is empty. On the Intel GPU,
   on the Video Depth Anything clip of a woman in a field (960×540, radius 15), two layers took
   about 2× the GPU time of one (94 vs. 47 ms).
+- **Empty-layer identity.** The final mask pass records whether the near layer contains any
+  members. When it is empty, source-level smoothing and far-layer hole filling are bypassed;
+  adding an empty layer must not change the one-layer image. The occupancy flag is reset each frame.
+
+GPU regression tests are available at `/test/gpu.html` on the development server. They read linear
+buffers and check visibility on either side of focus, both spatial axes and intermediate precisions,
+foreground spread, empty-layer identity, reused frame state, and the tetra scene at two scales.
 
 The **Layer view** selector shows the composite, the near layer's opacity (tinted, or as gray at
 half scale), the near layer alone, the hole-filled far layer alone, or, with one layer, the summed

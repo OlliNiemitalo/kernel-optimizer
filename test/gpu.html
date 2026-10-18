@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Blur GPU regression tests</title>
+<pre id="results">Running…</pre>
+<script type="module">
+  import { run } from './gpu.js';
+  window.result = run().then(result => {
+    document.querySelector('#results').textContent = JSON.stringify(result, null, 2);
+    return result;
+  }).catch(error => {
+    document.querySelector('#results').textContent = error.stack;
+    return { error: error.stack };
+  });
+</script>
