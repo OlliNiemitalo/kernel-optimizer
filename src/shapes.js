@@ -164,7 +164,7 @@ export class Shapes {
 
   // Multiplies all coordinates by `factor`; returns the factor applied after clamping.
   zoom(factor) {
-    const scale = Math.max(0.05, Math.min(20, this.scale * factor));
+    const scale = Math.max(1 / 16, Math.min(16, this.scale * factor));
     const applied = scale / this.scale;
     this.scale = scale;
     return applied;

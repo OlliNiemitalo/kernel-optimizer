@@ -469,17 +469,29 @@ function endDrag() {
   drag.down = false;
 }
 
-// The wheel scales the tetra scene; the focus distance scales with it, so it stays on the same spot.
-function wheelScale(e) {
-  if (state.source !== "shapes") return;
-  e.preventDefault();
-  const factor = state.shapes.zoom(Math.exp(e.deltaY * 0.001));
+// The Scale slider (log2) and the wheel scale the tetra scene; the focus distance scales with it,
+// so it stays on the same spot.
+function scaleShapes(factor) {
+  factor = state.shapes.zoom(factor);
+  showShapesScale();
   // Slider values are sqrt(1 / distance); the hover preview's saved, target and current ones too.
   const scaled = (v) => Math.min(1, v / Math.sqrt(factor));
   hover.saved = scaled(hover.saved);
   hover.target = scaled(hover.target);
   hover.value = scaled(hover.value);
   setFocusSlider(scaled(num("focus")));
+}
+
+function showShapesScale() {
+  const scale = state.shapes?.scale ?? 1;
+  if (document.activeElement !== $("shapesScale")) $("shapesScale").value = Math.log2(scale);
+  $("shapesScaleOut").textContent = `${scale.toPrecision(3)}×`;
+}
+
+function wheelScale(e) {
+  if (state.source !== "shapes") return;
+  e.preventDefault();
+  scaleShapes(Math.exp(e.deltaY * 0.001));
 }
 
 async function clickFocus(e) {
@@ -589,6 +601,8 @@ async function renderBlur() {
       $("occlusion").disabled = !depth;
       $("layers").disabled = !depth;
       $("showLayers").disabled = !depth;
+      $("shapesScale").disabled = state.source !== "shapes";
+      showShapesScale();
       updateVaryingControls();
       blurKernelDirty = false;
     }
@@ -843,6 +857,9 @@ function wire() {
   $("blurCanvas").addEventListener("pointermove", moveDrag);
   for (const type of ["pointerup", "pointercancel"]) $("blurCanvas").addEventListener(type, endDrag);
   $("blurCanvas").addEventListener("wheel", wheelScale, { passive: false });
+  $("shapesScale").addEventListener("input", () => {
+    if (state.source === "shapes") scaleShapes(2 ** num("shapesScale") / state.shapes.scale);
+  });
   $("blurCanvas").addEventListener("click", clickFocus);
   $("exposure").addEventListener("input", () => {
     $("exposureOut").textContent = `${Math.pow(2, num("exposure")).toFixed(2)}×`;

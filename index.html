@@ -65,6 +65,7 @@
                 <button id="shapesButton" class="grow" title="Three tetrahedra in a row against a black, starry background at infinity. Drag the picture to turn the view; scroll the wheel over it to scale the scene (all coordinates, so only the blur changes).">Tetras</button>
                 <button id="sceneButton" class="grow" title="A 2-D HDR test image without depth">2D test</button>
               </div>
+              <label class="slider" title="Tetras only: multiplies all coordinates, the camera's included, so the picture stays and only the blur changes; the focus follows. The mouse wheel over the picture does the same.">Scale <input id="shapesScale" type="range" min="-4" max="4" step="0.01" value="0" disabled /> <output id="shapesScaleOut">1.00×</output></label>
               <label class="stack" title="An image, or an RGB-D video: color on top, inverse depth below as grayscale (white = 0.5 m)">Open an image or RGB-D video
                 <input id="imageFile" type="file" accept="image/*,video/*" />
               </label>
