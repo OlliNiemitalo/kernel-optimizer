@@ -1,11 +1,11 @@
-import { continuousKernel } from '../src/continuous-kernel.js';
+import { radiusTables } from '../src/radius-tables.js';
 import { presetParams, separableChannels } from '../src/problem.js';
 
 export async function continuousGPU(renderer, check, read) {
   const width = 49, height = 49, center = 24;
   const device = renderer.device;
   const params = presetParams(3), channels = separableChannels(params);
-  const reference = continuousKernel(channels, 0.2, 12);
+  const reference = radiusTables(channels, 0.2, 12);
   const source = new Float32Array(width * height * 4);
   source[4 * (center * width + center)] = 1;
   const radii = new Float32Array(width * height).fill(12);
@@ -20,7 +20,8 @@ export async function continuousGPU(renderer, check, read) {
       await renderer.render({ precision, sizeBlur, occlusion: 0 });
       const data = await read(device, renderer.acc);
       const effective = radii[0]; // actual f32 radius uploaded to the GPU
-      const half = Math.ceil(Math.max(effective, 1) * reference.support);
+      const [node] = reference.coordinate(effective);
+      const half = reference.halves[node + 1];
       const taps = [0, 1].map(dir => channels.map((_, ch) =>
         Array.from({ length: 2 * half + 1 }, (_, i) => reference.tap(effective, dir, ch, i - half))));
       const sums = taps.map(dir => dir.map(t => t.reduce((s, z) => [s[0] + z[0], s[1] + z[1]], [0, 0])));

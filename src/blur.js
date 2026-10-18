@@ -14,9 +14,9 @@
 // weights that actually reached the pixel. Dividing by it normalizes brightness exactly for a
 // uniform radius (also at clamped edges) and stays brightness-preserving when the radius varies.
 //
-// Spatially varying radius: scatter-as-gather with continuous source radii. Each channel reads
-// one dense, even complex profile at a rescaled, linearly interpolated coordinate. Discrete DC
-// normalization is interpolated separately; zero radius is the exact identity. Float maps retain
+// Spatially varying radius: scatter-as-gather with continuous source radii. Each channel blends
+// adjacent precomputed radius-node taps at integer offsets (an even, scale-indexed table).
+// Mixed DC weights are interpolated then inverted; zero radius is the exact identity. Float maps retain
 // the vertical radius and layered smoothing values. Byte levels remain only for depth decisions.
 // Pixels gather over a conservative per-tile reach. The vertical radius averages the continuous
 // log-radius of reaching sources, weighted by brightness and disc coverage. This is still an
@@ -32,7 +32,7 @@
 // flight slide through registers), so loads per output drop by ~ROWS.
 
 import { separableChannels } from "./problem.js";
-import { continuousKernel } from "./continuous-kernel.js";
+import { radiusTables, RADIUS_LINEAR_LIMIT, RADIUS_LINEAR_DENSITY, RADIUS_LEVELS_PER_OCTAVE } from "./radius-tables.js";
 
 export const MAX_CHANNELS = 16;
 const ROWS = 8;
@@ -73,7 +73,9 @@ for (let p = 1; p < SORT; p <<= 1) {
   }
 }
 const each = (f) => J.map(f).join("\n    ");
-const eachV = (f) => Q.map(f).join("\n    "); // fewer live accumulators in the interpolating horizontal path
+const HORIZONTAL_OUTPUTS = 4;
+const HJ = Array.from({ length: HORIZONTAL_OUTPUTS }, (_, j) => j);
+const eachV = (f) => HJ.map(f).join("\n    ");
 
 function computeShader(packed) {
   // One channel's complex intermediate per pixel, lanes (r, g, b, w):
@@ -173,50 +175,46 @@ fn tableStart(level: u32, dir: u32) -> u32 {
   return HALVES + P.levels * P.levels + ((level * 2u + dir) * P.channels + P.channel) * P.stride + PAD;
 }
 
-// Varying path: the profile and normalization grids are continuous interpolants. The byte
-// levels are retained for depth classification only, never to select a convolution kernel.
+// Varying path: precompute the radius-table coordinate once per pixel, before channel filtering.
+// Byte levels remain for depth classification only; continuous fractions select between nodes.
 fn normCoordinate(r: f32) -> vec2f {
-  var q = r * 64.0;
-  if (r > 4.0) { q = 256.0 + log2(r / 4.0) * 64.0; }
+  var q = r * ${RADIUS_LINEAR_DENSITY}.0;
+  if (r > ${RADIUS_LINEAR_LIMIT}.0) { q = ${RADIUS_LINEAR_LIMIT * RADIUS_LINEAR_DENSITY}.0 + log2(r / ${RADIUS_LINEAR_LIMIT}.0) * ${RADIUS_LEVELS_PER_OCTAVE}.0; }
+  return tableCoordinate(q);
+}
+fn tableCoordinate(key: f32) -> vec2f {
+  var q = key;
   q = min(q, kern[HALVES + 1u].y - 1.0);
   let i = min(floor(q), kern[HALVES + 1u].y - 2.0);
   return vec2f(i, q - i);
 }
 
-fn radiusFactorAt(q: vec2f, dir: u32) -> f32 {
-  let i = u32(kern[HALVES + 2u].x) + u32(q.x);
-  return 1.0 / mix(kern[i][dir], kern[i + 1u][dir], q.y);
-}
-
-fn radiusFixAt(a: vec2f, b: vec2f, vr: f32) -> f32 {
+fn radiusFixAt(a: vec2f, b: vec2f, fade: f32) -> f32 {
   let n = u32(kern[HALVES + 1u].y);
   let i = u32(kern[HALVES + 2u].y) + u32(a.x) * n + u32(b.x);
   let f = mix(mix(kern[i].x, kern[i + n].x, a.y), mix(kern[i + 1u].x, kern[i + n + 1u].x, a.y), b.y);
   // Fade out the already-small correction before the fast path, not a threshold jump.
-  let start = kern[HALVES - 1u].x;
-  return mix(f, 1.0, smoothstep(start, 2.0 * start, vr));
+  return mix(1.0 / f, 1.0, fade);
 }
 
-fn radiusTap(r: f32, dir: u32, t: i32, factor: f32) -> vec2f {
-  if (r == 0.0) {
-    return select(vec2f(0.0), kern[u32(kern[HALVES + 3u].x) + dir * P.channels + P.channel] * factor, t == 0);
-  }
-  let density = kern[HALVES].x;
+fn radiusBase(q: vec2f, dir: u32) -> u32 {
   let stride = u32(kern[HALVES + 1u].x);
-  let q = min(abs(f32(t)) * density / max(r, 1.0), f32(stride - 2u));
-  let i = u32(kern[HALVES + 3u].y) + (dir * P.channels + P.channel) * stride + u32(floor(q));
-  let tap = mix(kern[i], kern[i + 1u], fract(q)) * density / max(r, 1.0);
-  let identity = select(vec2f(0.0), kern[u32(kern[HALVES + 3u].x) + dir * P.channels + P.channel], t == 0);
-  return mix(identity, tap, min(r, 1.0)) * factor;
+  return u32(kern[HALVES + 3u].y) + ((dir * P.channels + P.channel) * u32(kern[HALVES + 1u].y) + u32(q.x)) * stride;
+}
+fn radiusTap(base: u32, fraction: f32, t: i32) -> vec2f {
+  let i = base + u32(abs(t));
+  return mix(kern[i], kern[i + u32(kern[HALVES + 1u].x)], fraction);
 }
 
 fn radiusHalf(r: f32) -> i32 {
   if (r == 0.0) { return 0; }
-  return i32(ceil(max(r, 1.0) * kern[HALVES].y));
+  let q = normCoordinate(r);
+  // A blend has the union of its two node supports, not the support of the requested radius.
+  return i32(kern[u32(kern[HALVES + 2u].x) + u32(q.x) + 1u].x);
 }
 
-// Three f32 planes appended to the packed maps: smoothed source radius, smoothing scratch,
-// and vertical radius. Keeping these as floats avoids re-quantizing the interpolated kernels.
+// Four f32 planes appended to packed maps: smoothed source radius, smoothing scratch (reused for
+// the source table key after smoothing), vertical radius, and vertical table key. No quantization.
 fn floatMap(plane: u32, x: u32, y: u32) -> u32 {
   return ${MAPS}u * P.height * P.rowWords + plane * P.width * P.height + y * P.width + x;
 }
@@ -869,11 +867,15 @@ fn marginal(r: f32, t: i32) -> f32 {
 @compute @workgroup_size(64, 1)
 fn verticalLevels(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= P.rowWords || id.y >= P.height) { return; }
+  for (var j = 0u; j < 4u; j++) {
+    let x = id.x * 4u + j;
+    if (x < P.width) { let q = normCoordinate(sourceRadius(x, id.y)); storeRadius(1u, x, id.y, q.x + q.y); }
+  }
   let n = P.tilesX * P.tilesY;
   let reached = atomicLoad(&tiles[2u * n + tileOf(id.x * 4u, id.y)]);
   if (reached == 0u) {
     lv[verticalMap() + id.y * P.rowWords + id.x] = 0u;
-    for (var j = 0u; j < 4u; j++) { let x = id.x * 4u + j; if (x < P.width) { storeRadius(2u, x, id.y, 0.0); } }
+    for (var j = 0u; j < 4u; j++) { let x = id.x * 4u + j; if (x < P.width) { storeRadius(2u, x, id.y, 0.0); storeRadius(3u, x, id.y, 0.0); } }
     return;
   }
   // The 4 pixels share the row sources, so each source's brightness is computed once.
@@ -901,6 +903,8 @@ fn verticalLevels(@builtin(global_invocation_id) id: vec3u) {
     if (weight${j} > 0.0) { vr = continuousRadius(sum${j} / weight${j}); }
     if (!lit) { vr = 0.0; }
     storeRadius(2u, px${j}, id.y, vr);
+    let vq = normCoordinate(vr);
+    storeRadius(3u, px${j}, id.y, vq.x + vq.y);
     let v = levelOf(vr);
     word |= v << ${8 * j}u;
     if (lit) { kmax = max(kmax, radiusHalf(vr) + 1); }
@@ -914,7 +918,7 @@ fn verticalLevels(@builtin(global_invocation_id) id: vec3u) {
 // skips the small-radius correction once it has faded completely to 1 for every output.
 @compute @workgroup_size(64, 1)
 fn horizontalVarying(@builtin(global_invocation_id) id: vec3u) {
-  let x0 = i32(id.x) * 4;
+  let x0 = i32(id.x) * ${HORIZONTAL_OUTPUTS};
   if (x0 >= i32(P.width) || id.y >= P.height) { return; }
   let reached = atomicLoad(&tiles[2u * P.tilesX * P.tilesY + tileOf(u32(x0), id.y)]);
   let last = i32(P.width) - 1;
@@ -924,16 +928,15 @@ fn horizontalVarying(@builtin(global_invocation_id) id: vec3u) {
     return;
   }
   let r = i32(reached) - 1;
-  ${eachV((j) => `let px${j} = u32(min(x0 + ${j}, last)); let d${j} = signedLevel(sourceLevelByte(px${j}, id.y)); let k${j} = radiusHalf(sourceRadius(px${j}, id.y)); let o${j} = occlusionLimit(d${j}, px${j}, id.y); let v${j} = loadRadius(2u, px${j}, id.y); let vn${j} = normCoordinate(v${j}); var re${j} = vec4f(0.0); var im${j} = vec4f(0.0);`)}
-  ${[false, true].map(fix => `${fix ? "else" : `if (${Q.map(j => `v${j} >= 2.0 * kern[HALVES - 1u].x`).join(" && ")})`} {
-  for (var u = x0 - r; u < x0 + 4 + r; u++) {
+  ${eachV((j) => `let px${j} = u32(min(x0 + ${j}, last)); let d${j} = signedLevel(sourceLevelByte(px${j}, id.y)); let k${j} = radiusHalf(sourceRadius(px${j}, id.y)); let o${j} = occlusionLimit(d${j}, px${j}, id.y); let v${j} = loadRadius(3u, px${j}, id.y); let vn${j} = tableCoordinate(v${j}); let fade${j} = smoothstep(kern[HALVES - 1u].x, kern[HALVES - 1u].y, v${j}); var re${j} = vec4f(0.0); var im${j} = vec4f(0.0);`)}
+  ${[false, true].map(fix => `${fix ? "else" : `if (${HJ.map(j => `v${j} >= kern[HALVES - 1u].y`).join(" && ")})`} {
+  for (var u = x0 - r; u < x0 + ${HORIZONTAL_OUTPUTS} + r; u++) {
     let x = u32(clamp(u, 0, last));
     let ls = signedLevel(sourceLevelByte(x, id.y));
-    let sr = sourceRadius(x, id.y);
-    let sn = normCoordinate(sr);
-    let factor = radiusFactorAt(sn, 0u);
+    let sn = tableCoordinate(loadRadius(1u, x, id.y));
+    let base = radiusBase(sn, 0u);
     let p = vec4f(src[row + x].rgb, 1.0) * sourceWeight(x, id.y);
-    ${eachV((j) => `{ let h = select(radiusTap(sr, 0u, u - x0 - ${j}, factor), vec2f(0.0), hidden(ls, o${j}, u - x0 - ${j}, k${j}))${fix ? ` * radiusFixAt(sn, vn${j}, v${j})` : ""}; re${j} += p * h.x; im${j} += p * h.y; }`)}
+    ${eachV((j) => `{ let h = select(radiusTap(base, sn.y, u - x0 - ${j}), vec2f(0.0), hidden(ls, o${j}, u - x0 - ${j}, k${j}))${fix ? ` * radiusFixAt(sn, vn${j}, fade${j})` : ""}; re${j} += p * h.x; im${j} += p * h.y; }`)}
   }}
   `).join("")}
   ${eachV((j) => `if (x0 + ${j} <= last) { storeMid(row + u32(x0 + ${j}), re${j}, im${j}); }`)}
@@ -954,10 +957,10 @@ fn verticalVarying(@builtin(global_invocation_id) id: vec3u) {
   for (var u = y0 - r; u < y0 + ROWS + r; u++) {
     let y = u32(clamp(u, 0, last));
     let ls = signedLevel(sourceLevelByte(id.x, y));
-    let vr = loadRadius(2u, id.x, y);
-    let factor = radiusFactorAt(normCoordinate(vr), 1u);
+    let vn = tableCoordinate(loadRadius(3u, id.x, y));
+    let base = radiusBase(vn, 1u);
     let m = loadMid(y * P.width + id.x);
-    ${each((j) => `{ let h = select(radiusTap(vr, 1u, u - y0 - ${j}, factor), vec2f(0.0), hidden(ls, o${j}, u - y0 - ${j}, k${j})); a${j} += m.re * h.x - m.im * h.y; }`)}
+    ${each((j) => `{ let h = select(radiusTap(base, vn.y, u - y0 - ${j}), vec2f(0.0), hidden(ls, o${j}, u - y0 - ${j}, k${j})); a${j} += m.re * h.x - m.im * h.y; }`)}
   }
   ${each((j) => `if (y0 + ${j} <= last) { accumulate(u32(y0 + ${j}) * P.width + id.x, a${j}); }`)}
 }
@@ -1040,7 +1043,7 @@ ${displayShader}`;
 //   for each separable channel n = 0 .. channels - 1:
 //     uniform radius:  horizontal  ceil(ceil(width / ${ROWS}) / 64) x height workgroups
 //                      vertical    ceil(width / 64) x ceil(height / ${ROWS}) workgroups
-//     varying radius:  horizontalVarying ceil(ceil(width / 4) / 64) x height workgroups;
+//     varying radius:  horizontalVarying ceil(ceil(width / ${HORIZONTAL_OUTPUTS}) / 64) x height workgroups;
 //                      verticalVarying uses the same counts as vertical
 // then draw with the display shader (acc.rgb / acc.w).
 //
@@ -1068,25 +1071,27 @@ ${displayShader}`;
 // Buffers (one entry per pixel, row-major): src vec4f linear RGB (alpha unused by the blur; the demo
 // keeps 1 / depth there for focus picking); acc vec4f;
 // mid ${packed ? "16" : "32"} bytes; radius f32, signed: negative in front of the focus (varying only).
-// Varying only (else any 4-byte buffers): lv u32[${MAPS} height rowWords + 3 width height]:
-// packed byte maps (level, vertical level, smoothed level, scratch, near mask), then three bitcast
-// f32 planes (smoothed signed radius, radius smoothing scratch, vertical radius),
+// Varying only (else any 4-byte buffers): lv u32[${MAPS} height rowWords + 4 width height]:
+// packed byte maps (level, vertical level, smoothed level, scratch, near mask), then four bitcast
+// f32 planes (smoothed signed radius, radius smoothing scratch/source table key, vertical radius,
+// vertical table key). verticalLevels writes both keys once before the per-channel H/V passes.
 // tiles u32[${TILE_ARRAYS} tilesX tilesY + 1]; last word is the near-occupancy flag, set by
 // closeMask phase 3. Clear it with the tile arrays each frame. Layers only (else any 16-byte buffer):
 // layer vec4f[2 width height + pyramid levels 1 .. top].
 // kern: vec2f. Uniform path retains tapTables(): ${HALVES} header entries, one cross weight,
 // then [direction][channel][stride] taps with PAD zeros and center at PAD + halfTaps.
-// Varying path (built by buildContinuousTable and continuousKernel):
-//   entry ${HALVES - 1}.x = correction fade start radius; skip correction beyond twice this radius.
-//   entry ${HALVES} = profile density, normalized support
-//   entry ${HALVES + 1} = profile stride, normalization node count N
-//   entry ${HALVES + 2} = normalization factors offset, correction matrix offset
-//   entry ${HALVES + 3} = identity vectors offset, profile offset (all offsets in vec2f entries).
-// Factors are N vec2f (horizontal, vertical); corrections are N*N entries in .x, row = source
-// radius, column = vertical radius. Node key: r*64 below 4 px, 256+64*log2(r/4) above. Interpolate
-// factors linearly and corrections bilinearly. Identity and profile use [direction][channel];
-// the profile is even, stored only for nonnegative offsets, with zero padding at its end.
-// See radiusTap for the continuous subpixel identity blend and radiusFixAt for the smooth fade.
+// Varying path (built by buildContinuousTable and radiusTables):
+//   entry ${HALVES - 1} = correction fade start/end keys (skip correction at/above end).
+//   entry ${HALVES} = unused, normalized reference support
+//   entry ${HALVES + 1} = even tap stride, radius node count N
+//   entry ${HALVES + 2} = node support offset, mixed DC matrix offset
+//   entry ${HALVES + 3} = unused, tap offset (all offsets in vec2f entries).
+// Supports: N entries in .x. Mixed DC: N*N entries in .x, row = source node, column = vertical
+// node. Bilinearly interpolate DC then take its reciprocal, NOT interpolation of reciprocals.
+// Key = r*${RADIUS_LINEAR_DENSITY} below ${RADIUS_LINEAR_LIMIT}px, ${RADIUS_LINEAR_LIMIT * RADIUS_LINEAR_DENSITY}+${RADIUS_LEVELS_PER_OCTAVE}*log2(r/${RADIUS_LINEAR_LIMIT}) above.
+// Taps: [direction][channel][node][stride], complex vec2f, even (nonnegative offsets only),
+// normalized at each node and zero-padded. Gather support is the union of the adjacent nodes.
+// Node zero is identity; subpixel nodes blend it continuously with the radius-one profile.
 ${computeShader(packed)}`;
 }
 
@@ -1297,7 +1302,7 @@ export class BlurRenderer {
   ensureVaryingBuffers() {
     const { width, height, device } = this;
     this.radiusBuffer ??= device.createBuffer({ size: width * height * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-    this.levelMaps ??= device.createBuffer({ size: MAPS * height * this.rowWords * 4 + 3 * width * height * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    this.levelMaps ??= device.createBuffer({ size: MAPS * height * this.rowWords * 4 + 4 * width * height * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     this.tiles ??= device.createBuffer({ size: (TILE_ARRAYS * this.tilesX * this.tilesY + 1) * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
   }
 
@@ -1394,25 +1399,23 @@ export class BlurRenderer {
     const maxRadius = this.varying.kind === "map" ? this.varying.maxRadius : Math.max(1, radius);
     const key = JSON.stringify([channels, transition, maxRadius]);
     if (key === this.continuousKey) { this.tablesDirty = false; return; }
-    const c = continuousKernel(channels, transition, maxRadius);
+    const c = radiusTables(channels, transition, maxRadius);
     const n = channels.length, L = Math.min(127, Math.max(2, Math.ceil(Math.log2(maxRadius) * LEVELS_PER_OCTAVE) + 2));
     const norm = HALVES + 4, fix = norm + c.count;
-    const identity = fix + c.count * c.count, profile = identity + 2 * n;
-    const data = new Float32Array(2 * (profile + 2 * n * c.stride));
-    data.set([c.density, c.support, c.stride, c.count, norm, fix, identity, profile], 2 * HALVES);
-    data[2 * (HALVES - 1)] = c.smallRadius;
-    for (let l = 1; l < L; l++) data[2 * l] = Math.ceil(2 ** ((l - 1) / LEVELS_PER_OCTAVE) * c.support);
-    c.factors.forEach((f, i) => data.set(f, 2 * (norm + i)));
-    c.fixes.forEach((row, i) => row.forEach((f, j) => { data[2 * (fix + i * c.count + j)] = f; }));
-    for (let dir = 0; dir < 2; dir++) for (let ch = 0; ch < n; ch++) {
-      data.set(c.identity[dir][ch], 2 * (identity + dir * n + ch));
-      data.set(c.profiles[dir][ch], 2 * (profile + (dir * n + ch) * c.stride));
+    const profile = fix + c.count * c.count;
+    const data = new Float32Array(2 * (profile + 2 * n * c.count * c.stride));
+    data.set([0, c.support, c.stride, c.count, norm, fix, 0, profile], 2 * HALVES);
+    data.set([c.fadeStart, c.fadeEnd], 2 * (HALVES - 1));
+    c.halves.forEach((half, i) => { data[2 * (norm + i)] = half; });
+    c.cross.forEach((row, i) => row.forEach((f, j) => { data[2 * (fix + i * c.count + j)] = f; }));
+    for (let dir = 0; dir < 2; dir++) for (let ch = 0; ch < n; ch++) for (let i = 0; i < c.count; i++) {
+      data.set(c.tables[i][dir][ch], 2 * (profile + ((dir * n + ch) * c.count + i) * c.stride));
     }
     this.kernel?.destroy();
     this.kernel = this.device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.device.queue.writeBuffer(this.kernel, 0, data);
     this.channels = n;
-    this.K = Math.ceil(Math.max(1, maxRadius) * c.support);
+    this.K = c.half;
     this.taps = 2 * this.K + 1;
     this.levels = L; // retained only for depth classification, not kernel selection
     this.stride = c.stride;
@@ -1491,7 +1494,7 @@ export class BlurRenderer {
 
     const p = this.computePipelines(packed);
     const [horizontal, vertical] = varying ? [p.horizontalVarying, p.verticalVarying] : [p.horizontal, p.vertical];
-    const groups = { h: [Math.ceil(Math.ceil(width / (varying ? 4 : ROWS)) / 64), height], v: [Math.ceil(width / 64), Math.ceil(height / ROWS)] };
+    const groups = { h: [Math.ceil(Math.ceil(width / (varying ? HORIZONTAL_OUTPUTS : ROWS)) / 64), height], v: [Math.ceil(width / 64), Math.ceil(height / ROWS)] };
     const bindGroup = device.createBindGroup({
       layout: this.computeLayout,
       entries: [

@@ -199,19 +199,20 @@ relative inverse depth $v \in [0, 1]$ in one of two layouts:
   the color video while playing, and on the same frame when paused or stepping.
 
 Inverse depth suits 8-bit video, since the blur radius is linear in it: one gray level is a fixed
-fraction of $R$. Videos wider than 960 pixels are downscaled when read. Varying radii use one dense
-complex profile per channel and direction, sampled at 256 points per disc radius. Taps rescale its
-coordinate by the actual floating-point radius and linearly interpolate real and imaginary parts.
-There is no six-levels-per-octave ladder in kernel selection. Radii below one pixel blend continuously
-with the exact zero-radius identity. A zero endpoint closes the truncated profile continuously as
-its support crosses pixel boundaries. The uniform-radius path retains its direct tap tables.
+fraction of $R$. Videos wider than 960 pixels are downscaled when read. Varying radii interpolate
+between **precomputed radius-node tap tables**: nodes at 1/32 pixel spacing through 4 pixels, then
+32 per octave. The per-pixel node index and fraction are prepared once; the inner loops read two
+complex taps at integer offsets and blend them, without rescaling a profile or normalizing each tap.
+Node radii are interpolation points, not quantized choices. The tables are built from a dense
+complex reference profile (256 points per disc radius), with a continuous zero endpoint. Radii
+below one pixel blend with the exact zero-radius identity. The uniform path keeps its direct tables.
 
 A plain gather, where each output uses its own radius, cuts the discs of blurry highlights next to
 sharper pixels: those pixels neither look far enough nor use the highlight's kernel. So the passes
 *scatter as gather*:
 
 1. A prepass retains a coarse byte-per-pixel level map for depth classification (sign bit = in
-  front of focus), but computes conservative support bounds from the continuous radii. Dilating
+  front of focus), but computes conservative support bounds from the union of both radius nodes. Dilating
   the largest kernel half-width per 16×16 tile over the
    neighbouring tiles gives each tile's **reach**: how far its pixels must look.
 2. Every tap uses the continuous radius of the **source** pixel it reads, so each source spreads
@@ -234,9 +235,9 @@ sharper pixels: those pixels neither look far enough nor use the highlight's ker
   occlude it: inter-layer visibility belongs to compositing, so far light remains available
   behind the near layer. This separable visibility test is an approximation, not aperture ray tracing.
 
-Working maps contain five packed byte maps and three float planes (smoothed source radius,
-smoothing scratch, vertical radius), in addition to the original signed radius map. Normalization
-tables are separate from the compact profile; their memory is included in the displayed total.
+Working maps contain five packed byte maps and four float planes (smoothed source radius,
+smoothing scratch reused as source table coordinate, vertical radius, vertical table coordinate),
+in addition to the original signed radius map. Tap and DC tables are included in displayed memory.
 Each prepass step runs in its own compute pass: on the tested Intel GPU, dependent dispatches within
 one compute pass were not reliably ordered, which made the output vary from frame to frame.
 
@@ -288,9 +289,11 @@ shows through the object's semi-transparent edge, as in a real lens.
   take two extra buffers (the composite, and debug data; 16 bytes per pixel each) plus the
   pyramid, about a third more, and two more byte maps.
 - **Cost.** Per-tile reach is stored as K + 1, with 0 for tiles that no source of the layer
-  reaches, so the passes skip them; the near layer is cheap where it is empty. Interpolation adds
-  profile reads and normalization work compared with discrete tap tables; earlier timings for
-  the discrete renderer do not describe this path.
+  reaches, so the passes skip them; the near layer is cheap where it is empty. The radius-table
+  interpolant avoids the former rescaled-profile path's per-tap division, coordinate arithmetic,
+  identity blend, and normalization factor. Four horizontal outputs per thread were faster than
+  two or eight in the tested Intel Gen9 configuration. Older nearest-node timings are not directly
+  comparable; the benchmark page alternates frozen-scene renders on the same device.
 - **Empty-layer identity.** The final mask pass records whether the near layer contains any
   members. When it is empty, source-level smoothing and far-layer hole filling are bypassed;
   adding an empty layer must not change the one-layer image. The occupancy flag is reset each frame.
@@ -309,14 +312,41 @@ kernel weight per pixel.
 For horizontal radius $r_h$ and vertical radius $r_v$, the DC weight is
 $C(r_h,r_v)=\sum_n\mathrm{Re}[\Sigma h_n(r_h)\,\Sigma v_n(r_v)]$.
 The identity uses the dense reference profile's per-channel DC vectors. Factoring $C$ against
-those vectors gives horizontal and vertical gains; the remaining mixed-radius correction is
-stored in a bilinearly interpolated table. Normalization samples are spaced at 1/64 pixel up to
-4 pixels, then 64 per octave through the largest requested radius. These are interpolation
-nodes, not quantized radius choices. Where the remaining correction is within 0.3% at every
-source-radius node, it fades smoothly to one over an octave; beyond that, a separate fast loop
-omits its reads. The smoke tests bound sampled mixed-radius DC error by 0.5%, including the fade,
-and cover all six presets plus a merged polynomial channel. This normalizes fixed radius pairs;
-it does not make arbitrary spatially varying source/intermediate radius fields exact.
+those vectors gives horizontal and vertical gains, baked into each radius node's taps. Since tap
+interpolation is linear, the mixed DC is exactly the bilinear interpolation of the node-pair DC
+matrix. Its **reciprocal is taken after interpolation**. Interpolating reciprocal corrections
+would not normalize the blended taps. Where DC stays within 0.3% of one for every source node,
+the correction fades smoothly to one over an octave, after which a fast loop omits its reads.
+This normalizes fixed radius pairs, not arbitrary spatially varying source/intermediate fields.
+
+The numerical tests compare against the previous dense-profile reference as well as checking exact
+mixed DC, fast-path tolerance, continuity at every radius node, GPU impulse responses, and ramps.
+Blending nodes broadens the very narrow truncation transition slightly; integrated absolute kernel
+error is tested separately from peak error at that tail. These scale-indexed tables can later hold
+pixel-footprint-filtered kernels for antialiasing. Current radius interpolation is **not** source-image
+mipmapping and does not yet add such prefiltering.
+
+`/test/benchmark.html` provides an opt-in alternating GPU-timestamp comparison against captured
+baseline source. It warms both pipelines, shares one device, freezes the tetra camera, and reports
+per-pass medians and raw samples at radii 15 and 69 in f32 and f16. Keep other GPU workloads idle.
+
+Measured on Intel Gen9 at 960×600, preset 3, one layer, size blending and occlusion enabled:
+nine alternating samples after two warmups, compared with the rescaled-profile sampler (`b6c1470`).
+Totals include scene rendering and preparation, not just convolution.
+
+| Radius | Intermediate | Previous (ms) | Lookup (ms) | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| 15 | f32 | 99.4 | 76.6 | 1.30× |
+| 15 | packed f16 | 101.9 | 72.6 | 1.40× |
+| 69 | f32 | 397.1 | 298.1 | 1.33× |
+| 69 | packed f16 | 399.4 | 276.9 | 1.44× |
+
+Kernel tables shrink from 1.12 to 0.52 MiB at radius 15 and from 2.08 to 1.63 MiB at radius 69.
+Caching the vertical table coordinate adds one float per pixel (2.20 MiB here), so total GPU
+memory increases despite the smaller tables. In the sampled preset/radius quality sweep, the
+largest integrated absolute kernel difference was 0.00557, with a localized truncation-tail
+peak difference of 0.0311 after multiplying by radius squared. These are sampled results,
+not universal performance or error bounds.
 
 #### Truncation and corners
 

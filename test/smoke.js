@@ -3,6 +3,7 @@ import { defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
 import { DifferentialEvolution } from "../src/de.js";
 import { tapTables } from "../src/blur.js";
 import { continuousKernel } from "../src/continuous-kernel.js";
+import { radiusTables } from "../src/radius-tables.js";
 import { FineTuner } from "../src/finetune.js";
 import {
   bounds, defaultProblem, maxError, multiplicities, nonnegativePresetParams, parseParams, presetParams, profile, sampleGrid,
@@ -18,6 +19,55 @@ function check(name, value, tolerance) {
 }
 
 const problemFor = (multiplicity) => ({ ...defaultProblem(), components: multiplicity.length, multiplicity });
+
+{
+  let dcError = 0, fastError = 0, profileError = 0, integratedError = 0, continuity = 0;
+  for (const n of [1, 2, 3, 4, 5, 6]) {
+    const channels = separableChannels(presetParams(n));
+    const tables = radiusTables(channels, 0.2, 128);
+    const reference = continuousKernel(channels, 0.2, 128);
+    const rs = [0, 0.17, 0.94387, 1, 1.02, 1.17, 1.8, 2.13, 3.7, 4, 5.3, 8.05, 15, 32, 69, 120];
+    const sums = rs.map(r => [0, 1].map(dir => channels.map((_, ch) => {
+      const sum = [0, 0];
+      for (let t = -tables.half; t <= tables.half; t++) {
+        const z = tables.tap(r, dir, ch, t);
+        sum[0] += z[0]; sum[1] += z[1];
+      }
+      return sum;
+    })));
+    for (let i = 0; i < rs.length; i++) for (let j = 0; j < rs.length; j++) {
+      const w = sums[i][0].reduce((s, h, ch) => s + h[0] * sums[j][1][ch][0] - h[1] * sums[j][1][ch][1], 0);
+      dcError = Math.max(dcError, Math.abs(w * tables.correction(rs[i], rs[j]) - 1));
+      fastError = Math.max(fastError, Math.abs(w * tables.correction(rs[i], rs[j], true) - 1));
+    }
+    // Full 2-D equal-radius kernels, weighted by pixel area, compared with the dense profile.
+    for (const r of rs.filter(r => r >= 1)) {
+      const half = tables.halves[tables.coordinate(r)[0] + 1];
+      const tap = (model, dir) => channels.map((_, ch) => Array.from({ length: 2 * half + 1 }, (_, t) => model.tap(r, dir, ch, t - half)));
+      const h = tap(tables, 0), v = tap(tables, 1), rh = tap(reference, 0), rv = tap(reference, 1);
+      let l1 = 0;
+      for (let x = 0; x <= 2 * half; x++) for (let y = 0; y <= 2 * half; y++) {
+        const value = (a, b) => channels.reduce((s, _, ch) => s + a[ch][x][0] * b[ch][y][0] - a[ch][x][1] * b[ch][y][1], 0);
+        const a = value(h, v) * tables.correction(r, r);
+        const b = value(rh, rv) * reference.correction(r, r);
+        profileError = Math.max(profileError, Math.abs(a - b) * Math.max(1, r * r));
+        l1 += Math.abs(a - b);
+      }
+      integratedError = Math.max(integratedError, l1);
+    }
+    for (const r of tables.radii.slice(1)) for (let ch = 0; ch < n; ch++) {
+      const a = tables.tap(r - 1e-7, 0, ch, 1), b = tables.tap(r + 1e-7, 0, ch, 1);
+      continuity = Math.max(continuity, Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]));
+    }
+  }
+  check('radius-table exact mixed DC normalization', dcError, 1e-10);
+  check('radius-table fast-path mixed DC normalization', fastError, 0.0031);
+  // Near the sharp truncation endpoint the blend spreads the jump across the two node supports.
+  // Report that local error separately; L1 bounds the worst convolution error for |input| <= 1.
+  check('radius-table kernel error including truncated tail (scaled by radius squared)', profileError, 0.04);
+  check('radius-table integrated absolute kernel error versus dense profile', integratedError, 0.01);
+  check('radius-table continuity at every node', continuity, 1e-5);
+}
 
 // The new radius sampler is continuous, including its subpixel identity and the point at which
 // the small-radius correction fades out. Check all preset channel sums, not merely normalized RGB:

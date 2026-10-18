@@ -8,7 +8,7 @@ export const NORMALIZATION_DENSITY = 64;
 const mix = (a, b, t) => a + t * (b - a);
 const dot = (h, v) => h.reduce((s, z, c) => s + z[0] * v[c][0] - z[1] * v[c][1], 0);
 
-export function continuousKernel(channels, transition, maxRadius = 256) {
+export function kernelProfile(channels, transition) {
   const density = PROFILE_DENSITY;
   const last = Math.ceil(density * (1 + transition));
   // One zero endpoint closes the truncated profile continuously instead of dropping a nonzero
@@ -56,6 +56,12 @@ export function continuousKernel(channels, transition, maxRadius = 256) {
       return s;
     }));
   }
+  return { profiles, identity, density, stride, support, rawTap, tapSums };
+}
+
+// High-resolution reference retained for quality comparisons; the renderer uses radius tables.
+export function continuousKernel(channels, transition, maxRadius = 256) {
+  const { profiles, identity, density, stride, support, rawTap, tapSums } = kernelProfile(channels, transition);
   const key = r => r <= 4 ? r * 64 : 256 + Math.log2(r / 4) * 64;
   const count = Math.ceil(key(Math.max(4, maxRadius))) + 1;
   const radii = Array.from({ length: count }, (_, i) => i <= 256 ? i / 64 : 4 * 2 ** ((i - 256) / 64));

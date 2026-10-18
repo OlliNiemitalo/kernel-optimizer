@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Blur sampler benchmark</title>
+<button id="capture">Capture current sampler as baseline</button>
+<button id="run">Run alternating sampler benchmark</button>
+<pre id="results">Capture a baseline before changing sampler revisions, then run the comparison in this same tab.</pre>
+<script type="module">
+  import { run, captureBaseline } from './benchmark.js';
+  window.runBenchmark = run;
+  document.querySelector('#capture').onclick = async () => {
+    await captureBaseline();
+    document.querySelector('#results').textContent = 'Baseline captured. Change sampler revision, then run in this tab.';
+  };
+  document.querySelector('#run').onclick = async () => {
+    const output = document.querySelector('#results');
+    output.textContent = 'Running…';
+    try { output.textContent = JSON.stringify(await run(), null, 2); }
+    catch (error) { output.textContent = error.stack; }
+  };
+</script>
