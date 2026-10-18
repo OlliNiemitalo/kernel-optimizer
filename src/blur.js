@@ -1645,24 +1645,27 @@ export class BlurRenderer {
     const { width, height, device } = this;
     x = Math.min(width - 1, Math.max(0, x));
     y = Math.min(height - 1, Math.max(0, y));
-    const y0 = Math.max(0, y - radius);
-    const y1 = Math.min(height - 1, y + radius);
-    const bytes = (y1 - y0 + 1) * width * 16;
+    const [x0, x1] = [Math.max(0, x - radius), Math.min(width - 1, x + radius)];
+    const [y0, y1] = [Math.max(0, y - radius), Math.min(height - 1, y + radius)];
+    const cols = x1 - x0 + 1;
+    const bytes = (y1 - y0 + 1) * cols * 16;
     if (!this.pickBuffer || this.pickBuffer.size < bytes) {
       this.pickBuffer?.destroy();
       this.pickBuffer = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     }
     const encoder = device.createCommandEncoder();
-    encoder.copyBufferToBuffer(this.source, y0 * width * 16, this.pickBuffer, 0, bytes);
+    for (let v = y0; v <= y1; v++) {
+      encoder.copyBufferToBuffer(this.source, (v * width + x0) * 16, this.pickBuffer, (v - y0) * cols * 16, cols * 16);
+    }
     device.queue.submit([encoder.finish()]);
     await this.pickBuffer.mapAsync(GPUMapMode.READ, 0, bytes);
     const data = new Float32Array(this.pickBuffer.getMappedRange(0, bytes).slice(0));
     this.pickBuffer.unmap();
     let best = null;
     for (let v = y0; v <= y1; v++) {
-      for (let u = Math.max(0, x - radius); u <= Math.min(width - 1, x + radius); u++) {
+      for (let u = x0; u <= x1; u++) {
         if ((u - x) ** 2 + (v - y) ** 2 > radius * radius) continue;
-        const inv = data[((v - y0) * width + u) * 4 + 3];
+        const inv = data[((v - y0) * cols + u - x0) * 4 + 3];
         if (best === null || inv > best) best = inv;
       }
     }

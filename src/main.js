@@ -94,6 +94,10 @@ import {
 import { loadImage, proceduralScene } from "./scene.js";
 
 const $ = (id) => document.getElementById(id);
+// Writes only changes: redundant writes still mutate the DOM and restyle (:has rules on disabled).
+const setProp = (el, key, value) => {
+  if (el[key] !== value) el[key] = value;
+};
 const num = (id) => Number($(id).value);
 // With this weight the article's 1-component non-negative set is about equiripple (its negative
 // lobe × 100 ≈ its ripple), so further optimization keeps the presets' character.
@@ -118,6 +122,7 @@ const state = {
   copyCapture: null,
   copyBusy: false,
   imageFile: null,
+  focus: 0, // focus slider position; its square is 1 / distance
 };
 
 // Multiplicity per component (1 = single, 2 = merged pair), padded or truncated to the component count.
@@ -447,11 +452,11 @@ const hasDepth = () => state.source === "world" || state.source === "video" || s
 const animating = () => ["world", "video"].includes(state.source) && state.playing && !document.hidden;
 
 function showSceneTime() {
-  if (document.activeElement !== $("sceneTime")) $("sceneTime").value = state.sceneTime.toFixed(4);
+  if (document.activeElement !== $("sceneTime")) setProp($("sceneTime"), "value", state.sceneTime.toFixed(4));
   const duration = state.source === "video" ? state.video.element.duration : NaN;
-  $("durationOut").textContent = Number.isFinite(duration) ? `/ ${duration.toFixed(2)} s` : "s";
-  if (Number.isFinite(duration)) $("seek").max = duration;
-  if (!state.seeking) $("seek").value = Number.isFinite(duration) ? state.sceneTime : 0;
+  setProp($("durationOut"), "textContent", Number.isFinite(duration) ? `/ ${duration.toFixed(2)} s` : "s");
+  if (Number.isFinite(duration)) setProp($("seek"), "max", String(duration));
+  if (!state.seeking) setProp($("seek"), "value", String(Number.isFinite(duration) ? state.sceneTime : 0));
 }
 
 // Video time is the video element's; the 3D world's advances with the wall clock while playing.
@@ -510,9 +515,18 @@ function fitFullscreen() {
   $("fullscreen").setAttribute("aria-label", $("fullscreen").title);
 }
 
-function setFocusSlider(value) {
-  $("focus").value = value;
-  $("focus").dispatchEvent(new Event("input"));
+// The slider follows state.focus once per render, never in full screen, where updating it is costly.
+function showFocus() {
+  if (document.fullscreenElement) return;
+  const inv = state.focus ** 2;
+  setProp($("focus"), "value", String(state.focus));
+  setProp($("focusOut"), "textContent", inv > 0 ? `${(1 / inv).toPrecision(2)} m` : "∞");
+}
+
+function setFocus(value) {
+  state.focus = value;
+  showFocus();
+  requestBlur();
 }
 
 // Hovering (or holding a touch) on the canvas eases the focus to the nearest depth around the
@@ -540,12 +554,15 @@ async function pickFocus(x, y) {
 async function easeFocus() {
   if (hover.easing) return;
   hover.easing = true;
-  hover.value = num("focus");
+  hover.value = state.focus;
   let last = performance.now();
   while (hover.active || hover.value !== hover.target) {
     await nextFrame();
-    if (hover.active && !hover.picking) {
+    // Depth changes only with a new rendered frame or pointer position.
+    const fresh = hover.x !== hover.pickX || hover.y !== hover.pickY || state.frames !== hover.pickFrame;
+    if (hover.active && !hover.picking && fresh) {
       hover.picking = true;
+      [hover.pickX, hover.pickY, hover.pickFrame] = [hover.x, hover.y, state.frames];
       pickFocus(hover.x, hover.y)
         .then((v) => { if (v !== null && hover.active) hover.target = v; })
         .finally(() => (hover.picking = false));
@@ -554,7 +571,10 @@ async function easeFocus() {
     const step = 1 - Math.exp(-(now - last) / 1000 / FOCUS_EASE);
     last = now;
     const next = Math.abs(hover.target - hover.value) < 1e-4 ? hover.target : hover.value + (hover.target - hover.value) * step;
-    if (next !== hover.value) setFocusSlider((hover.value = next));
+    if (next !== hover.value) {
+      state.focus = hover.value = next;
+      requestBlur();
+    }
   }
   hover.easing = false;
 }
@@ -564,7 +584,8 @@ function startHover(e) {
   [hover.x, hover.y] = canvasPixel(e);
   if (!hover.active) {
     hover.active = true;
-    hover.saved = hover.target = num("focus");
+    hover.pickFrame = -1;
+    hover.saved = hover.target = state.focus;
   }
   easeFocus();
 }
@@ -646,6 +667,7 @@ const VIEW_CONTROLS = [
 // Everything needed to re-render the displayed frame, plus context for bug reports.
 function viewState() {
   const controls = Object.fromEntries(VIEW_CONTROLS.map((id) => [id, $(id).type === "checkbox" ? $(id).checked : $(id).value]));
+  controls.focus = String(state.focus); // the slider may lag behind
   return {
     scene:
       state.source === "video" ? `video: ${state.video.name}`
@@ -698,25 +720,25 @@ async function applyViewState(view) {
 }
 
 function updateVaryingControls() {
-  $("sizeBrightnessOut").textContent = num("sizeBrightness").toFixed(1);
-  $("occlusionOut").textContent = `${(num("occlusionLevels") / 6).toFixed(2)} oct`;
+  setProp($("sizeBrightnessOut"), "textContent", num("sizeBrightness").toFixed(1));
+  setProp($("occlusionOut"), "textContent", `${(num("occlusionLevels") / 6).toFixed(2)} oct`);
   const controls = viewControls({
     ready: !!state.blur && !!state.source, source: state.source,
     blur: $("blurOn").checked, mode: $("blurMode").value,
     layers: $("layers").checked, sizeBlur: $("sizeBlur").checked,
     occlusion: $("occlusion").checked, showLayers: $("showLayers").value,
   });
-  for (const [id, disabled] of Object.entries(controls.disabled)) $(id).disabled = disabled;
-  $("playerBlur").checked = $("blurOn").checked;
-  $("playerBlur").disabled = $("blurOn").disabled;
+  for (const [id, disabled] of Object.entries(controls.disabled)) setProp($(id), "disabled", disabled);
+  setProp($("playerBlur"), "checked", $("blurOn").checked);
+  setProp($("playerBlur"), "disabled", $("blurOn").disabled);
   const clipboardSupported = !!navigator.clipboard?.write && typeof ClipboardItem !== "undefined";
-  $("copyImage").disabled = !state.blur || !state.source || !clipboardSupported || state.copyBusy;
-  $("copyImage").title = clipboardSupported
+  setProp($("copyImage"), "disabled", !state.blur || !state.source || !clipboardSupported || !!state.copyBusy);
+  setProp($("copyImage"), "title", clipboardSupported
     ? "Copy a freshly rendered PNG of the current view to the clipboard"
-    : "Image clipboard is unavailable in this browser or context; use Save PNG";
-  $("blurMode").querySelector('option[value="depth"]').disabled = !controls.depthAvailable;
-  for (const option of $("showLayers").options) option.disabled = !controls.layerViews.includes(option.value);
-  $("showLayers").value = controls.view;
+    : "Image clipboard is unavailable in this browser or context; use Save PNG");
+  setProp($("blurMode").querySelector('option[value="depth"]'), "disabled", !controls.depthAvailable);
+  for (const option of $("showLayers").options) setProp(option, "disabled", !controls.layerViews.includes(option.value));
+  setProp($("showLayers"), "value", controls.view);
 }
 
 function requestBlur(kernelChanged = false) {
@@ -768,7 +790,7 @@ async function renderBlur() {
       interpolate: $("radiusInterpolation").checked,
       showSource: !$("blurOn").checked,
       time: state.sceneTime,
-      invFocus: num("focus") ** 2,
+      invFocus: state.focus ** 2,
       sizeBlur: $("sizeBlur").checked ? num("sizeBrightness") : null,
       occlusion: $("occlusion").checked ? num("occlusionLevels") / 6 : 0,
       layers: $("layers").checked ? 2 : 1,
@@ -782,6 +804,8 @@ async function renderBlur() {
       copyCapture.resolve(await (await fetch(r.png)).blob());
     }
     lastBlurTime = now;
+    state.frames = (state.frames ?? 0) + 1;
+    showFocus();
     const gpu = r.gpuMs
       ? "GPU time: " + Object.entries(r.gpuMs).map(([k, ms]) => `${k} ${ms.toFixed(2)} ms`).join(" + ")
       : `${r.ms.toFixed(1)} ms round trip`;
@@ -834,7 +858,7 @@ function useWorld() {
   state.blur.setAnimated(state.world, 960, 600);
   state.source = "world";
   $("blurMode").value = "depth";
-  setFocusSlider(Math.sqrt(0.1)); // 10 m
+  setFocus(Math.sqrt(0.1)); // 10 m
   requestBlur(true);
 }
 
@@ -844,7 +868,7 @@ function useShapes() {
   state.blur.setAnimated(state.shapes, 960, 600);
   state.source = "shapes";
   $("blurMode").value = "depth";
-  setFocusSlider(Math.sqrt(1 / state.shapes.distance)); // the middle tetra
+  setFocus(Math.sqrt(1 / state.shapes.distance)); // the middle tetra
   requestBlur(true);
 }
 
@@ -886,7 +910,7 @@ async function useVideo(sample) {
   state.source = "video";
   state.sceneTime = 0;
   $("blurMode").value = "depth";
-  if (sample.focus !== undefined) setFocusSlider(sample.focus);
+  if (sample.focus !== undefined) setFocus(sample.focus);
   setPlaying(state.playing);
   requestBlur(true);
 }
@@ -1057,11 +1081,8 @@ function wire() {
     requestBlur(true);
   });
   // Slider position squared is 1 / distance: finer steps at long distances.
-  $("focus").addEventListener("input", () => {
-    const inv = num("focus") ** 2;
-    $("focusOut").textContent = inv > 0 ? `${(1 / inv).toPrecision(2)} m` : "∞";
-    requestBlur();
-  });
+  state.focus = num("focus");
+  $("focus").addEventListener("input", () => setFocus(num("focus")));
   for (const type of ["pointerdown", "pointermove"]) $("blurCanvas").addEventListener(type, startHover);
   for (const type of ["pointerleave", "pointercancel"]) $("blurCanvas").addEventListener(type, endHover);
   $("blurCanvas").addEventListener("pointerdown", startDrag);
@@ -1154,7 +1175,10 @@ function wire() {
     document.fullscreenElement ? document.exitFullscreen() : $("viewport").requestFullscreen().catch(() => {});
   $("fullscreen").onclick = toggleFullscreen;
   $("blurCanvas").addEventListener("dblclick", toggleFullscreen);
-  document.addEventListener("fullscreenchange", fitFullscreen);
+  document.addEventListener("fullscreenchange", () => {
+    fitFullscreen();
+    showFocus();
+  });
   addEventListener("resize", fitFullscreen);
   $("stepBack").onclick = () => stepScene(-1);
   $("stepForward").onclick = () => stepScene(1);
