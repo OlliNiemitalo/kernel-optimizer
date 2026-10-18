@@ -235,6 +235,9 @@ function createDE({ centered = false, autoStart = false } = {}) {
     state.de?.dispose();
     state.de = de;
     state.include = null;
+    const sameAsCurrent = (p) => p?.length === state.current?.params.length && p.every((v, j) => v === state.current.params[j]);
+    const includesCurrent = centered ? $("seedWithCurrent").checked : sameAsCurrent(seedWith);
+    state.refinedIn = includesCurrent && REFINED_SOURCES.has(state.current?.source) ? de : null;
     updateRunButton();
   } catch (e) {
     solvers?.dispose();
@@ -260,8 +263,9 @@ async function observe(startTime, generationsRun, { rescored = false } = {}) {
   state.history.push({ gen: de.generation, best: snap.bestCost, mean: snap.meanCost });
   if (state.history.length > 4000) state.history = state.history.filter((_, k) => k % 2 === 0);
   state.populationSample = populationPreview(snap.population, de.D);
-  // DE minimizes on the sparser DE grid; don't replace a refined kernel until it is beaten on the dense grid.
-  const refined = REFINED_SOURCES.has(state.current?.source) && state.current.params.length === snap.best.length
+  // DE minimizes on the sparser DE grid; a refined kernel in this population stays current until
+  // the population beats it on the dense grid.
+  const refined = state.refinedIn === de && REFINED_SOURCES.has(state.current?.source)
     ? { ...state.current, rival: maxError(snap.best, denseGrid(readProblem())) } : null;
   const keep = refined && refined.denseError <= refined.rival;
   if (!keep) setCurrent(snap.best, "differential evolution");
@@ -346,8 +350,10 @@ async function fineTune() {
     tuner.dispose();
     // So that resuming the optimizer can't lose the fine-tuned kernel.
     if (best.params !== start.params) {
-      if (state.de?.D === best.params.length) state.de.inject(best.params);
-      else if (!state.de) state.include = best.params;
+      if (state.de?.D === best.params.length) {
+        state.de.inject(best.params);
+        state.refinedIn = state.de;
+      } else if (!state.de) state.include = best.params;
     }
     state.busy = false;
     $("finetune").disabled = false;
@@ -387,8 +393,10 @@ async function remezRefine() {
     setStatus(`Remez exchange failed: ${e.message}`);
   } finally {
     if (best !== start) {
-      if (state.de?.D === best.params.length) state.de.inject(best.params);
-      else if (!state.de) state.include = best.params;
+      if (state.de?.D === best.params.length) {
+        state.de.inject(best.params);
+        state.refinedIn = state.de;
+      } else if (!state.de) state.include = best.params;
     }
     state.busy = false;
     $("remez").disabled = $("finetune").disabled = false;

@@ -526,8 +526,9 @@ keeps its rates and re-solves its weights. A kernel included in a new population
 after Remez refinement or fine-tuning, keeps its own weights: those were tuned on the dense grid,
 and re-solving them on the sparser DE grid would lower the DE cost but raise the dense-grid
 ripple (5 components: ±0.003592 → ±0.003619). Its weights are re-solved only if folding into the
-search bounds moves its rates. In either search mode, a refined kernel stays the current kernel
-until the population's best beats its dense-grid ripple.
+search bounds moves its rates. In either search mode, a refined kernel that is in the population
+(injected, or included in a new one) stays the current kernel until the population's best beats
+its dense-grid ripple. A new population without it shows the population's own best.
 
 This is far slower per candidate than the GPU search (roughly 1 ms in Node on the test laptop
 versus 4–10 µs), but each candidate is worth much more. From random 5-component populations,
