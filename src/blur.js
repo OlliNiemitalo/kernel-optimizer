@@ -1445,6 +1445,7 @@ export class BlurRenderer {
       levelMaps: (this.levelMaps?.size ?? 0) + (this.tiles?.size ?? 0),
       layers: this.layerBuffer?.size ?? 0,
       tables: this.kernel?.size ?? 0,
+      videoFrames: this.animated?.heldBytes ?? 0,
     };
   }
 

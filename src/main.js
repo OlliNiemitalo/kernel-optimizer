@@ -756,7 +756,7 @@ async function renderBlur() {
     requestBlur();
     return;
   }
-  if (!state.blur || !state.current || !state.source) return;
+  if (!state.blur || !state.current || !state.source || (state.source === "video" && !state.video)) return; // or loading
   blurRendering = true;
   const copyCapture = state.copyCapture;
   state.copyCapture = null;
@@ -821,6 +821,7 @@ async function renderBlur() {
       (m.radiusMap ? `, radius ${mib(m.radiusMap)}, working maps ${mib(m.levelMaps)}` : "") +
       `, kernel tables ${mib(m.tables)}` +
       (m.layers ? `, layers ${mib(m.layers)}` : "") +
+      (m.videoFrames ? `, video frames ${mib(m.videoFrames)}` : "") +
       `) · ${gpu}`;
   } catch (e) {
     copyCapture?.reject(e);
@@ -840,6 +841,7 @@ function stopVideo() {
     element.removeAttribute("src");
     element.load();
   }
+  state.video.source.destroy();
   state.video = null;
   $("videoCredit").hidden = true;
 }
@@ -901,7 +903,9 @@ async function useVideo(sample) {
     for (const e of [element, depth, depthNext]) e?.removeAttribute("src");
     return;
   }
-  const source = new VideoSource(state.blur.device, element, depth, { depthNext, depthFps: sample.depthFps, layout: sample.layout });
+  const source = new VideoSource(state.blur.device, element, depth, {
+    depthNext, depthFps: sample.depthFps, layout: sample.layout, fps: sample.fps ?? 30, onFrame: () => requestBlur(),
+  });
   state.video = { element, depth, depthNext, source, name: sample.label, fps: sample.fps ?? 30, depthFps: sample.depthFps };
   applyVideoPlayback();
   $("videoCredit").innerHTML = sample.credit ?? "";
@@ -917,7 +921,8 @@ async function useVideo(sample) {
 
 const videoElements = () => [state.video?.element, state.video?.depth, state.video?.depthNext].filter(Boolean);
 
-// The depth video follows the color video; while playing they drift apart by up to a frame or so.
+// The depth video follows the color video; while playing they drift apart by up to a frame or so,
+// which VideoSource hides by matching held frames.
 // A second depth element (for interpolation) runs one depth frame ahead. force: seek exactly.
 function syncDepthVideo(force = false) {
   const { element, depth, depthNext, fps, depthFps } = state.video;

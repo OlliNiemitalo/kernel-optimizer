@@ -230,13 +230,17 @@ relative inverse depth $v \in [0, 1]$ in one of three layouts:
   colormap entry. Colormap colors don't blend into colormap colors, so the shader decodes the
   four nearest depth texels and then interpolates bilinearly. Their depth is estimated and
   relative, so it is used as $1/z = v$ per meter, and
-  the focus distance is in these relative units. The depth video is kept within a few frames of
-  the color video while playing, and on the same frame when paused or stepping.
+  the focus distance is in these relative units. The two videos play independently and drift a
+  frame or so apart, so every frame either presents is converted (linear color as f16, decoded
+  depth as f32, at the output size) into a small cache keyed by frame number, and each render
+  uses the newest color frame whose own depth frame is cached. Color and depth therefore always
+  match, at the cost of up to a frame of extra latency; the depth video is also kept within a
+  few frames of the color while playing, and on the same frame when paused or stepping.
 - **Pair with temporal interpolation** (the default woman-in-field video): the color is the
   original footage, 1920×1080 at 24 fps, while Video Depth Anything's depth for it is 1280×720 at
-  15 fps. The depth video plays in two elements, one depth frame apart. If they show consecutive
-  frames $k$ and $k+1$, the shader blends their decoded depths with weight $15t - k$ at color time
-  $t$; otherwise (while they resynchronize) it uses frame $k$ alone. Both files are vendored
+  15 fps. The depth video plays in two elements, one depth frame apart, both feeding the depth
+  cache. A color frame at time $t$ is rendered once depth frames $k = \lfloor 15t \rfloor$ and
+  $k+1$ are cached, blending their decoded depths with weight $15t - k$. Both files are vendored
   unmodified apart from trimming the color to the 13 s that the depth covers. Its focus starts at
   2.4 relative units, on the woman.
 - **Side by side** (Video Depth Anything's long-video results): one video, color on the left and
