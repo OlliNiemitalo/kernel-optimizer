@@ -246,8 +246,13 @@ shows through the object's semi-transparent edge, as in a real lens.
   pixels 4 px apart whose nearer pixel lies in front of the focus and is at least an octave
   blurrier. Each pair supports every split between its two blur levels; a tile splits in the
   middle of the range supported by at least half the peak (and 16 pairs). A connected surface,
-  however steep, has no such edges and is not split. Elsewhere the near layer is empty, and the
-  passes skip its empty tiles.
+  however steep, has no such edges and is not split.
+- **Spread to tiles without a split.** A tile without a split of its own takes the split of the
+  nearest tiles that have one, up to 8 tiles (128 px) away. Otherwise the interior of a large
+  object, more than two tiles from its silhouette, would fall into the far layer: its blurred
+  light, normalized by the far layer's low coverage there, came through the near layer's
+  semi-transparent edge as a bright seam (a car's tail light leaking along the car's side).
+  Farther away, the near layer is empty, and the passes skip its empty tiles.
 - **Membership depends only on the source.** Each pixel's membership in the near layer comes from
   the four nearest tile centers, bilinearly interpolated, with a soft step as wide as the
   supported range (a surface that continues across the split, such as feet on the ground, fades
@@ -278,7 +283,8 @@ shows through the object's semi-transparent edge, as in a real lens.
   about 2× the GPU time of one (94 vs. 47 ms).
 
 The **Layer view** selector shows the composite, the near layer's opacity (tinted, or as gray at
-half scale), the near layer alone, or, with one layer, the summed kernel weight per pixel.
+half scale), the near layer alone, the hole-filled far layer alone, or, with one layer, the summed
+kernel weight per pixel.
 
 **Mixing blur levels.** The horizontal pass uses each source's level and the vertical pass a
 per-pixel level, but each level's tables are normalized only as a pair: a source's horizontal taps

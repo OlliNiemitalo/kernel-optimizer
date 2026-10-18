@@ -55,8 +55,8 @@ const COVER_BASE = CLOSE_BASE + 4; // then the 4 phases of the coverage closing
 const INSIDE_BASE = COVER_BASE + 4; // then the 2 phases of the inside fraction
 const BLOCKS = INSIDE_BASE + 2;
 const MAPS = 5; // byte maps: level, vertical level, smoothed level, scratch, near layer mask
-const TILE_ARRAYS = 4 + HIST + 2 + MAX_LAYERS; // max K, max vertical K, reach x, reach y, histogram, split, max K per layer
-const MAX_QUERIES = 2 * (12 + MAX_LAYERS * (10 + 2 * MAX_CHANNELS) + 2 * FILL_LEVELS);
+const TILE_ARRAYS = 4 + HIST + 2 + MAX_LAYERS + 2; // max K, max vertical K, reach x, reach y, histogram, split, max K per layer, raw split
+const MAX_QUERIES = 2 * (13 + MAX_LAYERS * (10 + 2 * MAX_CHANNELS) + 2 * FILL_LEVELS);
 
 const J = Array.from({ length: ROWS }, (_, j) => j);
 const W = Array.from({ length: 2 * SMOOTH + 1 }, (_, i) => i);
@@ -124,6 +124,7 @@ const HIST = ${HIST}u;
 const MIN_SEPARATION = ${LEVELS_PER_OCTAVE}.0; // a nearer layer must be blurrier by an octave, in levels
 const EDGE_STEP = 4u; // pixel distance of the pairs compared for depth edges
 const MIN_SUPPORT = 16; // depth-edge pairs needed around a tile to split there
+const SPREAD = 8; // tiles over which a split spreads to tiles without one
 const SOFT = 1.5; // smallest half-width of the soft step between layers, in levels
 const MAX_SOFT = ${LEVELS_PER_OCTAVE}.0; // largest half-width, for surfaces that continue across the split
 const SMOOTH = ${SMOOTH}; // pixels of the smoothing of source levels within a layer
@@ -314,6 +315,11 @@ fn layerKBase(layer: u32) -> u32 {
   return (6u + HIST + layer) * tileCount();
 }
 
+// Split found from each tile's own neighborhood, before spreading.
+fn rawSplitBase() -> u32 {
+  return (8u + HIST) * tileCount();
+}
+
 // Prepass 1: level map, and the largest K per tile. One thread per 4 pixels of a row. With
 // layers, also the depth edges per tile: pairs of pixels EDGE_STEP apart (right and down) whose
 // nearer pixel is in front of the focus and blurrier by MIN_SEPARATION. Each pair supports every
@@ -365,8 +371,8 @@ fn levels(@builtin(global_invocation_id) id: vec3u) {
 // split. It goes in the middle of the well-supported range (at least half the peak support), and
 // the soft step between the layers is as wide as that range (SOFT to MAX_SOFT): a silhouette jumps
 // across it, while a surface that continues across the split, such as a body meeting the ground,
-// fades smoothly from one layer to the other. Without a split, it is at -infinity, so the near
-// layer is empty there. The split is (level, half-width).
+// fades smoothly from one layer to the other. Without a split, it is at -infinity (see
+// spreadSplits). The split is (level, half-width).
 @compute @workgroup_size(64, 1)
 fn splits(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= tileCount()) { return; }
@@ -404,6 +410,46 @@ fn splits(@builtin(global_invocation_id) id: vec3u) {
     var hi = peak;
     while (hi + 1u < HIST && 2 * support[hi + 1u] >= best) { hi++; }
     value = vec2f(0.5 * f32(lo + hi) - f32(HIST / 2u) - 0.5, clamp(0.5 * f32(hi - lo + 1u), SOFT, MAX_SOFT));
+  }
+  atomicStore(&tiles[rawSplitBase() + id.x * 2u], bitcast<u32>(value.x));
+  atomicStore(&tiles[rawSplitBase() + id.x * 2u + 1u], bitcast<u32>(value.y));
+}
+
+// A tile without a split of its own takes the split of the nearest tiles within SPREAD tiles that
+// have one (averaged over equally near ones): the interior of a large object, more than 2 tiles
+// from its silhouette, then stays in the same layer as its edges instead of falling into the far
+// layer, whose light would leak through the near layer's edges. Farther away, the near layer is
+// empty.
+@compute @workgroup_size(64, 1)
+fn spreadSplits(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= tileCount()) { return; }
+  let own = rawSplitBase() + id.x * 2u;
+  var value = vec2f(bitcast<f32>(atomicLoad(&tiles[own])), bitcast<f32>(atomicLoad(&tiles[own + 1u])));
+  if (value.x < -1.0e5) {
+    let tx = i32(id.x % P.tilesX);
+    let ty = i32(id.x / P.tilesX);
+    var nearest = SPREAD * SPREAD + 1;
+    var sum = vec2f(0.0);
+    var count = 0.0;
+    for (var dy = -SPREAD; dy <= SPREAD; dy++) {
+      for (var dx = -SPREAD; dx <= SPREAD; dx++) {
+        let sx = tx + dx;
+        let sy = ty + dy;
+        let d2 = dx * dx + dy * dy;
+        if (sx < 0 || sy < 0 || sx >= i32(P.tilesX) || sy >= i32(P.tilesY) || d2 > nearest) { continue; }
+        let o = rawSplitBase() + (u32(sy) * P.tilesX + u32(sx)) * 2u;
+        let s = bitcast<f32>(atomicLoad(&tiles[o]));
+        if (s < -1.0e5) { continue; }
+        if (d2 < nearest) {
+          nearest = d2;
+          sum = vec2f(0.0);
+          count = 0.0;
+        }
+        sum += vec2f(s, bitcast<f32>(atomicLoad(&tiles[o + 1u])));
+        count += 1.0;
+      }
+    }
+    if (count > 0.0) { value = sum / count; }
   }
   atomicStore(&tiles[splitBase() + id.x * 2u], bitcast<u32>(value.x));
   atomicStore(&tiles[splitBase() + id.x * 2u + 1u], bitcast<u32>(value.y));
@@ -612,8 +658,8 @@ fn insideFraction(@builtin(global_invocation_id) id: vec3u) {
   storeScratch(id.x, select(2u, 3u, alongY), total / f32(2 * r + 1));
 }
 
-// Layers are processed back to front. layer[i] holds the composite so far; layer[px + i] the
-// latest layer's own color and the transmittance of the nearer layers (for the debug views). The
+// Layers are processed back to front. layer[i] holds the composite so far; layer[px + i] the far
+// layer's color and the transmittance of the near layer (for the debug views). The
 // farthest layer, hole-filled, starts the composite. Each nearer layer, with color c (its sum
 // normalized by its coverage w = acc.w), goes over it with opacity the larger of its closed
 // coverage and, on its own pixels, its inside fraction. The opacity is at most MAX_GAIN * w: in
@@ -638,7 +684,8 @@ fn composite(@builtin(global_invocation_id) id: vec3u) {
   let alpha = clamp(min(max(loadScratch(id.x, 1u), member * loadScratch(id.x, 3u)), MAX_GAIN * w), 0.0, 1.0);
   let behind = layer[id.x];
   layer[id.x] = vec4f(mix(behind.rgb, c, alpha), 0.0);
-  layer[px + id.x] = vec4f(c, layer[px + id.x].w * (1.0 - alpha));
+  let d = layer[px + id.x];
+  layer[px + id.x] = vec4f(d.rgb, d.w * (1.0 - alpha));
 }
 
 // Hole filling of the last layer by pull-push: where nearer objects removed its sources, its
@@ -861,7 +908,7 @@ struct View {
   showSource: u32,
   layered: u32,   // 1: blurred is the hole-filled last layer, under the composited nearer layers
   showLayers: u32, // debug view: 0 composite, 1 nearer layers' opacity tinted red, 2 that opacity at
-                   // half scale, 3 farthest layer only; without layers, 4 the kernel weight sum at half scale
+                   // half scale, 3 near layer only, 5 far layer only; without layers, 4 the kernel weight sum at half scale
 }
 
 @group(0) @binding(0) var<uniform> V: View;
@@ -891,7 +938,8 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     switch V.showLayers {
       case 1u: { c = mix(c, vec3f(1.0, 0.05, 0.02), 0.6 * (1.0 - d.w)); }
       case 2u: { c = vec3f(0.5 * (1.0 - d.w)); }
-      case 3u: { c = d.rgb; }  // the nearest layer's own color
+      case 3u: { c = select(vec3f(0.0), b.rgb / b.w, b.w > 1e-6); } // the near layer's own color (acc)
+      case 5u: { c = d.rgb; } // the hole-filled far layer
       default: {}
     }
   } else if (V.showLayers == 4u) {
@@ -932,7 +980,7 @@ ${displayShader}`;
 //
 // Depth layers (z-buffer radius, layerCount 2; Params block (layer, channel) at index
 // layer * ${MAX_CHANNELS} + channel, pyramid level l at ${FILL_BASE} + l): clear tiles, then
-//     levels (also records the depth edges per tile), splits (ceil(tilesX tilesY / 64) workgroups),
+//     levels (also records the depth edges per tile), splits and spreadSplits (ceil(tilesX tilesY / 64) workgroups each),
 //     mask (as levels), closeMask (as levels) with blocks ${CLOSE_BASE} + step for step = 0, 2, 1, 3
 //     (dilate x, dilate y, erode x, erode y), smoothLevels with blocks ${SMOOTH_BASE} + phase,
 //     phase = 0 .. 3 (as levels), then for layer k = 1 (far), 0 (near), with block (k, 0) for the
@@ -1137,6 +1185,7 @@ export class BlurRenderer {
         reachX: make("reachX"),
         reachY: make("reachY"),
         splits: make("splits"),
+        spreadSplits: make("spreadSplits"),
         mask: make("mask"),
         smoothLevels: make("smoothLevels"),
         closeMask: make("closeMask"),
@@ -1405,6 +1454,7 @@ export class BlurRenderer {
       pass(p.levels, 0, rowGroups, "prepare");
       if (layered) {
         pass(p.splits, 0, tileGroups, "layers");
+        pass(p.spreadSplits, 0, tileGroups, "layers");
         pass(p.mask, 0, rowGroups, "layers");
         for (const step of [0, 2, 1, 3]) pass(p.closeMask, CLOSE_BASE + step, rowGroups, "layers");
         for (let phase = 0; phase < 4; phase++) pass(p.smoothLevels, SMOOTH_BASE + phase, rowGroups, "layers");
