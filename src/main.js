@@ -634,10 +634,11 @@ async function renderBlur() {
     $("blurStats").textContent =
       ($("blurOn").checked ? "" : "Blur off · ") +
       `${state.blur.width}×${state.blur.height} px · ${state.blur.channels} separable channels × ` +
-      (r.varying ? `up to ${r.taps} taps (${r.levels} radius levels)` : `${r.taps} taps`) + ` per pass · ` +
+      (r.varying ? `up to ${r.taps} taps (continuous radius)` : `${r.taps} taps`) + ` per pass · ` +
       `GPU memory ${mib(total)} MiB (intermediate ${mib(m.intermediate)}, accumulator ${mib(m.accumulator)}, ` +
       `source ${mib(m.source)}` +
-      (m.radiusMap ? `, radius ${mib(m.radiusMap)}, level maps ${mib(m.levelMaps)}` : "") +
+      (m.radiusMap ? `, radius ${mib(m.radiusMap)}, working maps ${mib(m.levelMaps)}` : "") +
+      `, kernel tables ${mib(m.tables)}` +
       (m.layers ? `, layers ${mib(m.layers)}` : "") +
       `) · ${gpu}`;
   } catch (e) {

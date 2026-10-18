@@ -2,6 +2,7 @@
 import { defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
 import { DifferentialEvolution } from "../src/de.js";
 import { tapTables } from "../src/blur.js";
+import { continuousKernel } from "../src/continuous-kernel.js";
 import { FineTuner } from "../src/finetune.js";
 import {
   bounds, defaultProblem, maxError, multiplicities, nonnegativePresetParams, parseParams, presetParams, profile, sampleGrid,
@@ -17,6 +18,49 @@ function check(name, value, tolerance) {
 }
 
 const problemFor = (multiplicity) => ({ ...defaultProblem(), components: multiplicity.length, multiplicity });
+
+// The new radius sampler is continuous, including its subpixel identity and the point at which
+// the small-radius correction fades out. Check all preset channel sums, not merely normalized RGB:
+// incorrect DC weight would show up as incorrect opacity when layers are enabled.
+{
+  let worst = 0, identity = 0, symmetry = 0, jump = 0;
+  const sets = [1, 2, 3, 4, 5, 6].map(n => presetParams(n));
+  sets.push([3, 0, 1, 0, 1, 0]); // polynomial/merged channel, including a zero constant coefficient
+  for (const params of sets) {
+    const channels = separableChannels(params);
+    const c = continuousKernel(channels, 0.2, 128);
+    const rs = [0, 0.01, 0.2, 0.51, 0.9438, 0.99, 1, 1.02, 1.17, 1.8, 2.13, 3.7, 4, 5.3, 7.99, 8, 9, 15, 32, 69, 120,
+      ...Array.from({ length: 24 }, (_, i) => 2 ** (-4 + i * 11 / 23))];
+    const sums = rs.map(r => [0, 1].map(dir => channels.map((_, ch) => {
+      const sum = [0, 0];
+      const half = r === 0 ? 0 : Math.ceil(Math.max(r, 1) * c.support);
+      for (let t = -half; t <= half; t++) {
+        const z = c.tap(r, dir, ch, t), opposite = c.tap(r, dir, ch, -t);
+        for (let k = 0; k < 2; k++) {
+          sum[k] += z[k];
+          symmetry = Math.max(symmetry, Math.abs(z[k] - opposite[k]));
+        }
+      }
+      return sum;
+    })));
+    for (let i = 0; i < rs.length; i++) for (let j = 0; j < rs.length; j++) {
+      const dc = sums[i][0].reduce((s, h, ch) => s + h[0] * sums[j][1][ch][0] - h[1] * sums[j][1][ch][1], 0);
+      worst = Math.max(worst, Math.abs(dc * c.correction(rs[i], rs[j], true) - 1));
+      if (i === 0 && j === 0) identity = Math.max(identity, Math.abs(dc - 1));
+    }
+    for (const boundary of [0.943874, 1, 4, c.smallRadius, 2 * c.smallRadius]) {
+      for (let t = -3; t <= 3; t++) for (let ch = 0; ch < channels.length; ch++) {
+        const a = c.tap(boundary - 1e-7, 0, ch, t), b = c.tap(boundary + 1e-7, 0, ch, t);
+        jump = Math.max(jump, Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]));
+      }
+      jump = Math.max(jump, Math.abs(c.correction(1.17, boundary - 1e-7, true) - c.correction(1.17, boundary + 1e-7, true)));
+    }
+  }
+  check("continuous mixed-radius unit coverage, including fast path", worst, 0.005);
+  check("continuous zero radius is identity", identity, 1e-10);
+  check("interpolated profile symmetry", symmetry, 0);
+  check("continuous sampler has no threshold jumps", jump, 1e-5);
+}
 
 // Varying-radius tap tables: a source's horizontal taps at one level followed by vertical taps at
 // another weigh C[l1][l2]; it must stay well away from 0. The tables are scaled so that every mix

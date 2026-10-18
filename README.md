@@ -199,27 +199,31 @@ relative inverse depth $v \in [0, 1]$ in one of two layouts:
   the color video while playing, and on the same frame when paused or stepping.
 
 Inverse depth suits 8-bit video, since the blur radius is linear in it: one gray level is a fixed
-fraction of $R$. Videos wider than 960 pixels are downscaled when read. Tap tables are precomputed for a geometric ladder of radii, six per octave
-from 1 pixel up to the largest radius, each normalized so its 2-D kernel sums to 1. Level 0 is an
-exact identity, so in-focus pixels stay perfectly sharp.
+fraction of $R$. Videos wider than 960 pixels are downscaled when read. Varying radii use one dense
+complex profile per channel and direction, sampled at 256 points per disc radius. Taps rescale its
+coordinate by the actual floating-point radius and linearly interpolate real and imaginary parts.
+There is no six-levels-per-octave ladder in kernel selection. Radii below one pixel blend continuously
+with the exact zero-radius identity. A zero endpoint closes the truncated profile continuously as
+its support crosses pixel boundaries. The uniform-radius path retains its direct tap tables.
 
 A plain gather, where each output uses its own radius, cuts the discs of blurry highlights next to
 sharper pixels: those pixels neither look far enough nor use the highlight's kernel. So the passes
 *scatter as gather*:
 
-1. A prepass quantizes the radius map to a byte-per-pixel level map (sign bit = in front of the
-   focus) and records the largest kernel half-width per 16×16 tile. Dilating that over the
+1. A prepass retains a coarse byte-per-pixel level map for depth classification (sign bit = in
+  front of focus), but computes conservative support bounds from the continuous radii. Dilating
+  the largest kernel half-width per 16×16 tile over the
    neighbouring tiles gives each tile's **reach**: how far its pixels must look.
-2. Every tap uses the tap table of the **source** pixel it reads, so each source spreads its own
-   disc. Tables are centered and zero beyond each level's half-width, so sources whose disc does
-   not reach contribute nothing, without branches. Register blocking works as in the uniform path.
+2. Every tap uses the continuous radius of the **source** pixel it reads, so each source spreads
+  its own disc. Profile samples outside its support are zero. The interpolating horizontal path
+  processes four outputs per thread; the vertical and uniform paths process eight.
 3. After the horizontal pass, a pixel mixes light from sources with different radii, but the
    vertical pass can apply only one kernel per pixel. The prepass therefore "blurs the blur size":
-   the **vertical level** is the average level of the row sources that reach the pixel, weighted by
+  the **vertical radius** is derived from the continuous log-radius average of row sources that reach the pixel, weighted by
    their brightness and by how much of their disc falls in the column. Bright highlights keep
    round discs; sharp detail next to them stays sharp. With a radius that depends only on the row
    (tilt-shift), every disc is exact. In the "Varying blur" controls, this can be turned off (each
-   pixel then uses its own level, cutting the discs of blurry highlights next to sharper pixels),
+  pixel then uses its own radius, cutting the discs of blurry highlights next to sharper pixels),
    and the brightness weight is raised to an adjustable power: 0 counts all sources equally,
    1 (the default) in proportion to brightness, larger values let highlights dominate.
 4. **Occlusion** (z-buffer only, optional): a destination hides sources farther than an adjustable
@@ -230,7 +234,9 @@ sharper pixels: those pixels neither look far enough nor use the highlight's ker
   occlude it: inter-layer visibility belongs to compositing, so far light remains available
   behind the near layer. This separable visibility test is an approximation, not aperture ray tracing.
 
-The extra memory is the radius map (4 bytes per pixel) and three level maps (1 byte per pixel each).
+Working maps contain five packed byte maps and three float planes (smoothed source radius,
+smoothing scratch, vertical radius), in addition to the original signed radius map. Normalization
+tables are separate from the compact profile; their memory is included in the displayed total.
 Each prepass step runs in its own compute pass: on the tested Intel GPU, dependent dispatches within
 one compute pass were not reliably ordered, which made the output vary from frame to frame.
 
@@ -266,7 +272,9 @@ shows through the object's semi-transparent edge, as in a real lens.
   neighbors with different disc sizes do not sum to unit weight. The source levels are smoothed
   by a median (a sorting network over the window) and then a mean over ±6 px of the pixels on the
   same side of the split, never across it, so silhouettes keep their depth jumps. One smoothed
-  map serves both layers.
+  floating-point map serves both layers, without rounding the smoothed radii back to integer levels.
+  The median/mean neighborhood rules are unchanged; their depth-boundary artifacts are a separate
+  issue from radius quantization and are not fixed by profile interpolation.
 - **Back to front.** The far layer runs first; where its coverage is below ½ (behind the near
   layer's sources), it is completed by pull-push (a pyramid of coverage-weighted averages built by
   halving, then filled from coarse to fine with bilinear upsampling). The near layer, its color
@@ -280,9 +288,9 @@ shows through the object's semi-transparent edge, as in a real lens.
   take two extra buffers (the composite, and debug data; 16 bytes per pixel each) plus the
   pyramid, about a third more, and two more byte maps.
 - **Cost.** Per-tile reach is stored as K + 1, with 0 for tiles that no source of the layer
-  reaches, so the passes skip them; the near layer is cheap where it is empty. On the Intel GPU,
-  on the Video Depth Anything clip of a woman in a field (960×540, radius 15), two layers took
-  about 2× the GPU time of one (94 vs. 47 ms).
+  reaches, so the passes skip them; the near layer is cheap where it is empty. Interpolation adds
+  profile reads and normalization work compared with discrete tap tables; earlier timings for
+  the discrete renderer do not describe this path.
 - **Empty-layer identity.** The final mask pass records whether the near layer contains any
   members. When it is empty, source-level smoothing and far-layer hole filling are bypassed;
   adding an empty layer must not change the one-layer image. The occupancy flag is reset each frame.
@@ -290,24 +298,25 @@ shows through the object's semi-transparent edge, as in a real lens.
 GPU regression tests are available at `/test/gpu.html` on the development server. They read linear
 buffers and check visibility on either side of focus, both spatial axes and intermediate precisions,
 foreground spread, empty-layer identity, reused frame state, and the tetra scene at two scales.
+Continuous-radius tests compare GPU impulse responses with the CPU interpolant, check fractional
+vertical radii, and reject both jumps at the former sharp/blur boundary and within-bin plateaus.
 
 The **Layer view** selector shows the composite, the near layer's opacity (tinted, or as gray at
 half scale), the near layer alone, the hole-filled far layer alone, or, with one layer, the summed
 kernel weight per pixel.
 
-**Mixing blur levels.** The horizontal pass uses each source's level and the vertical pass a
-per-pixel level, but each level's tables are normalized only as a pair: a source's horizontal taps
-at level $l_1$ followed by vertical taps at $l_2$ weigh
-$C_{l_1 l_2} = \sum_n \mathrm{Re}[\Sigma h_n^{(l_1)}\,\Sigma v_n^{(l_2)}]$, which is not 1 (the
-in-focus identity, all in channel 0, mixed with a blur level gave 0.3). The identity's center tap
-carries, per channel, the tap sums of the largest level (it is still exactly the identity alone).
-Beyond the smallest radii, $C$ is nearly a product $a_{l_1} b_{l_2}$ (its row and column against
-the largest level), so the horizontal and vertical tables are divided by $a$ and $b$. Only where
-an output's vertical level is small (a few pixels, where $C/(a b)$ is off by more than 0.5%) does
-the horizontal pass also multiply each source's taps by the remaining correction from a
-levels × levels table; that loop is separate, so the common case reads no extra table. The smoke
-test checks that $C$ stays within a factor of 1.5 of 1 for the article's presets and that every
-mix has unit weight within 0.5% after scaling and correction.
+**Mixing radii.** Rescaling by $1/r$ alone does not normalize discrete small-radius kernels.
+For horizontal radius $r_h$ and vertical radius $r_v$, the DC weight is
+$C(r_h,r_v)=\sum_n\mathrm{Re}[\Sigma h_n(r_h)\,\Sigma v_n(r_v)]$.
+The identity uses the dense reference profile's per-channel DC vectors. Factoring $C$ against
+those vectors gives horizontal and vertical gains; the remaining mixed-radius correction is
+stored in a bilinearly interpolated table. Normalization samples are spaced at 1/64 pixel up to
+4 pixels, then 64 per octave through the largest requested radius. These are interpolation
+nodes, not quantized radius choices. Where the remaining correction is within 0.3% at every
+source-radius node, it fades smoothly to one over an octave; beyond that, a separate fast loop
+omits its reads. The smoke tests bound sampled mixed-radius DC error by 0.5%, including the fade,
+and cover all six presets plus a merged polynomial channel. This normalizes fixed radius pairs;
+it does not make arbitrary spatially varying source/intermediate radius fields exact.
 
 #### Truncation and corners
 

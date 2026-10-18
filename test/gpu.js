@@ -2,6 +2,7 @@
 import { BlurRenderer } from '../src/blur.js';
 import { presetParams } from '../src/problem.js';
 import { Shapes } from '../src/shapes.js';
+import { continuousGPU } from './continuous-gpu.js';
 
 async function read(device, buffer) {
   const staging = device.createBuffer({ size: buffer.size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -57,6 +58,7 @@ export async function run() {
     return data;
   }
   try {
+    await continuousGPU(renderer, check, read);
     for (const transpose of [false, true]) for (const precision of ['f32', 'f16']) for (const sizeBlur of [null, 1]) {
       transposed = transpose;
       const label = `${precision}, size blur ${sizeBlur}, transpose ${transpose}`;
