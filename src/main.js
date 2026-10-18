@@ -260,19 +260,25 @@ async function observe(startTime, generationsRun, { rescored = false } = {}) {
   state.history.push({ gen: de.generation, best: snap.bestCost, mean: snap.meanCost });
   if (state.history.length > 4000) state.history = state.history.filter((_, k) => k % 2 === 0);
   state.populationSample = populationPreview(snap.population, de.D);
-  setCurrent(snap.best, "differential evolution");
+  // DE minimizes on the sparser DE grid; don't replace a refined kernel until it is beaten on the dense grid.
+  const refined = REFINED_SOURCES.has(state.current?.source) && state.current.params.length === snap.best.length
+    ? { ...state.current, rival: maxError(snap.best, denseGrid(readProblem())) } : null;
+  const keep = refined && refined.denseError <= refined.rival;
+  if (!keep) setCurrent(snap.best, "differential evolution");
   const now = performance.now();
   const rate = generationsRun > 0 ? (generationsRun * de.P) / ((now - startTime) / 1000) : 0;
   setStatus(
     `Optimizer on ${de.solvers ? `CPU (${de.solvers.threads} workers)` : state.backend} · generation ${de.generation} · ` +
       (rate ? `${Math.round(rate).toLocaleString()} evaluations/s · ` : "") +
       `population best ±${snap.bestCost.toFixed(6)}, mean ${snap.meanCost.toFixed(5)}` +
+      (keep && refined.rival > refined.denseError ? ` · Showing the ${refined.source} kernel until the population beats its dense-grid ripple ±${refined.denseError.toFixed(6)} (population best there ±${refined.rival.toFixed(6)})` : "") +
       (rescored ? " · Same population re-scored; convergence history restarted for the new objective." : ""),
   );
   drawAll();
 }
 
 let runVersion = 0;
+const REFINED_SOURCES = new Set(["Remez exchange", "gradient fine-tuning"]);
 async function runLoop(version) {
   while (state.running && state.de && version === runVersion) {
     const t0 = performance.now();

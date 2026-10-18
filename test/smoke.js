@@ -462,15 +462,16 @@ for (const multiplicity of [[1, 1], [2, 1]]) {
   snap = await de.snapshot();
   check("projected DE re-solves weights for a new negative gain", Math.abs(snap.bestCost - maxError(snap.best, nnGrid)), 1e-12);
   const sorted2 = sortByFrequency(presetParams(2));
-  const seed = optimalWeights(sorted2, nnGrid);
-  de.inject(seed.params);
-  snap = await de.snapshot();
-  check("projected DE injection keeps the injected kernel's cost", Math.min(...snap.costs) <= seed.error + 1e-6 ? 0 : 1, 0);
+  // A kernel tuned on a denser grid is kept exactly, not re-solved on the DE grid.
+  const tuned = remezPolish(sorted2, sampleGrid(problem, 1000, 1000)).params;
+  de.inject(tuned);
+  await de.snapshot();
+  check("projected DE injection keeps the injected kernel exactly", de.pop.some((row) => row.every((v, j) => v === tuned[j])) ? 0 : 1, 0);
 
   const centered = new ProjectedEvolution({ components: 2, multiplicity: [1, 1], grid, bounds: bounds(problem), populationSize: 16, F: 0.76, CR: 0.999, seed: 5, populationCenter: sorted2 });
   snap = await centered.snapshot();
-  check("projected DE keeps the exact center as member zero (rates, solved weights)",
-    Math.abs(snap.costs[0] - optimalWeights(sorted2, grid).error), 1e-6);
+  check("projected DE keeps the exact center as member zero",
+    Math.max(Math.abs(snap.costs[0] - maxError(sorted2, grid)), ...centered.pop[0].map((v, j) => Math.abs(v - sorted2[j]))), 1e-6);
 
   const merged = new ProjectedEvolution({ components: 2, multiplicity: [2, 1], grid, bounds: bounds(problemFor([2, 1])), populationSize: 32, F: 0.76, CR: 0.999, seed: 5 });
   merged.step(30);

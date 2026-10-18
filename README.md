@@ -522,7 +522,12 @@ reference (the members' extremal points are similar), the first evaluation from 
 solve's, so a solve takes about 10–20 exchanges. Solves run in float64 in a pool of Web Workers
 ([`src/weight-worker.js`](src/weight-worker.js)), one fewer than the logical cores (at most 8).
 A candidate whose basis is singular (coinciding rates) gets infinite cost. A re-scored population
-keeps its rates and re-solves its weights.
+keeps its rates and re-solves its weights. A kernel included in a new population, or injected
+after Remez refinement or fine-tuning, keeps its own weights: those were tuned on the dense grid,
+and re-solving them on the sparser DE grid would lower the DE cost but raise the dense-grid
+ripple (5 components: ±0.003592 → ±0.003619). Its weights are re-solved only if folding into the
+search bounds moves its rates. In either search mode, a refined kernel stays the current kernel
+until the population's best beats its dense-grid ripple.
 
 This is far slower per candidate than the GPU search (roughly 1 ms in Node on the test laptop
 versus 4–10 µs), but each candidate is worth much more. From random 5-component populations,

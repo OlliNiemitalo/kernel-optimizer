@@ -4,7 +4,7 @@
 // crossover and fold as src/de.js. Operations are queued; snapshot() waits for them.
 
 import { initialPopulation, mulberry32 } from "./population.js";
-import { PARAMS_PER_COMPONENT } from "./problem.js";
+import { PARAMS_PER_COMPONENT, maxError } from "./problem.js";
 import { WeightSolver, solveCandidate } from "./remez.js";
 
 function fold(x, lo, hi) {
@@ -75,14 +75,14 @@ export class ProjectedEvolution {
     this.rand = mulberry32((seed ^ 0x9e3779b9) >>> 0);
     this.setBounds(bounds);
     this.pop = Array.from({ length: P }, (_, k) => Array.from(init.subarray(k * D, (k + 1) * D), (v, j) => fold(v, this.lo[j], this.hi[j])));
-    // Member zero keeps a seed kernel's float64 rates.
-    const exact = populationCenter ? includeCenter && populationCenter : startingPoint?.length === D && startingPoint;
-    if (exact) this.pop[0] = Array.from(exact, (v, j) => fold(v, this.lo[j], this.hi[j]));
     this.cost = new Float64Array(P).fill(Infinity);
     this.refs = new Array(P).fill(null);
+    this.grid = grid;
     solvers.setProblem(grid, multiplicity);
     this.queue = Promise.resolve();
     this.enqueue(() => this.evaluate(this.pop.map((params, k) => ({ k, params })), true));
+    const exact = populationCenter ? includeCenter && populationCenter : startingPoint?.length === D && startingPoint;
+    if (exact) this.enqueue(() => this.place(0, exact));
   }
 
   setBounds(bounds) {
@@ -110,19 +110,30 @@ export class ProjectedEvolution {
   updateProblem(grid, bounds) {
     this.revision++;
     this.enqueue(() => {
+      this.grid = grid;
       this.solvers.setProblem(grid, this.multiplicity);
       this.setBounds(bounds);
       return this.evaluate(this.pop.map((params, k) => ({ k, params })), true);
     });
   }
 
-  // Replaces the worst member with the given kernel's rates (its weights are re-solved).
+  // Sets member k to a given kernel. Its own weights are kept (they may be tuned on a denser grid
+  // than the DE grid); they are re-solved only if folding into the search bounds moved its rates.
+  place(k, params) {
+    const folded = Array.from(params, (v, j) => fold(v, this.lo[j], this.hi[j]));
+    if (folded.some((v, j) => v !== params[j])) return this.evaluate([{ k, params: folded }], true);
+    this.pop[k] = folded;
+    this.cost[k] = maxError(folded, this.grid);
+    this.refs[k] = null;
+  }
+
+  // Replaces the worst member with the given kernel.
   inject(params) {
     this.revision++;
     this.enqueue(() => {
       let worst = 0;
       for (let k = 1; k < this.P; k++) if (!(this.cost[k] <= this.cost[worst])) worst = k;
-      return this.evaluate([{ k: worst, params: Array.from(params, (v, j) => fold(v, this.lo[j], this.hi[j])) }], true);
+      return this.place(worst, params);
     });
   }
 
