@@ -1,8 +1,8 @@
 // Test scene rendered on the GPU: three tetrahedra of different colors in a row against a starry
 // black background at infinite distance, seen from a camera orbiting their center (yaw, pitch).
-// `scale` multiplies all coordinates, the camera's included: the picture stays the same, but the
-// depths, and so the blur, change. Writes linear HDR color with 1 / depth in alpha and, for depth
-// of field, the signed circle of confusion as in world.js.
+// `scale` scales the tetrahedra and their spacing about the center; the camera stays. Writes
+// linear HDR color with 1 / depth in alpha and, for depth of field, the signed circle of
+// confusion as in world.js.
 
 const shapesShader = /* wgsl */ `
 struct Shapes {
@@ -34,7 +34,7 @@ fn camera() -> Camera {
   let back = vec3f(sin(S.yaw) * cos(S.pitch), sin(S.pitch), -cos(S.yaw) * cos(S.pitch));
   let fwd = -back;
   let right = normalize(cross(vec3f(0.0, 1.0, 0.0), fwd));
-  return Camera(S.distance * back, fwd, right, cross(fwd, right));
+  return Camera(S.distance / S.scale * back, fwd, right, cross(fwd, right));
 }
 
 // Vertex k of a regular tetrahedron centered at the origin with a vertex up, turned by angle a.
@@ -105,7 +105,7 @@ fn background(d: vec3f, foot: f32) -> vec3f {
   return tint * energy / (6.2831853 * s2) * exp(-0.5 * dot(delta, delta) / s2);
 }
 
-// Rays are traced in the unscaled scene; only the depth is scaled.
+// Rays are traced in the unscaled scene, from the camera position divided by the scale.
 fn shade(cam: Camera, pos: vec2f) -> vec4f {
   let u = (pos.x - 0.5 * f32(S.width)) * PIXEL / f32(S.height);
   let v = (0.5 * f32(S.height) - pos.y) * PIXEL / f32(S.height);
@@ -162,12 +162,9 @@ export class Shapes {
     this.pitch = Math.max(-1.4, Math.min(1.4, this.pitch + dy * 0.008));
   }
 
-  // Multiplies all coordinates by `factor`; returns the factor applied after clamping.
+  // Scales the tetrahedra by `factor`, within 1/16 .. 8.
   zoom(factor) {
-    const scale = Math.max(1 / 16, Math.min(16, this.scale * factor));
-    const applied = scale / this.scale;
-    this.scale = scale;
-    return applied;
+    this.scale = Math.max(1 / 16, Math.min(8, this.scale * factor));
   }
 
   // Same interface as World.encode; `time` and `scratch` are unused.
@@ -177,7 +174,6 @@ export class Shapes {
     new Float32Array(u, 8, 3).set([this.yaw, this.pitch, aperture]);
     new Uint32Array(u, 20, 1)[0] = coc ? 1 : 0;
     new Float32Array(u, 24, 3).set([invFocus, this.distance, this.scale]);
-    this.encodedScale = this.scale;
     this.device.queue.writeBuffer(this.uniform, 0, u);
     const bindGroup = this.device.createBindGroup({
       layout: this.layout,

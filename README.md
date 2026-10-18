@@ -401,7 +401,7 @@ candidates per second.
 | `src/de.js`, `src/finetune.js` | Differential evolution and gradient fine-tuning |
 | `src/blur.js` | WebGPU blur: WGSL compute and display shaders |
 | `src/world.js` | Animated 3D night street ray-cast on the GPU: procedural textures, puddles with traced reflections, glossy highlights; adaptive 4× antialiasing and procedural patterns box-filtered over the pixel footprint; the circle of confusion from the z-buffer |
-| `src/shapes.js` | Test scene ("Tetras"): three tetrahedra in a row against a black, starry background at infinity, ray-cast with 4× antialiasing; drag the picture to turn the view; the Scale slider (or the wheel over the picture) scales all coordinates |
+| `src/shapes.js` | Test scene ("Tetras"): three tetrahedra in a row against a black, starry background at infinity, ray-cast with 4× antialiasing; drag the picture to turn the view; the Scale slider (or the wheel over the picture) scales the tetrahedra about the middle one |
 | `src/video.js` | RGB-D video as a depth-of-field source: color over grayscale depth, or a color video with an inferno-coded depth video |
 | `tools/tum_rgbd_video.py` | Converts a [TUM RGB-D](https://cvg.cit.tum.de/data/datasets/rgbd-dataset) sequence to that format (fills depth holes, H.264) |
 | `public/tum-sitting-rgbd.mp4` | 15 s of TUM RGB-D fr3/sitting_static, converted with the tool above |

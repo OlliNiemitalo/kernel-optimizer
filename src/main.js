@@ -469,17 +469,11 @@ function endDrag() {
   drag.down = false;
 }
 
-// The Scale slider (log2) and the wheel scale the tetra scene; the focus distance scales with it,
-// so it stays on the same spot.
+// The Scale slider (log2) and the wheel scale the tetrahedra about their center.
 function scaleShapes(factor) {
-  factor = state.shapes.zoom(factor);
+  state.shapes.zoom(factor);
   showShapesScale();
-  // Slider values are sqrt(1 / distance); the hover preview's saved, target and current ones too.
-  const scaled = (v) => Math.min(1, v / Math.sqrt(factor));
-  hover.saved = scaled(hover.saved);
-  hover.target = scaled(hover.target);
-  hover.value = scaled(hover.value);
-  setFocusSlider(scaled(num("focus")));
+  requestBlur();
 }
 
 function showShapesScale() {
@@ -692,7 +686,7 @@ function useShapes() {
   state.blur.setAnimated(state.shapes, 960, 600);
   state.source = "shapes";
   $("blurMode").value = "depth";
-  setFocusSlider(Math.sqrt(1 / (state.shapes.distance * state.shapes.scale))); // the middle tetra
+  setFocusSlider(Math.sqrt(1 / state.shapes.distance)); // the middle tetra
   requestBlur(true);
 }
 
