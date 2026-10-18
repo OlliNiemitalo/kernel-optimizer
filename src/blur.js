@@ -975,12 +975,11 @@ struct View {
   width: u32,
   height: u32,
   exposure: f32,
-  tonemap: u32,   // 0 = clip, 1 = Reinhard
   showSource: u32,
   layered: u32,   // 1: blurred is the hole-filled last layer, under the composited nearer layers
   showLayers: u32, // debug view: 0 composite, 1 nearer layers' opacity tinted red, 2 that opacity at
                    // half scale, 3 near layer only, 5 far layer only; without layers, 4 the kernel weight sum at half scale;
-                   // 6 decoded inverse depth, mapped to gray as d / (1 + d), independent of exposure/tone mapping
+                   // 6 decoded inverse depth, mapped to gray as d / (1 + d), independent of exposure
 }
 
 @group(0) @binding(0) var<uniform> V: View;
@@ -1024,7 +1023,6 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   }
   if (V.showSource == 1u) { c = source[i].rgb; }
   c = max(c * V.exposure, vec3f(0.0)); // ringing can go slightly negative
-  if (V.tonemap == 1u) { c = c / (1.0 + c); }
   return vec4f(toSrgb(min(c, vec3f(1.0))), 1.0);
 }
 `;
@@ -1034,7 +1032,7 @@ export function shaderSource(kind, packed, interpolate = false) {
   if (kind === "display") {
     return `// Display pass of the separable circular blur: draws acc.rgb / acc.w as one fullscreen triangle
 // (draw(3), no vertex buffers). View (32 bytes): width u32 @0, height u32 @4, exposure f32 @8,
-// tonemap u32 @12, showSource u32 @16, layered u32 @20, showLayers u32 @24. blurred = the compute passes' acc buffer,
+// showSource u32 @12, layered u32 @16, showLayers u32 @20. blurred = the compute passes' acc buffer,
 // nearer = their layer buffer (the composite in its first width height entries; any 16-byte buffer
 // without layers).
 ${displayShader}`;
@@ -1457,7 +1455,7 @@ export class BlurRenderer {
   // Depth of field: `layers` (1 or 2) depth layers with a locally chosen split.
   // `interpolate` (default false) blends adjacent radius nodes instead of selecting the nearest.
   async render({
-    exposure = 1, tonemap = 1, precision = "f32", showSource = false, time = 0, invFocus = 0, capture = false,
+    exposure = 1, precision = "f32", showSource = false, time = 0, invFocus = 0, capture = false,
     sizeBlur = 1, occlusion = 1, layers = 1, showLayers = 0, interpolate = false,
   } = {}) {
     if (this.tablesDirty) this.buildTables();
@@ -1503,7 +1501,7 @@ export class BlurRenderer {
     const v = new ArrayBuffer(32);
     new Uint32Array(v, 0, 2).set([width, height]);
     new Float32Array(v, 8, 1)[0] = exposure;
-    new Uint32Array(v, 12, 4).set([tonemap, showSource ? 1 : 0, layered ? 1 : 0, showLayers]);
+    new Uint32Array(v, 12, 3).set([showSource ? 1 : 0, layered ? 1 : 0, showLayers]);
     device.queue.writeBuffer(this.view, 0, v);
 
     // Without mixed-radius correction state, nearest lookup can share sources across eight

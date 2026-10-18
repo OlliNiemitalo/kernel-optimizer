@@ -48,7 +48,7 @@ for the optimizer.
 **Control availability.** Blur-specific controls are disabled when blur is off. The player bar under
 the picture (go to start, previous frame, play/pause, next frame, time, speed) is available only for
 videos and the animated world; the seek bar, duration and loop only for videos, and full screen for
-every scene (also by double-clicking the picture, again to exit). The bar repeats the Blur on/off switch, so it is available in full screen. The space bar plays and pauses, unless a control that uses it has focus. Highlight boost is available only for images and videos.
+every scene (also by double-clicking the picture, again to exit). The bar repeats the Blur on/off switch, so it is available in full screen. The space bar plays and pauses, unless a control that uses it has focus.
 Focus, layers, blur-size blending and occlusion require depth mode with a depth source (world,
 video or Tetras). Brightness weight additionally requires blur-size blending, and the occlusion
 threshold requires occlusion. Radius interpolation is available only for varying blur.
@@ -60,7 +60,7 @@ composite. **Depth map** is available for all depth sources in depth-of-field mo
 layers. It shows the decoded inverse depth used for focus picking and blur-radius generation,
 not the layer-smoothed radius. Brighter means nearer;
 inverse depth $d$ maps to display gray $d/(1+d)$ (black at infinity, half gray at $d=1$).
-This fixed diagnostic scale bypasses exposure and tone mapping. Controls that only affect blur or
+This fixed diagnostic scale bypasses exposure. Controls that only affect blur or
 color are disabled in this view. The selector remains usable in uniform mode for kernel-weight
 diagnostics even though the varying-blur settings are disabled.
 

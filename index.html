@@ -84,7 +84,6 @@
               <label class="stack" title="An image, or an RGB-D video: color on top, inverse depth below as grayscale (white = 0.5 m)">Open an image or RGB-D video
                 <input id="imageFile" type="file" accept="image/*,video/*" />
               </label>
-              <label title="Lifts near-white pixels of images and videos into HDR, so highlights bloom into discs">Highlight boost <input id="boost" type="number" min="0" max="100" step="1" value="8" /></label>
             </fieldset>
 
             <fieldset>
@@ -126,9 +125,6 @@
             <fieldset>
               <legend>Display</legend>
               <label class="slider">Exposure <input id="exposure" type="range" min="-4" max="4" step="0.1" value="0" /> <output id="exposureOut">1.0×</output></label>
-              <label>Tone map
-                <select id="tonemap"><option value="1">Reinhard</option><option value="0">Clip</option></select>
-              </label>
             </fieldset>
 
             <fieldset>

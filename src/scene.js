@@ -116,8 +116,8 @@ export function proceduralScene(width = 960, height = 600, seed = 3) {
   return { rgba: img, width, height };
 }
 
-// Loads a user image; boost lifts near-white pixels into HDR so highlights bloom into discs.
-export async function loadImage(file, boost = 8, maxSize = 1280) {
+// Loads a user image as linear color.
+export async function loadImage(file, maxSize = 1280) {
   const bitmap = await createImageBitmap(file);
   const s = Math.min(1, maxSize / Math.max(bitmap.width, bitmap.height));
   const width = Math.max(1, Math.round(bitmap.width * s));
@@ -125,13 +125,5 @@ export async function loadImage(file, boost = 8, maxSize = 1280) {
   const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(bitmap, 0, 0, width, height);
-  const img = canvasToLinear(ctx, width, height);
-  for (let i = 0; i < width * height; i++) {
-    const lum = 0.2126 * img[i * 4] + 0.7152 * img[i * 4 + 1] + 0.0722 * img[i * 4 + 2];
-    const gain = 1 + boost * Math.pow(Math.min(1, lum), 8);
-    img[i * 4] *= gain;
-    img[i * 4 + 1] *= gain;
-    img[i * 4 + 2] *= gain;
-  }
-  return { rgba: img, width, height };
+  return { rgba: canvasToLinear(ctx, width, height), width, height };
 }

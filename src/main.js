@@ -640,7 +640,7 @@ function download(url, name) {
 
 const VIEW_CONTROLS = [
   "blurOn", "radius", "blurMode", "focus", "layers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels",
-  "exposure", "tonemap", "precision", "transition", "radiusInterpolation", "showLayers", "playbackRate", "loop",
+  "exposure", "precision", "transition", "radiusInterpolation", "showLayers", "playbackRate", "loop",
 ];
 
 // Everything needed to re-render the displayed frame, plus context for bug reports.
@@ -764,7 +764,6 @@ async function renderBlur() {
     const capture = saveCapture || !!copyCapture;
     const r = await state.blur.render({
       exposure: Math.pow(2, num("exposure")),
-      tonemap: Number($("tonemap").value),
       precision: $("precision").value,
       interpolate: $("radiusInterpolation").checked,
       showSource: !$("blurOn").checked,
@@ -879,7 +878,6 @@ async function useVideo(sample) {
     return;
   }
   const source = new VideoSource(state.blur.device, element, depth, { depthNext, depthFps: sample.depthFps, layout: sample.layout });
-  source.boost = num("boost");
   state.video = { element, depth, depthNext, source, name: sample.label, fps: sample.fps ?? 30, depthFps: sample.depthFps };
   applyVideoPlayback();
   $("videoCredit").innerHTML = sample.credit ?? "";
@@ -1088,7 +1086,7 @@ function wire() {
     $("blurOn").checked = $("playerBlur").checked;
     $("blurOn").dispatchEvent(new Event("input"));
   });
-  for (const id of ["tonemap", "precision"]) $(id).addEventListener("change", () => requestBlur());
+  for (const id of ["precision"]) $(id).addEventListener("change", () => requestBlur());
   for (const id of ["precision", "shaderKind"]) $(id).addEventListener("change", showShader);
   $("radiusInterpolation").addEventListener("input", showShader);
   $("copyShader").onclick = () => navigator.clipboard.writeText($("shaderCode").value);
@@ -1110,18 +1108,11 @@ function wire() {
         await useVideo({ label: file.name, color: URL.createObjectURL(file), depth: null });
       } else {
         state.imageFile = file;
-        await useImage(await loadImage(file, num("boost")));
+        await useImage(await loadImage(file));
       }
     } catch (e) {
       $("blurStats").textContent = e.message;
     }
-  });
-  $("boost").addEventListener("change", async () => {
-    if (state.video) {
-      state.video.source.boost = num("boost");
-      requestBlur();
-    }
-    if (state.imageFile && state.source === "image" && state.blur) await useImage(await loadImage(state.imageFile, num("boost")));
   });
   $("sceneButton").onclick = () => {
     state.imageFile = null;

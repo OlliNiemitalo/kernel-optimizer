@@ -20,7 +20,6 @@ export function testViewControls() {
         assert.equal(!c.disabled.seek, source === 'video');
         assert.equal(!c.disabled.loop, source === 'video');
         assert.equal(c.disabled.fullscreen, false);
-        assert.equal(!c.disabled.boost, ['video', 'image'].includes(source));
         assert.equal(!c.disabled.shapesScale, source === 'shapes');
         assert.equal(!c.disabled.precision, blur);
         assert.equal(c.layerViews.includes('1'), depth && layers);
@@ -34,7 +33,7 @@ export function testViewControls() {
   const depthView = controls({ showLayers: '6' });
   assert.equal(depthView.view, '6');
   for (const id of ['radius', 'focus', 'layers', 'sizeBlur', 'sizeBrightness', 'occlusion',
-    'occlusionLevels', 'precision', 'follow', 'exposure', 'tonemap', 'boost', 'radiusInterpolation']) {
+    'occlusionLevels', 'precision', 'follow', 'exposure', 'radiusInterpolation']) {
     assert.equal(depthView.disabled[id], true, `depth view: ${id}`);
   }
   assert.equal(depthView.disabled.showLayers, false);
