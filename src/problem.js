@@ -219,7 +219,7 @@ export function separableChannels(params) {
 export function formatParams(params, problem, error) {
   const n = params.length / PARAMS_PER_COMPONENT;
   const mult = multiplicities(params);
-  const fmt = (v) => v.toFixed(6);
+  const fmt = (v) => v.toFixed(10);
   const lines = [
     `Number of components: ${n} (${mult.filter((m) => m === 2).length} merged pairs, ` +
       `${channelCount(mult)} complex channels per pass), transition bandwidth: ${problem.transition}, ` +
