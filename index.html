@@ -62,6 +62,7 @@
               <div class="row">
                 <button id="videoButton" class="grow" title="Play the selected RGB-D video">Video</button>
                 <button id="worldButton" class="grow">3D world</button>
+                <button id="shapesButton" class="grow" title="Three tetrahedra in a row against a background at infinity. Drag the picture to turn the view.">Tetrahedra</button>
                 <button id="sceneButton" class="grow">Procedural</button>
               </div>
               <label class="stack" title="An image, or an RGB-D video: color on top, inverse depth below as grayscale (white = 0.5 m)">Open an image or RGB-D video
@@ -96,7 +97,7 @@
 
             <fieldset id="varyingControls">
               <legend>Varying blur</legend>
-              <label title="Depth of field only: 2 = blur near and far objects as separate layers, the near one composited over the far one, so a blurry foreground spreads over what is behind it. The depth split is chosen locally, per 16-pixel tile, so the same layers serve different depths in different places. 1 = no layering.">Depth layers <input id="layers" type="number" min="1" max="2" step="1" value="1" /></label>
+              <label class="check" title="Depth of field only: blur near and far objects as two separate layers, the near one composited over the far one, so a blurry foreground spreads over what is behind it. The depth split is chosen locally, per 16-pixel tile, so the same layers serve different depths in different places."><input id="layers" type="checkbox" /> Layers (experimental)</label>
               <label title="Debug views of the depth layers">Layer view
                 <select id="showLayers" class="wide">
                   <option value="0">Composite</option>

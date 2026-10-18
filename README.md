@@ -237,7 +237,7 @@ one compute pass were not reliably ordered, which made the output vary from fram
 With one layer, a blurry object in front of the focus (a person, with the focus behind them) keeps
 a sharp silhouette: in-focus background pixels have the identity kernel, so nothing spreads into
 the object, and the normalization rescales the object's half discs at its edge back to full
-strength. With **depth layers** (z-buffer only, 2 layers), a near layer is blurred separately and
+strength. With **Layers (experimental)** (z-buffer only), a near layer is blurred separately and
 composited over the far one, so the silhouette spreads over the background, and the background
 shows through the object's semi-transparent edge, as in a real lens.
 
@@ -401,6 +401,7 @@ candidates per second.
 | `src/de.js`, `src/finetune.js` | Differential evolution and gradient fine-tuning |
 | `src/blur.js` | WebGPU blur: WGSL compute and display shaders |
 | `src/world.js` | Animated 3D night street ray-cast on the GPU: procedural textures, puddles with traced reflections, glossy highlights; adaptive 4× antialiasing and procedural patterns box-filtered over the pixel footprint; the circle of confusion from the z-buffer |
+| `src/shapes.js` | Test scene: three tetrahedra in a row against a starry background at infinity, ray-cast with 4× antialiasing; drag the picture to turn the view |
 | `src/video.js` | RGB-D video as a depth-of-field source: color over grayscale depth, or a color video with an inferno-coded depth video |
 | `tools/tum_rgbd_video.py` | Converts a [TUM RGB-D](https://cvg.cit.tum.de/data/datasets/rgbd-dataset) sequence to that format (fills depth holes, H.264) |
 | `public/tum-sitting-rgbd.mp4` | 15 s of TUM RGB-D fr3/sitting_static, converted with the tool above |

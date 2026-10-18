@@ -1,6 +1,7 @@
 import { _setCalibrationState, defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
 import { BlurRenderer, shaderSource, tiltShiftRadiusMap } from "./blur.js";
 import { World } from "./world.js";
+import { Shapes } from "./shapes.js";
 import { VideoSource } from "./video.js";
 
 // RGB-D video samples. Video Depth Anything's comparison clips are fetched from its project page
@@ -334,7 +335,7 @@ let blurRendering = false;
 let lastBlurTime = 0;
 
 const FRAME = 1 / 30; // seconds per step
-const hasDepth = () => state.source === "world" || state.source === "video";
+const hasDepth = () => state.source === "world" || state.source === "video" || state.source === "shapes";
 const animating = () => hasDepth() && state.playing && !document.hidden;
 
 function showSceneTime() {
@@ -424,7 +425,7 @@ async function easeFocus() {
 }
 
 function startHover(e) {
-  if (!canPick()) return;
+  if (!canPick() || (drag.down && drag.moved)) return;
   [hover.x, hover.y] = canvasPixel(e);
   if (!hover.active) {
     hover.active = true;
@@ -440,8 +441,36 @@ function endHover() {
   easeFocus();
 }
 
+// Dragging on the tetrahedra scene turns the view; a drag is neither a focus hover nor a click.
+const DRAG_START = 4; // CSS pixels of movement before a press becomes a drag
+const drag = { down: false, moved: false, x: 0, y: 0 };
+
+function startDrag(e) {
+  Object.assign(drag, { down: state.source === "shapes" && e.button === 0, moved: false, x: e.clientX, y: e.clientY });
+}
+
+function moveDrag(e) {
+  if (!drag.down) return;
+  const dx = e.clientX - drag.x;
+  const dy = e.clientY - drag.y;
+  if (!drag.moved && Math.hypot(dx, dy) < DRAG_START) return;
+  if (!drag.moved) {
+    drag.moved = true;
+    $("blurCanvas").setPointerCapture(e.pointerId);
+    endHover();
+  }
+  drag.x = e.clientX;
+  drag.y = e.clientY;
+  state.shapes.rotate(dx, dy);
+  requestBlur();
+}
+
+function endDrag() {
+  drag.down = false;
+}
+
 async function clickFocus(e) {
-  if (!canPick()) return;
+  if (!canPick() || drag.moved) return;
   const v = await pickFocus(...canvasPixel(e));
   if (v === null) return;
   hover.saved = hover.target = v;
@@ -468,6 +497,7 @@ function viewState() {
       state.source === "video" ? `video: ${state.video.name}`
       : state.source === "image" ? `image: ${state.imageFile?.name}`
       : state.source,
+    ...(state.source === "shapes" && { camera: { yaw: state.shapes.yaw, pitch: state.shapes.pitch } }),
     time: state.sceneTime,
     playing: state.playing,
     controls,
@@ -481,12 +511,16 @@ function viewState() {
 
 async function applyViewState(view) {
   if (view.scene === "world" && state.source !== "world") useWorld();
+  if (view.scene === "shapes" && state.source !== "shapes") useShapes();
+  if (view.scene === "shapes" && view.camera) Object.assign(state.shapes, { yaw: Number(view.camera.yaw) || 0, pitch: Number(view.camera.pitch) || 0 });
   if (view.scene === "procedural") useImage(proceduralScene(), "procedural");
   const sample = VIDEO_SAMPLES.find((s) => view.scene === `video: ${s.label}`);
   if (sample && state.video?.name !== sample.label) await useVideo(sample);
   for (const [id, value] of Object.entries(view.controls ?? {})) {
     if (!VIEW_CONTROLS.includes(id)) continue;
-    if ($(id).type === "checkbox") $(id).checked = value;
+    // Older view states have a layer count.
+    if (id === "layers" && typeof value !== "boolean") $(id).checked = Number(value) > 1;
+    else if ($(id).type === "checkbox") $(id).checked = value;
     else $(id).value = value;
     $(id).dispatchEvent(new Event("input"));
   }
@@ -560,11 +594,11 @@ async function renderBlur() {
       invFocus: num("focus") ** 2,
       sizeBlur: $("sizeBlur").checked ? num("sizeBrightness") : null,
       occlusion: $("occlusion").checked ? num("occlusionLevels") / 6 : 0,
-      layers: num("layers"),
+      layers: $("layers").checked ? 2 : 1,
       showLayers: Number($("showLayers").value),
       capture,
     });
-    const prefix = { world: "street", video: "video" }[state.source];
+    const prefix = { world: "street", video: "video", shapes: "tetrahedra" }[state.source];
     if (r.png) download(r.png, prefix ? `${prefix}-t${state.sceneTime.toFixed(4)}s.png` : "blur.png");
     lastBlurTime = now;
     const gpu = r.gpuMs
@@ -619,6 +653,16 @@ function useWorld() {
   state.source = "world";
   $("blurMode").value = "depth";
   setFocusSlider(Math.sqrt(0.1)); // 10 m
+  requestBlur(true);
+}
+
+function useShapes() {
+  stopVideo();
+  state.shapes ??= new Shapes(state.blur.device);
+  state.blur.setAnimated(state.shapes, 960, 600);
+  state.source = "shapes";
+  $("blurMode").value = "depth";
+  setFocusSlider(Math.sqrt(1 / state.shapes.distance)); // the middle tetrahedron
   requestBlur(true);
 }
 
@@ -779,6 +823,9 @@ function wire() {
   });
   for (const type of ["pointerdown", "pointermove"]) $("blurCanvas").addEventListener(type, startHover);
   for (const type of ["pointerleave", "pointercancel"]) $("blurCanvas").addEventListener(type, endHover);
+  $("blurCanvas").addEventListener("pointerdown", startDrag);
+  $("blurCanvas").addEventListener("pointermove", moveDrag);
+  for (const type of ["pointerup", "pointercancel"]) $("blurCanvas").addEventListener(type, endDrag);
   $("blurCanvas").addEventListener("click", clickFocus);
   $("exposure").addEventListener("input", () => {
     $("exposureOut").textContent = `${Math.pow(2, num("exposure")).toFixed(2)}×`;
@@ -833,6 +880,11 @@ function wire() {
     state.imageFile = null;
     $("imageFile").value = "";
     if (state.blur) useWorld();
+  };
+  $("shapesButton").onclick = () => {
+    state.imageFile = null;
+    $("imageFile").value = "";
+    if (state.blur) useShapes();
   };
   const groups = {};
   for (const [k, sample] of VIDEO_SAMPLES.entries()) {
