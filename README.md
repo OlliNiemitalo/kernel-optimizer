@@ -11,7 +11,7 @@ pass, at a cost proportional to the blur radius rather than its area.
   convergence, and the 2-D kernel.
 - **Blur demo**: hand-written WGSL compute shaders processing one channel at a time, so memory
   doesn't grow with the channel count. Uniform or spatially varying disc radius: tilt-shift, or
-  depth of field from the z-buffer of an animated 3D night street ray-cast on the GPU, or from an
+  depth of field from GPU-rendered Tetras or an animated 3D night street, or from an
   RGB-D video: Video Depth Anything's comparison clips (loaded from its project page) or two people
   talking at a desk with measured depth (included). Hovering over the picture (or holding a touch)
   eases the focus to the nearest depth within 8 pixels of the pointer, and restores it afterwards;
@@ -35,12 +35,29 @@ npm run preview   # serve dist/
 npm run smoke     # Node test of the math, optimizer and fine-tuner (Wasm backend)
 ```
 
-The browser needs WebGPU for the blur demo (current Chrome, Edge, and Safari; Firefox on Windows).
+The blur demo requires a browser and graphics device with WebGPU enabled.
 Without WebGPU, the optimizer still runs on WebAssembly.
 
 URL options: `?calibrate` enables jax-js's GPU microbenchmark at startup. By default it is skipped,
-because it allocates about 128 MB and can stall the page for several seconds. Skipping it made no
-measurable difference to optimizer speed.
+because it allocates about 128 MB and can stall the page for several seconds. It is not required
+for the optimizer.
+
+**Control availability.** Blur-specific controls are disabled when blur is off. Playback is
+available only for videos and the animated world; highlight boost only for images and videos.
+Focus, layers, blur-size blending and occlusion require depth mode with a depth source (world,
+video or Tetras). Brightness weight additionally requires blur-size blending, and the occlusion
+threshold requires occlusion. Radius interpolation is available only for varying blur. Tilt-shift
+has one radius per row, so blur-size blending and brightness weighting have no effect and are
+disabled. The **Layer view** selector is in **Display**: with blur enabled it offers the composite
+and, for one layer, summed kernel weight; near/far diagnostics are available only with depth
+layers enabled. Disabled settings are retained, while an unavailable diagnostic resets to the
+composite.
+
+**Image capture.** **Save PNG** downloads the rendered view; **Copy image** writes a freshly
+rendered PNG to the system clipboard for pasting into other applications. Copying requires a
+secure context (HTTPS or localhost), browser image-clipboard support and clipboard permission.
+The button is disabled when the API is unavailable; a denied write offers Save PNG as a fallback.
+**Copy view state** copies reproducible settings as JSON, not image pixels.
 
 ## Publishing on GitHub Pages
 
@@ -147,7 +164,11 @@ The "Current kernel" panel exports these channel coefficients, ready to use in o
 
 ### 4. Discrete implementation (WebGPU)
 
-See [`src/blur.js`](src/blur.js). For a disc radius of $R$ pixels:
+See [`src/blur.js`](src/blur.js). The **uniform-radius path**, for a disc radius of $R$ pixels,
+uses point-sampled taps and sliding-register reuse as follows. The varying-radius path instead
+uses pixel-integrated tables, with eight horizontal outputs per thread for nearest-node lookup,
+four for interpolation, and eight vertical outputs; its source-dependent taps do not use the
+uniform path's sliding tap window.
 
 1. **Taps.** Use $t = -K \dots K$ with $K = \lceil R(1+\tau) \rceil$, evaluating each 1-D kernel at
    $(t/R)^2$. Compute tap values in double precision on the CPU and upload them as complex f32
@@ -161,8 +182,8 @@ See [`src/blur.js`](src/blur.js). For a disc radius of $R$ pixels:
 3. **Normalization in the shader.** The passes filter a fourth lane holding a constant 1 together
    with the color, so $A_w(x, y)$ is the sum of the 2-D kernel weights that reached the pixel. The
    output is $A_\mathrm{rgb} / A_w$. For a uniform radius this equals dividing by the kernel's sum,
-   also at image edges. It needs no precomputed constant, and it stays brightness-preserving
-   when the radius varies across the image.
+  also at image edges. The varying path also filters RGB and weight together to preserve
+  constant color where coverage is nonzero; this is not exact variable-radius convolution.
 4. **Register blocking.** Each thread computes 8 consecutive outputs along the pass direction.
    As the loop walks the input, the 8 taps in use slide through registers, so every input sample
    and tap is read once per thread instead of once per output. The tap tables are zero-padded,
@@ -174,17 +195,18 @@ linearly with the radius.
 
 #### Memory
 
-Besides the source image and the 4-lane accumulator (16 bytes per pixel each), the
-only working buffer is one channel's intermediate: 4 complex lanes, 32 bytes per pixel in f32. The
-"16-bit float (packed)" option stores each complex lane as two half floats in one `u32`
+For uniform blur, besides the source image, tap tables and the 4-lane accumulator (source and
+accumulator are 16 bytes per pixel each), the main working buffer is one channel's intermediate:
+4 complex lanes, 32 bytes per pixel in f32. The "16-bit float (packed)" option stores each
+complex lane as two half floats in one `u32`
 (`pack2x16float`): 16 bytes per pixel, with no optional GPU feature needed. At 960×600 the
 intermediate is 17.6 MiB, or 8.8 MiB packed, whatever the number of channels. Keeping all
 channels at once would take channels × that.
 
 #### Spatially varying radius
 
-The radius comes from a per-pixel map: tilt-shift, or the 3D world's
-z-buffer turned into a signed circle of confusion (negative in front of the focus). For focus
+The radius comes from a per-pixel map. Tilt-shift uses a radius that varies by row. In depth mode,
+the world or Tetras z-buffer is turned into a signed circle of confusion (negative in front of the focus). For focus
 distance $f$ it is proportional to $1/f - 1/z$: the demo uses $2R\,\text{m}\,(1/f - 1/z)$, capped at
 $\pm R$, so $R$ is the blur at 2 m with focus at infinity. An RGB-D video works the same way, with
 relative inverse depth $v \in [0, 1]$ in one of two layouts:
@@ -210,29 +232,34 @@ shader exports; it has no effect on uniform blur. The tables are built from a de
 complex reference profile (256 points per disc radius), with a continuous zero endpoint. Each tap
 is the integral of the scaled profile over the pixel interval, not its value at the pixel center.
 Radius zero is identity; positive subpixel radii use the same integration as larger radii.
-The uniform path keeps its previous point-sampled direct tables.
+The uniform path uses point-sampled direct tables.
 
 A plain gather, where each output uses its own radius, cuts the discs of blurry highlights next to
 sharper pixels: those pixels neither look far enough nor use the highlight's kernel. So the passes
 *scatter as gather*:
 
-1. A prepass retains a coarse byte-per-pixel level map for depth classification (sign bit = in
+1. A prepass prepares a coarse byte-per-pixel level map for depth classification (sign bit = in
   front of focus), but computes support bounds from the selected node (or the union of both nodes
-  when interpolating). Dilating
-  the largest kernel half-width per 16×16 tile over the
+  when interpolating). Dilating the largest kernel half-width per 16×16 tile over the
    neighbouring tiles gives each tile's **reach**: how far its pixels must look.
 2. Every tap uses the radius table(s) selected by the **source** pixel it reads, so each source spreads
   its own disc. Profile samples outside its support are zero. The interpolating horizontal path
   processes four outputs per thread; the nearest, vertical and uniform paths process eight.
 3. After the horizontal pass, a pixel mixes light from sources with different radii, but the
    vertical pass can apply only one kernel per pixel. The prepass therefore "blurs the blur size":
-  the **vertical radius** is derived from the continuous log-radius average of row sources that reach the pixel, weighted by
-   their brightness and by how much of their disc falls in the column. Bright highlights keep
-   round discs; sharp detail next to them stays sharp. With a radius that depends only on the row
-   (tilt-shift), every disc is exact. In the "Varying blur" controls, this can be turned off (each
-  pixel then uses its own radius, cutting the discs of blurry highlights next to sharper pixels),
-   and the brightness weight is raised to an adjustable power: 0 counts all sources equally,
-   1 (the default) in proportion to brightness, larger values let highlights dominate.
+  the **vertical radius** is derived from the continuous log-radius average of unoccluded row
+  sources that reach the pixel. Each source contributes weight
+  $$w = m\,(L + 0.01)^b\,d,$$
+  where $m$ is its membership in the current layer (1 without layers),
+  $L = 0.2126 I_r + 0.7152 I_g + 0.0722 I_b$ is linear luminance, $b$ is the brightness-weight
+  exponent, and $d$ is the disc marginal estimating how much of its disc falls in the column.
+  The default $b=1$ is a useful highlight-priority heuristic: it helps bright highlights
+  retain their shape when radii mix horizontally, but is neither kernel normalization nor exact
+  variable-radius convolution. At $b=0$ only luminance weighting disappears; membership and disc
+  overlap still apply. Larger exponents favor highlights more. Turning off **Blur the blur size**
+  uses each pixel's own radius instead. For tilt-shift, all sources in a row already share one
+  radius, so neither this averaging nor the exponent changes it; the separable passes reproduce
+  that row-constant source-radius kernel, subject to the chosen tap lookup and precision.
 4. **Occlusion** (z-buffer only, optional): a destination hides sources farther than an adjustable
   signed-level threshold behind it (default six levels), beyond its own kernel support. This
   depth order applies on **both sides of focus**; a slightly defocused foreground surface must
@@ -241,12 +268,12 @@ sharper pixels: those pixels neither look far enough nor use the highlight's ker
   occlude it: inter-layer visibility belongs to compositing, so far light remains available
   behind the near layer. This separable visibility test is an approximation, not aperture ray tracing.
 
-Working maps contain five packed byte maps and four float planes (smoothed source radius,
+Working maps contain five packed byte maps (level, vertical level, smoothed level, scratch and
+near-layer membership) and four float planes (smoothed source radius,
 smoothing scratch reused as source table coordinate, vertical radius, vertical table coordinate),
 in addition to the original signed radius map. Tap tables are included in displayed memory;
 the integrated varying-radius path needs no DC correction matrix.
-Each prepass step runs in its own compute pass: on the tested Intel GPU, dependent dispatches within
-one compute pass were not reliably ordered, which made the output vary from frame to frame.
+Each dependent prepass step runs in its own compute pass to enforce ordering.
 
 #### Depth layers
 
@@ -255,27 +282,28 @@ a sharp silhouette: in-focus background pixels have the identity kernel, so noth
 the object, and the normalization rescales the object's half discs at its edge back to full
 strength. With **Layers (experimental)** (z-buffer only), a near layer is blurred separately and
 composited over the far one, so the silhouette spreads over the background, and the background
-shows through the object's semi-transparent edge, as in a real lens.
+shows through the object's semi-transparent edge. This approximates lens visibility; it does not
+reconstruct surfaces hidden in the input.
 
 - **Local split, at depth edges.** Which depths need separating varies across the image, so the
   split is chosen per 16×16 tile from the depth edges of the surrounding 5×5 tiles: pairs of
   pixels 4 px apart whose nearer pixel lies in front of the focus and is at least an octave
   blurrier. Each pair supports every split between its two blur levels; a tile splits in the
-  middle of the range supported by at least half the peak (and 16 pairs). A connected surface,
-  however steep, has no such edges and is not split.
+  middle of the range supported by at least half the peak (and 16 pairs). This is a local
+  depth-difference heuristic, not a connectivity test: a steep connected surface or noisy depth
+  can also trigger a split.
 - **Spread to tiles without a split.** A tile without a split of its own takes the split of the
-  nearest tiles that have one, up to 8 tiles (128 px) away. Otherwise the interior of a large
-  object, more than two tiles from its silhouette, would fall into the far layer: its blurred
-  light, normalized by the far layer's low coverage there, came through the near layer's
-  semi-transparent edge as a bright seam (a car's tail light leaking along the car's side).
+  nearest tiles that have one, up to 8 tiles (128 px) away. This extends near-layer membership
+  into large objects beyond the depth-edge neighborhood, limiting far-layer leakage through
+  their semi-transparent silhouettes.
   Farther away, the near layer is empty, and the passes skip its empty tiles.
 - **Membership depends only on the source.** Each pixel's membership in the near layer comes from
   the four nearest tile centers, bilinearly interpolated, with a soft step as wide as the
   supported range (a surface that continues across the split, such as feet on the ground, fades
   between the layers). The mask is then closed morphologically (4 px), so thin details whose
-  estimated depth fell behind (a zipper on a coat) stay with their surface. Because membership is
-  a function of the source pixel alone, each layer is a linear image and the separable passes
-  stay exact.
+  estimated depth fell behind stay with their surface. Source-only membership gives a consistent
+  masked source image for both passes; it does not make arbitrary varying-radius filtering,
+  adaptive radius selection or occlusion exactly separable.
 - **Depth-guided source-radius smoothing.** Estimated depth is noisy, and with scatter-as-gather,
   neighbors with different disc sizes do not sum to unit weight. A weighted median along x/y,
   followed by a weighted mean along x/y, denoises signed log-radius over ±6 px. The median removes
@@ -299,18 +327,17 @@ shows through the object's semi-transparent edge, as in a real lens.
   around a silhouette, and, on the layer's own pixels (membership $m$), the fraction $f$ of the
   layer's pixels within the pixel's own blur radius (a square window), which makes the layer
   opaque deeper inside than its blur reaches. The cap $3w$ keeps the noisy color of the kernels'
-  fading tails, a ratio of two tiny sums, from showing as a sharp, speckled fringe. The layers
-  take two extra buffers (the composite, and debug data; 16 bytes per pixel each) plus the
-  pyramid, about a third more, and two more byte maps.
+  fading tails, a ratio of two tiny sums, from showing as a sharp, speckled fringe. Layers allocate
+  one `layerBuffer` containing two full-resolution arrays (composite and diagnostic data,
+  16 bytes per pixel each) plus the pull-push pyramid (about one-third of one full-resolution
+  array). The scratch and membership byte maps are already included in the five varying-radius
+  maps above; enabling layers does not allocate two additional byte maps.
 - **Cost.** Per-tile reach is stored as K + 1, with 0 for tiles that no source of the layer
-  reaches, so the passes skip them; the near layer is cheap where it is empty. The radius-table
-  interpolant avoids the former rescaled-profile path's per-tap division, coordinate arithmetic,
-  identity blend, and normalization factor. Pixel integration removes the mixed-radius correction
-  lookup, multiply, reciprocal, fade and branch entirely. With that register state gone, nearest
-  horizontal filtering shares each source across eight outputs again (four when interpolating).
-  The one-layer pipeline specializes away layer membership and map-selection branches.
-  Older nearest-node timings are not directly
-  comparable; the benchmark page alternates frozen-scene renders on the same device.
+  reaches, so the passes skip them; the near layer is cheap where it is empty. Pixel-integrated
+  tables need no per-tap mixed-radius DC correction. Horizontal filtering shares each source
+  across eight outputs for nearest lookup or four for interpolation; vertical filtering uses
+  eight. The one-layer pipeline specializes away layer membership and map-selection branches.
+  Depth-guided smoothing uses four dispatches (median x/y, then mean x/y).
 - **Empty-layer identity.** The final mask pass records whether the near layer contains any
   members. When it is empty, source-level smoothing and far-layer hole filling are bypassed;
   adding an empty layer must not change the one-layer image. The occupancy flag is reset each frame.
@@ -325,21 +352,15 @@ interpolation is enabled.
 
 Layer-smoothing regressions include an in-focus narrow triangle against a blurred background
 with a separate active foreground layer, both transposed axes, both lookup modes and precisions,
-subpixel radius preservation, and foreground noise reduction. The reproduced 960×600 tetra view
-also checks the sharp vertices and the soft-membership boundary: the old smoother inflated
-near-focus radii by up to 67.0 px and introduced an 8.47 px adjacent-radius jump there; the guided
-median/mean measures 0.499 px and 0.136 px respectively, with subpixel radii unchanged. A thin
-depth-streak regression checks that an erroneous 8 px radius inside a 16 px foreground returns
+subpixel radius preservation, and foreground noise reduction. A 960×600 tetra fixture checks
+sharp vertices and radius continuity across soft-membership boundaries. A thin depth-streak
+regression checks that an erroneous 8 px radius inside a 16 px foreground returns
 to within $10^{-4}$ px of its neighbors, while a truly focused thin feature remains focused.
-These are measurements for the fixtures, not universal error bounds. All 812 GPU checks pass.
-The bilateral-only two-pass trial (`45455ec`) passed the tetra checks but regressed thin video
-boundaries and failed the streak fixture. The current filter restores four smoothing dispatches
-and adds no buffers; its weighted median costs more than a simple mean. The earlier two-pass
-performance measurements do not describe this revision.
+These are fixture-specific checks, not universal error bounds.
 
-The **Layer view** selector shows the composite, the near layer's opacity (tinted, or as gray at
-half scale), the near layer alone, the hole-filled far layer alone, or, with one layer, the summed
-kernel weight per pixel.
+The **Layer view** selector in **Display** shows the composite, the near layer's opacity (tinted,
+or as gray at half scale), the near layer alone, the hole-filled far layer alone, or, with one
+layer, the summed kernel weight per pixel.
 
 **Pixel integration and mixing radii.** Point-sampled small kernels do not preserve their complex
 channel sums under scaling. Instead, for a continuously scaled profile, build each tap as
@@ -361,21 +382,21 @@ using a cumulative integral. That is exact for the reference interpolant, not fo
 analytic Gaussian. Its primitive saturates outside the compact support. The support bounds
 include the extra half-pixel footprint and, when interpolating, both neighboring node supports.
 At radius zero each channel is its integral times a delta. If a positive-radius kernel fits wholly
-inside the central pixel, it also produces identity; there is no artificial identity-to-radius-one
-blend. This changes the subpixel and small-radius PSF intentionally.
+inside the central pixel, it also produces identity. Subpixel and small-radius PSFs follow the
+pixel integral.
 
 For fixed radii this is box filtering the separable 2-D kernel over the destination pixel before
 sampling. It is **kernel antialiasing**, not source-image mipmapping, subpixel geometry/depth
 antialiasing, or exact variable-radius convolution. The square pixel footprint also breaks exact
 radial symmetry at pixel scale. Spatially varying radii, occlusion and boundaries still require
-the RGB/weight handling; layer split, smoothing and compositing rules are unchanged.
+the RGB/weight handling and the layer split, smoothing and compositing heuristics described above.
 
 Tests check every stored node's complex sums, f32 upload error, independent clipped-segment
 quadrature, radius interpolation error versus direct pixel integration, subpixel support onset,
-GPU raw coverage, impulse responses and mixed-radius ramps in both lookup modes. The old
-point-sampled reference is retained for historical tests, not used as the new PSF's correctness
-target. Sampled CPU mixed DC error is about $10^{-13}$; sampled interpolation L1 kernel error is
-0.00151. These are measured errors, not universal bounds.
+GPU raw coverage, impulse responses and mixed-radius ramps in both lookup modes, including
+high-channel and merged-polynomial flat fields. The correctness target for varying-radius taps
+is direct pixel integration, not point sampling. Sampled CPU mixed DC error is about $10^{-13}$;
+sampled interpolation L1 kernel error is 0.00151. These are measured errors, not universal bounds.
 
 `/test/benchmark.html` provides an opt-in alternating GPU-timestamp comparison against captured
 baseline source. It warms both pipelines, shares one device, freezes the tetra camera, and reports
@@ -385,83 +406,20 @@ RGB and depth are paused at the middle of the first frame, and shared by both re
 loading and shader warmup are outside the samples. Capture the baseline before editing sampler
 revisions; select the same interpolation mode for the comparison.
 
-**Current pixel-integrated tables versus `5372168`.** Intel Gen9, preset 3, one layer,
-size blending and occlusion enabled; 17 alternating samples after two warmups. The default
-woman video is frozen at 960×540, focus control 0.675. Times are GPU medians in milliseconds;
-totals include scene rendering and preparation. Each total is measured independently, rather
-than obtained by adding the per-pass medians.
+Measure total GPU time independently of per-pass medians; totals include scene rendering and
+preparation. Compare paired runs with the same scene, settings and device, since GPU clock drift
+can make absolute timings across runs misleading.
 
-| Lookup | Radius | Intermediate | Horizontal before → after | Total before → after | Speedup |
-| --- | ---: | --- | ---: | ---: | ---: |
-| Nearest | 15 | f32 | 23.9 → 17.1 | 47.2 → 40.2 | 1.17× |
-| Nearest | 15 | packed f16 | 23.0 → 14.4 | 44.2 → 34.0 | 1.30× |
-| Nearest | 69 | f32 | 64.9 → 54.5 | 145.8 → 135.7 | 1.07× |
-| Nearest | 69 | packed f16 | 93.5 → 76.3 | 197.8 → 179.6 | 1.10× |
-| Interpolated | 15 | f32 | 69.9 → 33.2 | 113.0 → 75.1 | 1.50× |
-| Interpolated | 15 | packed f16 | 66.5 → 31.5 | 108.7 → 67.9 | 1.60× |
-| Interpolated | 69 | f32 | 142.5 → 121.0 | 293.0 → 268.0 | 1.09× |
-| Interpolated | 69 | packed f16 | 143.3 → 122.6 | 273.0 → 251.3 | 1.09× |
-
-GPU clocks drifted during the sequence (including within the nearest suite), so compare paired
-before/after results, not absolute times across rows or historical runs. The same run's frozen
-960×600 tetra scene improved total nearest-mode time by 1.10–1.11× at radius 15 and
-1.17× at radius 69. These measurements do not establish parity with published main.
-
-Removing the quadratic DC matrix reduces preset-3 table storage from 1,651,776 to 478,336 bytes
-at radius 15 (71% less), and from 4,464,736 to 2,276,576 bytes at radius 69 (49% less),
-with no added working maps. Both lookup modes share those tables. The smoke suite and all
-692 GPU checks pass, including high-channel and merged-polynomial flat-field tests.
-
-Historical 32-step interpolated-table measurements (`2cbb7fc`) on Intel Gen9 at 960×600,
-preset 3, one layer, size blending and occlusion enabled:
-nine alternating samples after two warmups, compared with the rescaled-profile sampler (`b6c1470`).
-Totals include scene rendering and preparation, not just convolution.
-
-| Radius | Intermediate | Previous (ms) | Lookup (ms) | Speedup |
-| --- | --- | ---: | ---: | ---: |
-| 15 | f32 | 99.4 | 76.6 | 1.30× |
-| 15 | packed f16 | 101.9 | 72.6 | 1.40× |
-| 69 | f32 | 397.1 | 298.1 | 1.33× |
-| 69 | packed f16 | 399.4 | 276.9 | 1.44× |
-
-For that 32-step version, kernel tables shrink from 1.12 to 0.52 MiB at radius 15 and from 2.08 to 1.63 MiB at radius 69.
-Caching the vertical table coordinate adds one float per pixel (2.20 MiB here), so total GPU
-memory increases despite the smaller tables. In the sampled preset/radius quality sweep, the
-largest integrated absolute kernel difference was 0.00557, with a localized truncation-tail
-peak difference of 0.0311 after multiplying by radius squared. These are sampled results,
-not universal performance or error bounds.
-
-The historical point-sampled 64-step grid (`25bb7b3`) doubled the radius-node density. An 11-sample alternating comparison
-against the 32-step grid under the same conditions found up to 2% slowdown with interpolation,
-and up to 5% with nearest lookup. This modest cost was retained for the finer radius spacing.
-Its nearest-mode totals were about 56/53 ms at radius 15 and 208/198 ms at radius 69 (f32/f16).
-Table storage grows to 1.58/4.26 MiB respectively: taps grow roughly 2×, but the node-pair DC matrix
-grows roughly 4×. The sampled interpolated-kernel integrated error falls to 0.00111, with scaled
-peak error 0.00395. Nearest lookup deliberately retains small radius steps; these interpolation
-error measurements do not describe nearest-mode error.
-
-The historical nearest reciprocal/fade lookup (`5372168`), cached-key reuse, one-layer specialization, and short-kernel
-two-output blocking were compared against `25bb7b3` on that frozen 960×540 video (21 alternating
-samples, radius 15, default focus 0.675, preset 3, one layer):
-
-| Intermediate | Horizontal before → after (ms) | Total GPU before → after (ms) |
-| --- | ---: | ---: |
-| f32 | 26.7 → 23.1 | 50.5 → 46.8 |
-| packed f16 | 25.9 → 23.0 | 47.6 → 44.6 |
-
-Reciprocal precomputation alone gave only a small improvement, not the whole gain. At radius 69,
-the combined total improvement was about 1–2%; on tetrahedra it ranged from about 1% slower at
-radius 15 to 2–3% faster at radius 69. Interpolated video timings were essentially unchanged.
-That did **not** restore published-main performance: the older renderer has no mixed-radius
-correction, far fewer radius nodes, and smaller working maps. Simply removing the correction
-from point-sampled taps is not a correctness-preserving optimization; the current integrated
-construction instead changes the PSF to make the correction unnecessary.
+For preset 3, pixel-integrated table storage is **478,336 bytes at radius 15** and
+**2,276,576 bytes at radius 69**. Nearest and interpolated lookup share the same tables.
 
 #### Truncation and corners
 
-Truncating each 1-D kernel at $|t| \le K$ makes the 2-D support a
+Truncating each 1-D profile at normalized distance $1 + \tau$ makes the nominal 2-D support a
 square. Its corners reach $r = \sqrt{2}\,(1 + \tau)$, so the kernel must already be near zero
-there. The optimizer's stop band extends far beyond that, to about $1 + \tau + \ln N_\text{stop}$.
+there. Discrete tap bounds also account for rounding and, in the varying path, the half-pixel
+integration footprint. The optimizer's stop band extends far beyond the nominal corners, to about
+$1 + \tau + \ln N_\text{stop}$.
 
 ### 5. Precision
 
@@ -566,7 +524,7 @@ candidates per second.
 | `test/smoke.js` | Checks the math and runs the optimizer and fine-tuner in Node |
 | `test/merged-de.js` | Experiment: DE convergence with and without merged pairs |
 | `vendor/jax-js-nonconsuming/` | jax-js-nonconsuming v0.12.14 TypeScript sources (MIT), compiled by Vite |
-| `public/coi-serviceworker.js` | coi-serviceworker v0.1.7 (MIT), served unbundled at the site root; modified to let cross-origin requests bypass it, as proxied video range requests were aborted |
+| `public/coi-serviceworker.js` | coi-serviceworker v0.1.7 (MIT), served unbundled at the site root; cross-origin requests bypass it to support video range requests |
 | `public/favicon.png`, `public/apple-touch-icon.png` | Center of the article's [5-component square-wave kernel image](https://yehar.com/blog/wp-content/uploads/2010/09/squarewave5componentreal.png) |
 
 jax-js-nonconsuming is vendored because it is not published on npm, and its Git install

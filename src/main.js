@@ -1,5 +1,6 @@
 import { _setCalibrationState, defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
 import { BlurRenderer, shaderSource, tiltShiftRadiusMap } from "./blur.js";
+import { viewControls } from "./view-controls.js";
 import { World } from "./world.js";
 import { Shapes } from "./shapes.js";
 import { VideoSource } from "./video.js";
@@ -82,6 +83,8 @@ const state = {
   sceneTime: 0,
   playing: true,
   captureNext: false,
+  copyCapture: null,
+  copyBusy: false,
   imageFile: null,
 };
 
@@ -336,7 +339,7 @@ let lastBlurTime = 0;
 
 const FRAME = 1 / 30; // seconds per step
 const hasDepth = () => state.source === "world" || state.source === "video" || state.source === "shapes";
-const animating = () => hasDepth() && state.playing && !document.hidden;
+const animating = () => ["world", "video"].includes(state.source) && state.playing && !document.hidden;
 
 function showSceneTime() {
   if (document.activeElement !== $("sceneTime")) $("sceneTime").value = state.sceneTime.toFixed(4);
@@ -386,7 +389,7 @@ const PICK_RADIUS = 8; // image pixels
 const FOCUS_EASE = 0.12; // time constant, s
 const hover = { active: false, x: 0, y: 0, saved: 0, target: 0, value: 0, picking: false, easing: false };
 
-const canPick = () => state.blur && $("blurMode").value === "depth" && hasDepth();
+const canPick = () => state.blur && $("blurOn").checked && $("blurMode").value === "depth" && hasDepth();
 
 function canvasPixel(e) {
   const rect = $("blurCanvas").getBoundingClientRect();
@@ -505,7 +508,7 @@ function download(url, name) {
 
 const VIEW_CONTROLS = [
   "blurOn", "radius", "blurMode", "focus", "layers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels",
-  "exposure", "tonemap", "precision", "transition", "radiusInterpolation",
+  "exposure", "tonemap", "precision", "transition", "radiusInterpolation", "showLayers",
 ];
 
 // Everything needed to re-render the displayed frame, plus context for bug reports.
@@ -539,7 +542,7 @@ async function applyViewState(view) {
   const sample = VIDEO_SAMPLES.find((s) => view.scene === `video: ${s.label}`);
   if (sample && state.video?.name !== sample.label) await useVideo(sample);
   for (const [id, value] of Object.entries(view.controls ?? {})) {
-    if (!VIEW_CONTROLS.includes(id)) continue;
+    if (!VIEW_CONTROLS.includes(id) || id === "showLayers") continue;
     // Older view states have a layer count.
     if (id === "layers" && typeof value !== "boolean") $(id).checked = Number(value) > 1;
     else if ($(id).type === "checkbox") $(id).checked = value;
@@ -554,6 +557,9 @@ async function applyViewState(view) {
     discardDE({ include: state.current.params });
   }
   setPlaying(!!view.playing);
+  // Validate diagnostics only after their prerequisites, regardless of JSON property order.
+  if (view.controls?.showLayers !== undefined) $("showLayers").value = view.controls.showLayers;
+  updateVaryingControls();
   seekScene(Number(view.time) || 0);
   lastBlurTime = 0;
   requestBlur(true);
@@ -562,12 +568,26 @@ async function applyViewState(view) {
 function updateVaryingControls() {
   $("sizeBrightnessOut").textContent = num("sizeBrightness").toFixed(1);
   $("occlusionOut").textContent = `${(num("occlusionLevels") / 6).toFixed(2)} oct`;
-  $("sizeBrightness").disabled = !$("sizeBlur").checked;
-  $("occlusionLevels").disabled = $("occlusion").disabled || !$("occlusion").checked;
+  const controls = viewControls({
+    ready: !!state.blur && !!state.source, source: state.source,
+    blur: $("blurOn").checked, mode: $("blurMode").value,
+    layers: $("layers").checked, sizeBlur: $("sizeBlur").checked,
+    occlusion: $("occlusion").checked, showLayers: $("showLayers").value,
+  });
+  for (const [id, disabled] of Object.entries(controls.disabled)) $(id).disabled = disabled;
+  const clipboardSupported = !!navigator.clipboard?.write && typeof ClipboardItem !== "undefined";
+  $("copyImage").disabled = !state.blur || !state.source || !clipboardSupported || state.copyBusy;
+  $("copyImage").title = clipboardSupported
+    ? "Copy a freshly rendered PNG of the current view to the clipboard"
+    : "Image clipboard is unavailable in this browser or context; use Save PNG";
+  $("blurMode").querySelector('option[value="depth"]').disabled = !controls.depthAvailable;
+  for (const option of $("showLayers").options) option.disabled = !controls.layerViews.includes(option.value);
+  $("showLayers").value = controls.view;
 }
 
 function requestBlur(kernelChanged = false) {
   blurKernelDirty ||= kernelChanged;
+  updateVaryingControls();
   if (blurPending || !state.blur) return;
   blurPending = true;
   const wait = state.running ? Math.max(0, 150 - (performance.now() - lastBlurTime)) : 0;
@@ -582,6 +602,8 @@ async function renderBlur() {
   }
   if (!state.blur || !state.current || !state.source) return;
   blurRendering = true;
+  const copyCapture = state.copyCapture;
+  state.copyCapture = null;
   try {
     const radius = num("radius");
     if (blurKernelDirty) {
@@ -591,11 +613,6 @@ async function renderBlur() {
       const depth = mode === "depth" && hasDepth();
       if (depth) state.blur.setDepthOfField();
       else state.blur.setRadiusMap(mode === "tiltShift" ? tiltShiftRadiusMap(width, height, radius) : null);
-      $("varyingControls").disabled = mode === "uniform";
-      $("occlusion").disabled = !depth;
-      $("layers").disabled = !depth;
-      $("showLayers").disabled = !depth;
-      $("shapesScale").disabled = state.source !== "shapes";
       showShapesScale();
       updateVaryingControls();
       blurKernelDirty = false;
@@ -607,8 +624,9 @@ async function renderBlur() {
     }
     else if (animating() && lastBlurTime) state.sceneTime += Math.min(0.1, (now - lastBlurTime) / 1000);
     showSceneTime();
-    const capture = state.captureNext;
+    const saveCapture = state.captureNext;
     state.captureNext = false;
+    const capture = saveCapture || !!copyCapture;
     const r = await state.blur.render({
       exposure: Math.pow(2, num("exposure")),
       tonemap: Number($("tonemap").value),
@@ -624,7 +642,11 @@ async function renderBlur() {
       capture,
     });
     const prefix = { world: "street", video: "video", shapes: "tetras" }[state.source];
-    if (r.png) download(r.png, prefix ? `${prefix}-t${state.sceneTime.toFixed(4)}s.png` : "blur.png");
+    if (r.png && saveCapture) download(r.png, prefix ? `${prefix}-t${state.sceneTime.toFixed(4)}s.png` : "blur.png");
+    if (copyCapture) {
+      if (!r.png) throw new Error("The renderer did not produce an image.");
+      copyCapture.resolve(await (await fetch(r.png)).blob());
+    }
     lastBlurTime = now;
     const gpu = r.gpuMs
       ? "GPU time: " + Object.entries(r.gpuMs).map(([k, ms]) => `${k} ${ms.toFixed(2)} ms`).join(" + ")
@@ -643,6 +665,7 @@ async function renderBlur() {
       (m.layers ? `, layers ${mib(m.layers)}` : "") +
       `) · ${gpu}`;
   } catch (e) {
+    copyCapture?.reject(e);
     console.error(e);
     $("blurStats").textContent = `Blur failed: ${e.message}`;
   } finally {
@@ -938,6 +961,30 @@ function wire() {
     state.captureNext = true;
     requestBlur();
   };
+  $("copyImage").onclick = async () => {
+    if (state.copyBusy || $("copyImage").disabled) return;
+    state.copyBusy = true;
+    $("captureStatus").textContent = "Copying image…";
+    let capture;
+    const png = new Promise((resolve, reject) => { capture = { resolve, reject }; });
+    // Some browsers require clipboard.write during the click's user activation. Supply a
+    // promise for the freshly rendered PNG rather than waiting before requesting clipboard access.
+    png.catch(() => {});
+    state.copyCapture = capture;
+    try {
+      const writing = navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+      requestBlur();
+      await writing;
+      $("captureStatus").textContent = "Image copied.";
+    } catch (error) {
+      if (state.copyCapture === capture) state.copyCapture = null;
+      capture.reject(error);
+      $("captureStatus").textContent = "Could not copy image. Allow clipboard access or use Save PNG.";
+    } finally {
+      state.copyBusy = false;
+      updateVaryingControls();
+    }
+  };
   $("copyView").onclick = () => {
     navigator.clipboard.writeText(JSON.stringify(viewState(), null, 1));
     $("copyView").textContent = "Copied";
@@ -968,6 +1015,7 @@ async function main() {
   const repo = import.meta.env.VITE_REPO_URL;
   if (repo) for (const a of document.querySelectorAll("a[data-readme]")) a.href = repo + a.dataset.readme;
   wire();
+  updateVaryingControls();
   showShader();
   describeRanges(readProblem());
   initBlur();

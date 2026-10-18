@@ -5,6 +5,7 @@ import { tapTables } from "../src/blur.js";
 import { continuousKernel, integratedKernel, kernelProfile } from "../src/continuous-kernel.js";
 import { radiusTables } from "../src/radius-tables.js";
 import { FineTuner } from "../src/finetune.js";
+import { testViewControls } from './view-controls.js';
 import {
   bounds, defaultProblem, maxError, multiplicities, nonnegativePresetParams, parseParams, presetParams, profile, sampleGrid,
   separableChannels,
@@ -20,6 +21,9 @@ function check(name, value, tolerance) {
 }
 
 const problemFor = (multiplicity) => ({ ...defaultProblem(), components: multiplicity.length, multiplicity });
+
+testViewControls();
+console.log('PASS view-dependent control availability and diagnostic selection');
 
 {
   let dcError = 0, channelError = 0, floatChannelError = 0, quadratureError = 0, integratedError = 0, continuity = 0;

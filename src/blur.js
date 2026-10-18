@@ -414,8 +414,8 @@ fn levels(@builtin(global_invocation_id) id: vec3u) {
 
 // Layers prepass, one thread per tile: the depth split from the depth edges of the surrounding
 // 5 x 5 tiles. The support of a split position is the number of edge pairs that it separates; a
-// split is made only where it reaches MIN_SUPPORT, so a connected surface, however steep, is never
-// split. It goes in the middle of the well-supported range (at least half the peak support), and
+// split is made only where it reaches MIN_SUPPORT. This depth-difference heuristic can also split
+// steep connected surfaces or noisy depth. It uses the range with at least half the peak support;
 // the soft step between the layers is as wide as that range (SOFT to MAX_SOFT): a silhouette jumps
 // across it, while a surface that continues across the split, such as a body meeting the ground,
 // fades smoothly from one layer to the other. Without a split, it is at -infinity (see

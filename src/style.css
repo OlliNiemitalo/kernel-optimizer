@@ -193,7 +193,7 @@ button {
   cursor: pointer;
 }
 
-button:hover {
+button:hover:not(:disabled) {
   border-color: var(--accent);
 }
 
@@ -203,11 +203,15 @@ button.primary {
 
 button:disabled {
   opacity: 0.5;
-  cursor: default;
+  cursor: not-allowed;
+}
+
+input:disabled, select:disabled {
+  cursor: not-allowed;
 }
 
 fieldset:disabled,
-fieldset:not(:disabled) label:has(:disabled) {
+fieldset:not(:disabled) label:has(input:disabled, select:disabled, button:disabled) {
   opacity: 0.5;
 }
 

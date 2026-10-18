@@ -48,7 +48,7 @@
                 <button id="copyShader">Copy</button>
                 <button id="downloadShader">Download</button>
               </div>
-              <p class="note">The compute shader follows the intermediate storage setting. Its header comment describes the buffers, the tap tables (computed from the separable channels under "Current kernel"), and the dispatch order.</p>
+              <p class="note">The compute shader follows the intermediate storage and radius-interpolation settings. Its header describes the buffers, tap tables built from the separable channels under "Current kernel", and dispatch order.</p>
               <textarea id="shaderCode" rows="24" readonly spellcheck="false"></textarea>
             </details>
           </div>
@@ -62,7 +62,7 @@
               <div class="row">
                 <button id="videoButton" class="grow" title="Play the selected RGB-D video">Video</button>
                 <button id="worldButton" class="grow">3D world</button>
-                <button id="shapesButton" class="grow" title="Three tetrahedra in a row against a black, starry background at infinity. Drag the picture to turn the view; scroll the wheel over it to scale the scene (all coordinates, so only the blur changes).">Tetras</button>
+                <button id="shapesButton" class="grow" title="Three tetrahedra against a starry background. Drag to turn the view; scroll to scale the tetrahedra and their spacing about the middle one while the camera stays fixed.">Tetras</button>
                 <button id="sceneButton" class="grow" title="A 2-D HDR test image without depth">2D test</button>
               </div>
               <label class="slider" title="Tetras only: size of the tetrahedra and their spacing, scaled about the middle one; the camera stays. The mouse wheel over the picture does the same.">Scale <input id="shapesScale" type="range" min="-4" max="3" step="0.01" value="0" disabled /> <output id="shapesScaleOut">1.00×</output></label>
@@ -100,7 +100,16 @@
               <legend>Varying blur</legend>
               <label class="check" title="Blend adjacent radius tables for continuous radius changes. Off (default): use the nearest table for faster rendering."><input id="radiusInterpolation" type="checkbox" /> Interpolate blur radii</label>
               <label class="check" title="Depth of field only: blur near and far objects as two separate layers, the near one composited over the far one, so a blurry foreground spreads over what is behind it. The depth split is chosen locally, per 16-pixel tile, so the same layers serve different depths in different places."><input id="layers" type="checkbox" /> Layers (experimental)</label>
-              <label title="Debug views of the depth layers">Layer view
+              <label class="check" title="Approximate the vertical radius from reaching row sources, weighted by luminance and disc overlap. Helps bright highlights retain their shape when radii mix horizontally; not exact variable-radius convolution. Off: use the source pixel's own radius. Disabled for tilt-shift because each row already has a single radius."><input id="sizeBlur" type="checkbox" checked /> Blur the blur size</label>
+              <label class="slider" title="Highlight priority for vertical-radius blending, not brightness or kernel normalization. Weight is (linear luminance + 0.01) raised to this exponent: 0 ignores luminance; 1 is the default; larger values favor highlights more. Layer membership and disc overlap still apply.">Brightness weight <input id="sizeBrightness" type="range" min="0" max="3" step="0.1" value="1" /> <output id="sizeBrightnessOut">1.0</output></label>
+              <label class="check" title="Depth of field only: on either side of focus, a destination hides sufficiently farther sources beyond its own kernel support. A destination absent from the current layer does not occlude it; layer compositing handles that visibility."><input id="occlusion" type="checkbox" checked /> Occlusion</label>
+              <label class="slider" title="Allowed signed blur-level separation behind a destination before occlusion. Six levels equal one octave of radius on the same side of focus; this is not a metric depth distance.">Threshold <input id="occlusionLevels" type="range" min="1" max="24" step="1" value="6" /> <output id="occlusionOut">1.00 oct</output></label>
+              <p class="note"><a data-readme="#spatially-varying-radius" href="https://github.com/OlliNiemitalo/kernel-optimizer#spatially-varying-radius">How the varying blur works</a></p>
+            </fieldset>
+
+            <fieldset>
+              <legend>Display</legend>
+              <label title="Diagnostic views: near/far views require layers; the kernel weight sum requires one layer. Unavailable options are disabled.">Layer view
                 <select id="showLayers" class="wide">
                   <option value="0">Composite</option>
                   <option value="1">Near layer in red</option>
@@ -110,15 +119,6 @@
                   <option value="4">1 layer: kernel weight sum (half scale)</option>
                 </select>
               </label>
-              <label class="check" title="The vertical pass can use one kernel per pixel. On: the average blur level of the row sources reaching the pixel, weighted by brightness and by how much of their disc falls in the column, so highlights keep round discs. Off: the pixel's own level, which cuts the discs of blurry highlights next to sharper pixels."><input id="sizeBlur" type="checkbox" checked /> Blur the blur size</label>
-              <label class="slider" title="Exponent of the brightness weight: 0 = all sources count equally, 1 = in proportion to brightness, 2 = bright highlights dominate">Brightness weight <input id="sizeBrightness" type="range" min="0" max="3" step="0.1" value="1" /> <output id="sizeBrightnessOut">1.0</output></label>
-              <label class="check" title="Depth of field only: an in-focus or background pixel hides sources whose blur is much larger behind it, beyond its own blur radius, so background highlights do not bleed over sharp foreground edges"><input id="occlusion" type="checkbox" checked /> Occlusion</label>
-              <label class="slider" title="Hide sources whose blur is larger than the pixel's by more than this many octaves (doublings of the radius)">Threshold <input id="occlusionLevels" type="range" min="1" max="24" step="1" value="6" /> <output id="occlusionOut">1.00 oct</output></label>
-              <p class="note"><a data-readme="#spatially-varying-radius" href="https://github.com/OlliNiemitalo/kernel-optimizer#spatially-varying-radius">How the varying blur works</a></p>
-            </fieldset>
-
-            <fieldset>
-              <legend>Display</legend>
               <label class="slider">Exposure <input id="exposure" type="range" min="-4" max="4" step="0.1" value="0" /> <output id="exposureOut">1.0×</output></label>
               <label>Tone map
                 <select id="tonemap"><option value="1">Reinhard</option><option value="0">Clip</option></select>
@@ -137,6 +137,10 @@
               <legend>Capture and bug reports</legend>
               <div class="row">
                 <button id="saveFrame" title="Save the displayed frame as PNG">Save PNG</button>
+                <button id="copyImage" title="Copy the displayed frame as a PNG image">Copy image</button>
+              </div>
+              <p id="captureStatus" class="note" role="status" aria-live="polite"></p>
+              <div class="row">
                 <button id="copyView" title="Copy the scene time, blur settings, kernel and GPU as JSON, to reproduce this view">Copy view state</button>
               </div>
               <div class="row">
