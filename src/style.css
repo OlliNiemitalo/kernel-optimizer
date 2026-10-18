@@ -270,6 +270,71 @@ textarea {
   margin-top: 10px;
 }
 
+.player {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.player button {
+  padding: 4px 8px;
+  min-width: 2.2em;
+  line-height: 1.2;
+}
+
+.player button.play {
+  min-width: 3em;
+}
+
+.player #seek {
+  flex: 1;
+  min-width: 120px;
+}
+
+.player label {
+  margin: 0;
+  gap: 4px;
+}
+
+.player #sceneTime {
+  width: 76px;
+}
+
+.player #durationOut {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.player select {
+  width: auto;
+}
+
+.player label:has(input:disabled, select:disabled),
+.player input:disabled,
+.player select:disabled {
+  opacity: 0.5;
+}
+
+.viewport:fullscreen {
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  box-sizing: border-box;
+}
+
+.viewport:fullscreen > :not(#blurCanvas, #player) {
+  display: none;
+}
+
+.viewport:fullscreen #player {
+  width: 100%;
+}
+
 /* ---- plots ---- */
 
 .plot-controls {

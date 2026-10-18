@@ -418,6 +418,10 @@ const animating = () => ["world", "video"].includes(state.source) && state.playi
 
 function showSceneTime() {
   if (document.activeElement !== $("sceneTime")) $("sceneTime").value = state.sceneTime.toFixed(4);
+  const duration = state.source === "video" ? state.video.element.duration : NaN;
+  $("durationOut").textContent = Number.isFinite(duration) ? `/ ${duration.toFixed(2)} s` : "s";
+  if (Number.isFinite(duration)) $("seek").max = duration;
+  if (!state.seeking) $("seek").value = Number.isFinite(duration) ? state.sceneTime : 0;
 }
 
 // Video time is the video element's; the 3D world's advances with the wall clock while playing.
@@ -433,7 +437,9 @@ function seekScene(time) {
 
 function setPlaying(playing) {
   state.playing = playing;
-  $("playPause").textContent = playing ? "Pause" : "Play";
+  $("playPause").textContent = playing ? "⏸" : "▶";
+  $("playPause").title = playing ? "Pause" : "Play";
+  $("playPause").setAttribute("aria-label", $("playPause").title);
   if (state.source === "video") {
     for (const element of [state.video.element, state.video.depth]) {
       if (!element) continue;
@@ -451,6 +457,29 @@ function stepScene(frames) {
   const offset = state.source === "video" ? 0.5 : 0;
   const frame = state.source === "video" ? 1 / state.video.fps : FRAME;
   seekScene((Math.round(state.sceneTime / frame - offset + frames) + offset) * frame);
+}
+
+function applyVideoPlayback() {
+  for (const element of [state.video?.element, state.video?.depth]) {
+    if (!element) continue;
+    element.playbackRate = num("playbackRate");
+    element.loop = $("loop").checked;
+  }
+}
+
+// Full screen scales the picture up to fit the screen above the player bar.
+function fitFullscreen() {
+  const canvas = $("blurCanvas");
+  if (document.fullscreenElement !== $("viewport")) {
+    canvas.style.width = canvas.style.height = "";
+    $("fullscreen").title = "Full screen";
+  } else {
+    const scale = Math.min((innerWidth - 24) / canvas.width, (innerHeight - 36 - $("player").offsetHeight) / canvas.height);
+    canvas.style.width = `${canvas.width * scale}px`;
+    canvas.style.height = `${canvas.height * scale}px`;
+    $("fullscreen").title = "Exit full screen";
+  }
+  $("fullscreen").setAttribute("aria-label", $("fullscreen").title);
 }
 
 function setFocusSlider(value) {
@@ -583,7 +612,7 @@ function download(url, name) {
 
 const VIEW_CONTROLS = [
   "blurOn", "radius", "blurMode", "focus", "layers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels",
-  "exposure", "tonemap", "precision", "transition", "radiusInterpolation", "showLayers",
+  "exposure", "tonemap", "precision", "transition", "radiusInterpolation", "showLayers", "playbackRate", "loop",
 ];
 
 // Everything needed to re-render the displayed frame, plus context for bug reports.
@@ -690,6 +719,7 @@ async function renderBlur() {
       else state.blur.setRadiusMap(mode === "tiltShift" ? tiltShiftRadiusMap(width, height, radius) : null);
       showShapesScale();
       updateVaryingControls();
+      fitFullscreen();
       blurKernelDirty = false;
     }
     const now = performance.now();
@@ -697,7 +727,7 @@ async function renderBlur() {
       syncDepthVideo();
       state.sceneTime = state.video.element.currentTime;
     }
-    else if (animating() && lastBlurTime) state.sceneTime += Math.min(0.1, (now - lastBlurTime) / 1000);
+    else if (animating() && lastBlurTime) state.sceneTime += Math.min(0.1, (now - lastBlurTime) / 1000) * num("playbackRate");
     showSceneTime();
     const saveCapture = state.captureNext;
     state.captureNext = false;
@@ -798,6 +828,9 @@ async function loadVideo(url) {
     element.onerror = () => reject(new Error(`Could not load the video ${url}.`));
   });
   element.addEventListener("seeked", () => requestBlur());
+  element.addEventListener("ended", () => {
+    if (state.video?.element === element) setPlaying(false);
+  });
   return element;
 }
 
@@ -815,6 +848,7 @@ async function useVideo(sample) {
   const source = new VideoSource(state.blur.device, element, depth);
   source.boost = num("boost");
   state.video = { element, depth, source, name: sample.label, fps: sample.fps ?? 30 };
+  applyVideoPlayback();
   $("videoCredit").innerHTML = sample.credit ?? "";
   $("videoCredit").hidden = !sample.credit;
   state.blur.setAnimated(source, source.width, source.height);
@@ -1067,6 +1101,17 @@ function wire() {
   $("videoButton").onclick = loadSample;
   $("videoSample").addEventListener("change", loadSample);
   $("playPause").onclick = () => setPlaying(!state.playing);
+  $("toStart").onclick = () => seekScene(0);
+  $("seek").addEventListener("pointerdown", () => (state.seeking = true));
+  $("seek").addEventListener("pointerup", () => (state.seeking = false));
+  $("seek").addEventListener("change", () => (state.seeking = false));
+  $("seek").addEventListener("input", () => seekScene(num("seek")));
+  $("playbackRate").addEventListener("input", applyVideoPlayback);
+  $("loop").addEventListener("input", applyVideoPlayback);
+  $("fullscreen").onclick = () =>
+    document.fullscreenElement ? document.exitFullscreen() : $("viewport").requestFullscreen().catch(() => {});
+  document.addEventListener("fullscreenchange", fitFullscreen);
+  addEventListener("resize", fitFullscreen);
   $("stepBack").onclick = () => stepScene(-1);
   $("stepForward").onclick = () => stepScene(1);
   $("sceneTime").addEventListener("change", () => seekScene(num("sceneTime") || 0));

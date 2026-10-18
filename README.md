@@ -44,8 +44,10 @@ URL options: `?calibrate` enables jax-js's GPU microbenchmark at startup. By def
 because it allocates about 128 MB and can stall the page for several seconds. It is not required
 for the optimizer.
 
-**Control availability.** Blur-specific controls are disabled when blur is off. Playback is
-available only for videos and the animated world; highlight boost only for images and videos.
+**Control availability.** Blur-specific controls are disabled when blur is off. The player bar under
+the picture (go to start, previous frame, play/pause, next frame, time, speed) is available only for
+videos and the animated world; the seek bar, duration and loop only for videos, and full screen for
+every scene. Highlight boost is available only for images and videos.
 Focus, layers, blur-size blending and occlusion require depth mode with a depth source (world,
 video or Tetras). Brightness weight additionally requires blur-size blending, and the occlusion
 threshold requires occlusion. Radius interpolation is available only for varying blur.

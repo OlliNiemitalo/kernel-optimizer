@@ -11,6 +11,8 @@ export function viewControls({ ready, source, blur, mode, layers, sizeBlur, occl
   const view = filtering && layerViews.includes(String(showLayers)) ? String(showLayers) : '0';
   const depthView = view === '6';
   const playback = ready && ['world', 'video'].includes(source);
+  // Only videos have a duration and an end.
+  const video = ready && source === 'video';
   return {
     depthAvailable,
     layerViews,
@@ -26,6 +28,7 @@ export function viewControls({ ready, source, blur, mode, layers, sizeBlur, occl
       shapesScale: !ready || source !== 'shapes',
       boost: !ready || !['video', 'image'].includes(source) || depthView,
       playPause: !playback, stepBack: !playback, stepForward: !playback, sceneTime: !playback,
+      toStart: !playback, playbackRate: !playback, seek: !video, loop: !video, fullscreen: !ready,
       precision: !filtering || depthView, follow: !filtering || depthView,
       exposure: !ready || depthView, tonemap: !ready || depthView, saveFrame: !ready, copyView: !ready,
     },

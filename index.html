@@ -38,8 +38,21 @@
       <section class="panel" aria-labelledby="blurTitle">
         <h2 id="blurTitle" class="panel-title">Blur demo <span class="subtitle">WebGPU, using the current kernel</span></h2>
         <div class="demo">
-          <div class="viewport">
+          <div id="viewport" class="viewport">
             <canvas id="blurCanvas"></canvas>
+            <div id="player" class="player" role="group" aria-label="Playback">
+              <button id="toStart" title="Go to the start" aria-label="Go to the start">⏮</button>
+              <button id="stepBack" title="Previous frame" aria-label="Previous frame">❮</button>
+              <button id="playPause" class="play" title="Pause" aria-label="Pause">⏸</button>
+              <button id="stepForward" title="Next frame" aria-label="Next frame">❯</button>
+              <input id="seek" type="range" min="0" max="1" step="any" value="0" aria-label="Seek" title="Seek (videos)" />
+              <label class="time" title="Scene time in seconds"><input id="sceneTime" type="number" min="0" step="0.0333333" value="0" aria-label="Time (s)" /><span id="durationOut">s</span></label>
+              <select id="playbackRate" aria-label="Playback speed" title="Playback speed">
+                <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+              </select>
+              <label class="check" title="Restart the video when it ends"><input id="loop" type="checkbox" checked /> Loop</label>
+              <button id="fullscreen" title="Full screen" aria-label="Full screen">⛶</button>
+            </div>
             <p id="blurStats" class="status small"></p>
             <p id="videoCredit" class="note" hidden></p>
             <details id="shaderPanel">
@@ -71,16 +84,6 @@
                 <input id="imageFile" type="file" accept="image/*,video/*" />
               </label>
               <label title="Lifts near-white pixels of images and videos into HDR, so highlights bloom into discs">Highlight boost <input id="boost" type="number" min="0" max="100" step="1" value="8" /></label>
-            </fieldset>
-
-            <fieldset>
-              <legend>Playback</legend>
-              <div class="row playback" aria-label="Animation playback">
-                <button id="stepBack" title="Previous frame">⏮</button>
-                <button id="playPause" class="grow" title="Play or pause the animation">Pause</button>
-                <button id="stepForward" title="Next frame">⏭</button>
-              </div>
-              <label>Time (s) <input id="sceneTime" type="number" min="0" step="0.0333333" value="0" /></label>
             </fieldset>
 
             <fieldset>
