@@ -16,7 +16,8 @@
 //
 // Spatially varying radius: scatter-as-gather with continuous source radii. Each channel blends
 // adjacent precomputed radius-node taps at integer offsets (an even, scale-indexed table).
-// Mixed DC weights are interpolated then inverted; zero radius is the exact identity. Float maps retain
+// Pixel integrals preserve complex channel sums, so no mixed DC correction is needed. Zero radius
+// is the exact identity. Float maps retain
 // the vertical radius and layered smoothing values. Byte levels remain only for depth decisions.
 // Pixels gather over a conservative per-tile reach. The vertical radius averages the continuous
 // log-radius of reaching sources, weighted by brightness and disc coverage. This is still an
@@ -187,15 +188,6 @@ fn tableCoordinate(key: f32) -> vec2f {
   q = min(q, kern[HALVES + 1u].y - 1.0);
   ${interpolate ? `let i = min(floor(q), kern[HALVES + 1u].y - 2.0);
   return vec2f(i, q - i);` : `return vec2f(floor(q + 0.5), 0.0);`}
-}
-
-fn radiusFixAt(a: vec2f, b: vec2f, fade: f32) -> f32 {
-  let n = u32(kern[HALVES + 1u].y);
-  let i = u32(kern[HALVES + 2u].y) + u32(a.x) * n + u32(b.x);
-  ${interpolate ? `let f = mix(mix(kern[i].x, kern[i + n].x, a.y), mix(kern[i + 1u].x, kern[i + n + 1u].x, a.y), b.y);
-  // Fade out the already-small correction before the fast path, not a threshold jump.
-  return mix(1.0 / f, 1.0, fade);` : `// Nearest nodes need no runtime reciprocal or fade arithmetic.
-  return kern[i].y;`}
 }
 
 fn radiusBase(q: vec2f, dir: u32) -> u32 {
@@ -919,9 +911,8 @@ fn verticalLevels(@builtin(global_invocation_id) id: vec3u) {
   atomicMax(&tiles[n + tileOf(id.x * 4u, id.y)], u32(kmax));
 }
 
-// Two outputs for short nearest kernels, otherwise four, balance shared reads and register pressure.
-// A source reaches output j through its continuous-radius tap at u - (x0 + j). A separate loop
-// skips the small-radius correction once it has faded completely to 1 for every output.
+// Pixel-integrated channel sums are constant at every radius. No mixed-radius correction,
+// vertical-node lookup, or small-radius branch is needed in the horizontal convolution.
 @compute @workgroup_size(64, 1)
 fn horizontalVarying(@builtin(global_invocation_id) id: vec3u) {
   let x0 = i32(id.x) * ${horizontalOutputs};
@@ -934,17 +925,15 @@ fn horizontalVarying(@builtin(global_invocation_id) id: vec3u) {
     return;
   }
   let r = i32(reached) - 1;
-  ${eachV((j) => `let px${j} = u32(min(x0 + ${j}, last)); let d${j} = signedLevel(sourceLevelByte(px${j}, id.y)); let k${j} = radiusHalf(sourceRadius(px${j}, id.y)); let o${j} = occlusionLimit(d${j}, px${j}, id.y); let v${j} = loadRadius(3u, px${j}, id.y); let vn${j} = cachedCoordinate(v${j}); let fade${j} = smoothstep(kern[HALVES - 1u].x, kern[HALVES - 1u].y, v${j}); var re${j} = vec4f(0.0); var im${j} = vec4f(0.0);`)}
-  ${[false, true].map(fix => `${fix ? "else" : `if (${HJ.map(j => `v${j} >= kern[HALVES - 1u].y`).join(" && ")})`} {
+  ${eachV((j) => `let px${j} = u32(min(x0 + ${j}, last)); let d${j} = signedLevel(sourceLevelByte(px${j}, id.y)); let k${j} = radiusHalf(sourceRadius(px${j}, id.y)); let o${j} = occlusionLimit(d${j}, px${j}, id.y); var re${j} = vec4f(0.0); var im${j} = vec4f(0.0);`)}
   for (var u = x0 - r; u < x0 + ${horizontalOutputs} + r; u++) {
     let x = u32(clamp(u, 0, last));
     let ls = signedLevel(sourceLevelByte(x, id.y));
     let sn = cachedCoordinate(loadRadius(1u, x, id.y));
     let base = radiusBase(sn, 0u);
     let p = vec4f(src[row + x].rgb, 1.0) * sourceWeight(x, id.y);
-    ${eachV((j) => `{ let h = select(radiusTap(base, sn.y, u - x0 - ${j}), vec2f(0.0), hidden(ls, o${j}, u - x0 - ${j}, k${j}))${fix ? ` * radiusFixAt(sn, vn${j}, fade${j})` : ""}; re${j} += p * h.x; im${j} += p * h.y; }`)}
-  }}
-  `).join("")}
+    ${eachV((j) => `{ let h = select(radiusTap(base, sn.y, u - x0 - ${j}), vec2f(0.0), hidden(ls, o${j}, u - x0 - ${j}, k${j})); re${j} += p * h.x; im${j} += p * h.y; }`)}
+  }
   ${eachV((j) => `if (x0 + ${j} <= last) { storeMid(row + u32(x0 + ${j}), re${j}, im${j}); }`)}
 }
 
@@ -1087,21 +1076,20 @@ ${displayShader}`;
 // kern: vec2f. Uniform path retains tapTables(): ${HALVES} header entries, one cross weight,
 // then [direction][channel][stride] taps with PAD zeros and center at PAD + halfTaps.
 // Varying path (built by buildContinuousTable and radiusTables):
-//   entry ${HALVES - 1} = correction fade start/end keys (skip correction at/above end).
+//   entry ${HALVES - 1} = unused (zero).
 //   entry ${HALVES} = unused, normalized reference support
 //   entry ${HALVES + 1} = even tap stride, radius node count N
-//   entry ${HALVES + 2} = node support offset, mixed DC matrix offset
+//   entry ${HALVES + 2} = node support offset, unused
 //   entry ${HALVES + 3} = unused, tap offset (all offsets in vec2f entries).
-// Supports: N entries in .x. Mixed DC: N*N vec2f entries, row = source node, column = vertical
-// node. .x holds DC; .y holds its pre-faded reciprocal for nearest sampling. Interpolated sampling
-// bilinearly interpolates DC then takes its reciprocal, NOT interpolation of reciprocals.
+// Supports: N entries in .x. No mixed DC matrix: every node has the same per-channel complex sums.
 // Key = r*${RADIUS_LINEAR_DENSITY} below ${RADIUS_LINEAR_LIMIT}px, ${RADIUS_LINEAR_LIMIT * RADIUS_LINEAR_DENSITY}+${RADIUS_LEVELS_PER_OCTAVE}*log2(r/${RADIUS_LINEAR_LIMIT}) above.
-// Nearest mode rounds this key, fetches one node and its DC correction, and uses that node's support.
+// Nearest mode rounds this key, fetches one node, and uses that node's support.
 // The application specializes non-layered shaders by substituting 0u for P.layered. This export
 // retains the generic layered shader and four-output horizontal blocking; use its dispatch above.
 // Taps: [direction][channel][node][stride], complex vec2f, even (nonnegative offsets only),
-// normalized at each node and zero-padded. Gather support is the union of the adjacent nodes.
-// Node zero is identity; subpixel nodes blend it continuously with the radius-one profile.
+// integrated over [t-0.5,t+0.5] in pixel space, zero-padded. Gather support includes a half-pixel
+// footprint beyond the scaled reference support, and the union of adjacent nodes when blending.
+// Node zero is identity; all positive radii use pixel integrals, including subpixel radii.
 // Radius lookup mode: ${interpolate ? "interpolated adjacent nodes" : "nearest node (default)"}.
 ${computeShader(packed, interpolate)}`;
 }
@@ -1414,19 +1402,11 @@ export class BlurRenderer {
     if (key === this.continuousKey) { this.tablesDirty = false; return; }
     const c = radiusTables(channels, transition, maxRadius);
     const n = channels.length, L = Math.min(127, Math.max(2, Math.ceil(Math.log2(maxRadius) * LEVELS_PER_OCTAVE) + 2));
-    const norm = HALVES + 4, fix = norm + c.count;
-    const profile = fix + c.count * c.count;
+    const norm = HALVES + 4;
+    const profile = norm + c.count;
     const data = new Float32Array(2 * (profile + 2 * n * c.count * c.stride));
-    data.set([0, c.support, c.stride, c.count, norm, fix, 0, profile], 2 * HALVES);
-    data.set([c.fadeStart, c.fadeEnd], 2 * (HALVES - 1));
+    data.set([0, c.support, c.stride, c.count, norm, 0, 0, profile], 2 * HALVES);
     c.halves.forEach((half, i) => { data[2 * (norm + i)] = half; });
-    c.cross.forEach((row, i) => row.forEach((f, j) => {
-      const t = Math.max(0, Math.min(1, (j - c.fadeStart) / (c.fadeEnd - c.fadeStart)));
-      const fade = t * t * (3 - 2 * t);
-      // Preserve DC in x for interpolation; use the previously unused y for nearest lookup.
-      data[2 * (fix + i * c.count + j)] = f;
-      data[2 * (fix + i * c.count + j) + 1] = (1 - fade) / f + fade;
-    }));
     for (let dir = 0; dir < 2; dir++) for (let ch = 0; ch < n; ch++) for (let i = 0; i < c.count; i++) {
       data.set(c.tables[i][dir][ch], 2 * (profile + ((dir * n + ch) * c.count + i) * c.stride));
     }
@@ -1512,8 +1492,9 @@ export class BlurRenderer {
     new Uint32Array(v, 12, 4).set([tonemap, showSource ? 1 : 0, layered ? 1 : 0, showLayers]);
     device.queue.writeBuffer(this.view, 0, v);
 
-    // Short nearest kernels benefit from less register state; longer kernels need source reuse.
-    const horizontalOutputs = varying && !interpolate && this.K <= 32 ? 2 : HORIZONTAL_OUTPUTS;
+    // Without mixed-radius correction state, nearest lookup can share sources across eight
+    // outputs again. Interpolation retains four to limit register pressure.
+    const horizontalOutputs = varying && !interpolate ? ROWS : HORIZONTAL_OUTPUTS;
     const p = this.computePipelines(packed, varying && interpolate, layered, horizontalOutputs);
     const [horizontal, vertical] = varying ? [p.horizontalVarying, p.verticalVarying] : [p.horizontal, p.vertical];
     const groups = { h: [Math.ceil(Math.ceil(width / (varying ? horizontalOutputs : ROWS)) / 64), height], v: [Math.ceil(width / 64), Math.ceil(height / ROWS)] };

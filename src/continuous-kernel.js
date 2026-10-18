@@ -59,6 +59,33 @@ export function kernelProfile(channels, transition) {
   return { profiles, identity, density, stride, support, rawTap, tapSums };
 }
 
+// Exact pixel integrals of the piecewise-linear reference profiles. The signed primitive
+// saturates outside the compact support, so adjacent pixel intervals telescope to a fixed
+// complex channel sum for every radius. No division by individual channel sums is needed.
+export function integratedKernel(channels, transition) {
+  const profile = kernelProfile(channels, transition);
+  const { profiles, identity, density, support } = profile;
+  const primitives = profiles.map(dir => dir.map(p => {
+    const prefix = new Float64Array(p.length);
+    const last = p.length / 2 - 1;
+    for (let i = 1; i <= last; i++) for (let k = 0; k < 2; k++) {
+      prefix[2 * i + k] = prefix[2 * (i - 1) + k] + (p[2 * (i - 1) + k] + p[2 * i + k]) / 2;
+    }
+    return (x, k) => {
+      const q = Math.min(Math.abs(x), last), i = Math.min(Math.floor(q), last - 1), f = q - i;
+      const a = p[2 * i + k], b = p[2 * (i + 1) + k];
+      return Math.sign(x) * (prefix[2 * i + k] + f * (a + 0.5 * f * (b - a)));
+    };
+  }));
+  function tap(r, dir, ch, t) {
+    if (r === 0) return t === 0 ? [...identity[dir][ch]] : [0, 0];
+    const integral = primitives[dir][ch];
+    const lo = (t - 0.5) * density / r, hi = (t + 0.5) * density / r;
+    return [0, 1].map(k => integral(hi, k) - integral(lo, k));
+  }
+  return { tap, identity, support };
+}
+
 // High-resolution reference retained for quality comparisons; the renderer uses radius tables.
 export function continuousKernel(channels, transition, maxRadius = 256) {
   const { profiles, identity, density, stride, support, rawTap, tapSums } = kernelProfile(channels, transition);

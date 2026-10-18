@@ -5,6 +5,23 @@ export async function continuousGPU(renderer, check, read) {
   for (const interpolate of [true, false]) {
     await samplerGPU(renderer, (name, ...args) => check(`${interpolate ? 'interpolated' : 'nearest (default)'}: ${name}`, ...args), read, interpolate);
   }
+  // Exercise high-cancellation and polynomial channels, not just the three-channel preset.
+  const width = 17, height = 19, source = new Float32Array(width * height * 4).fill(1);
+  const radii = new Float32Array(width * height).fill(9);
+  renderer.setImage(source, width, height);
+  renderer.setRadiusMap(radii);
+  for (const [name, params] of [['preset1', presetParams(1)], ['preset6', presetParams(6)], ['merged', [3, 0, 1, 0, 1, 0]]]) {
+    renderer.setKernel(params, 9, 0.2);
+    for (const interpolate of [false, true]) for (const precision of ['f32', 'f16']) for (const r of [0, 0.43, 1.2, 8.05]) {
+      radii.fill(r);
+      renderer.device.queue.writeBuffer(renderer.radiusBuffer, 0, radii);
+      await renderer.render({ interpolate, precision, sizeBlur: null, occlusion: 0 });
+      const data = await read(renderer.device, renderer.acc);
+      let error = 0;
+      for (let i = 3; i < data.length; i += 4) error = Math.max(error, Math.abs(data[i] - 1));
+      check(`integrated raw DC ${name}, r=${r}, ${precision}, interpolation=${interpolate}`, error, precision === 'f32' ? 1e-4 : 0.02);
+    }
+  }
 }
 
 async function samplerGPU(renderer, check, read, interpolate) {
@@ -21,7 +38,7 @@ async function samplerGPU(renderer, check, read, interpolate) {
   renderer.setKernel(params, 12, 0.2);
   const images = new Map();
   for (const precision of ['f32', 'f16']) for (const sizeBlur of [null, 1]) {
-    for (const r of [0, 0.2, 0.9438, 0.9439, 1, 2.123, 3.1, 3.11, 4, 8.05, reference.radii.at(-1)]) {
+    for (const r of [0, 0.001, 0.2, 0.40, 0.415, 0.43, 0.5, 0.51, 0.9438, 0.9439, 1, 2.123, 3.1, 3.11, 4, 8.05, reference.radii.at(-1)]) {
       radii.fill(r);
       device.queue.writeBuffer(renderer.radiusBuffer, 0, radii);
       await renderer.render({ precision, sizeBlur, occlusion: 0, ...sampling });
@@ -33,7 +50,7 @@ async function samplerGPU(renderer, check, read, interpolate) {
         Array.from({ length: 2 * half + 1 }, (_, i) => reference.tap(effective, dir, ch, i - half))));
       const sums = taps.map(dir => dir.map(t => t.reduce((s, z) => [s[0] + z[0], s[1] + z[1]], [0, 0])));
       const dc = sums[0].reduce((s, h, ch) => s + h[0] * sums[1][ch][0] - h[1] * sums[1][ch][1], 0);
-      const expectedCoverage = dc * reference.correction(effective, effective, true);
+      const expectedCoverage = dc;
       let error = 0, coverageError = 0, normalizationError = 0;
       for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
         const dx = x - center, dy = y - center;
@@ -51,8 +68,8 @@ async function samplerGPU(renderer, check, read, interpolate) {
       }
       const label = `r=${r}, ${precision}, size blur ${sizeBlur}`;
       check(`continuous impulse agrees with CPU interpolant (${label})`, error, precision === 'f32' ? 2e-5 : 0.003);
-      check(`continuous unit coverage (${label})`, coverageError, precision === 'f32' ? 0.005 : 0.008);
-      check(`raw coverage matches reciprocal-and-fade reference (${label})`, normalizationError, precision === 'f32' ? 2e-5 : 0.003);
+      check(`continuous unit coverage (${label})`, coverageError, precision === 'f32' ? 2e-5 : 0.003);
+      check(`raw coverage matches integrated channel sums (${label})`, normalizationError, precision === 'f32' ? 2e-5 : 0.003);
       if (precision === 'f32' && sizeBlur === null) images.set(r, data);
       // The vertical averaging path must retain fractional radii too, not just interpolate
       // horizontally while silently rounding back to the old ladder before the vertical pass.
@@ -92,7 +109,6 @@ async function samplerGPU(renderer, check, read, interpolate) {
         const h = reference.tap(hr, 0, ch, x - center), v = reference.tap(vr, 1, ch, y - center);
         expected += h[0] * v[0] - h[1] * v[1];
       }
-      expected *= reference.correction(hr, vr, true);
       error = Math.max(error, Math.abs(data[4 * (y * width + x)] - expected));
     }
     check(`mixed-radius ramp agrees with CPU (${precision})`, error, precision === 'f32' ? 2e-5 : 0.003);

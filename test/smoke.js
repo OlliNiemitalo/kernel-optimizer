@@ -2,7 +2,7 @@
 import { defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
 import { DifferentialEvolution } from "../src/de.js";
 import { tapTables } from "../src/blur.js";
-import { continuousKernel } from "../src/continuous-kernel.js";
+import { continuousKernel, integratedKernel, kernelProfile } from "../src/continuous-kernel.js";
 import { radiusTables } from "../src/radius-tables.js";
 import { FineTuner } from "../src/finetune.js";
 import {
@@ -14,19 +14,56 @@ const devices = await init();
 defaultDevice(devices.includes("wasm") ? "wasm" : "cpu");
 
 function check(name, value, tolerance) {
-  console.log(`${value <= tolerance ? "PASS" : "FAIL"} ${name}: ${value.toExponential(2)} (≤ ${tolerance})`);
-  if (value > tolerance) process.exitCode = 1;
+  const pass = Number.isFinite(value) && value <= tolerance;
+  console.log(`${pass ? "PASS" : "FAIL"} ${name}: ${value.toExponential(2)} (≤ ${tolerance})`);
+  if (!pass) process.exitCode = 1;
 }
 
 const problemFor = (multiplicity) => ({ ...defaultProblem(), components: multiplicity.length, multiplicity });
 
 {
-  let dcError = 0, fastError = 0, profileError = 0, integratedError = 0, continuity = 0;
-  for (const n of [1, 2, 3, 4, 5, 6]) {
-    const channels = separableChannels(presetParams(n));
+  let dcError = 0, channelError = 0, floatChannelError = 0, quadratureError = 0, integratedError = 0, continuity = 0;
+  const sets = [1, 2, 3, 4, 5, 6].map(presetParams);
+  sets.push([3, 0, 1, 0, 1, 0]); // merged polynomial channel: no division by a small channel sum
+  for (const params of sets) {
+    const channels = separableChannels(params);
     const tables = radiusTables(channels, 0.2, 128);
-    const reference = continuousKernel(channels, 0.2, 128);
-    const rs = [0, 0.17, 0.94387, 1, 1.02, 1.17, 1.8, 2.13, 3.7, 4, 5.3, 8.05, 15, 32, 69, 120];
+    const reference = integratedKernel(channels, 0.2);
+    const profile = kernelProfile(channels, 0.2);
+    const rs = [0, 0.001, 0.17, 0.41, 0.43, 0.51, 0.94387, 1, 1.02, 1.17, 1.8, 2.13, 3.7, 4, 5.3, 8.05, 15, 32, 69, 120];
+    // Sum every stored node independently. Interpolating vectors with these fixed sums must
+    // preserve them too. Also check the actual f32 upload precision, not only CPU doubles.
+    for (const node of tables.tables) for (const dir of [0, 1]) for (let ch = 0; ch < channels.length; ch++) {
+      const taps = node[dir][ch];
+      for (let k = 0; k < 2; k++) {
+        let sum = taps[k], floatSum = Math.fround(taps[k]);
+        for (let t = 1; t < tables.stride; t++) {
+          sum += 2 * taps[2 * t + k];
+          floatSum += 2 * Math.fround(taps[2 * t + k]);
+        }
+        channelError = Math.max(channelError, Math.abs(sum - reference.identity[dir][ch][k]));
+        floatChannelError = Math.max(floatChannelError, Math.abs(floatSum - reference.identity[dir][ch][k]));
+      }
+    }
+    // Independent cell integration: clip every linear segment against the pixel interval and
+    // sum trapezoids directly, without using the production cumulative primitive.
+    for (const r of rs.filter(r => r > 0)) for (const dir of [0, 1]) for (let ch = 0; ch < channels.length; ch++) {
+      const p = profile.profiles[dir][ch], last = p.length / 2 - 1;
+      for (const t of [0, 1, 2, Math.floor(r * profile.support)]) {
+        const actual = reference.tap(r, dir, ch, t);
+        for (let k = 0; k < 2; k++) {
+          let expected = 0;
+          const lo = (t - 0.5) * profile.density / r, hi = (t + 0.5) * profile.density / r;
+          for (let i = -last; i < last; i++) {
+            const a = Math.max(lo, i), b = Math.min(hi, i + 1);
+            if (b <= a) continue;
+            const u = p[2 * Math.abs(i) + k], v = p[2 * Math.abs(i + 1) + k];
+            expected += (b - a) * (u + (v - u) * ((a + b) / 2 - i));
+          }
+          quadratureError = Math.max(quadratureError, Math.abs(actual[k] - expected));
+        }
+      }
+    }
     const sums = rs.map(r => [0, 1].map(dir => channels.map((_, ch) => {
       const sum = [0, 0];
       for (let t = -tables.half; t <= tables.half; t++) {
@@ -37,35 +74,32 @@ const problemFor = (multiplicity) => ({ ...defaultProblem(), components: multipl
     })));
     for (let i = 0; i < rs.length; i++) for (let j = 0; j < rs.length; j++) {
       const w = sums[i][0].reduce((s, h, ch) => s + h[0] * sums[j][1][ch][0] - h[1] * sums[j][1][ch][1], 0);
-      dcError = Math.max(dcError, Math.abs(w * tables.correction(rs[i], rs[j]) - 1));
-      fastError = Math.max(fastError, Math.abs(w * tables.correction(rs[i], rs[j], true) - 1));
+      dcError = Math.max(dcError, Math.abs(w - 1));
     }
-    // Full 2-D equal-radius kernels, weighted by pixel area, compared with the dense profile.
-    for (const r of rs.filter(r => r >= 1)) {
+    // Radius interpolation error against direct pixel integration (not the old point samples).
+    for (const r of rs) {
       const half = tables.halves[tables.coordinate(r)[0] + 1];
       const tap = (model, dir) => channels.map((_, ch) => Array.from({ length: 2 * half + 1 }, (_, t) => model.tap(r, dir, ch, t - half)));
       const h = tap(tables, 0), v = tap(tables, 1), rh = tap(reference, 0), rv = tap(reference, 1);
       let l1 = 0;
       for (let x = 0; x <= 2 * half; x++) for (let y = 0; y <= 2 * half; y++) {
         const value = (a, b) => channels.reduce((s, _, ch) => s + a[ch][x][0] * b[ch][y][0] - a[ch][x][1] * b[ch][y][1], 0);
-        const a = value(h, v) * tables.correction(r, r);
-        const b = value(rh, rv) * reference.correction(r, r);
-        profileError = Math.max(profileError, Math.abs(a - b) * Math.max(1, r * r));
+        const a = value(h, v);
+        const b = value(rh, rv);
         l1 += Math.abs(a - b);
       }
       integratedError = Math.max(integratedError, l1);
     }
-    for (const r of tables.radii.slice(1)) for (let ch = 0; ch < n; ch++) {
+    for (const r of tables.radii.slice(1)) for (let ch = 0; ch < channels.length; ch++) {
       const a = tables.tap(r - 1e-7, 0, ch, 1), b = tables.tap(r + 1e-7, 0, ch, 1);
       continuity = Math.max(continuity, Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]));
     }
   }
-  check('radius-table exact mixed DC normalization', dcError, 1e-10);
-  check('radius-table fast-path mixed DC normalization', fastError, 0.0031);
-  // Near the sharp truncation endpoint the blend spreads the jump across the two node supports.
-  // Report that local error separately; L1 bounds the worst convolution error for |input| <= 1.
-  check('radius-table kernel error including truncated tail (scaled by radius squared)', profileError, 0.04);
-  check('radius-table integrated absolute kernel error versus dense profile', integratedError, 0.01);
+  check('radius-table mixed DC without correction', dcError, 1e-10);
+  check('every node preserves complex channel sums', channelError, 1e-11);
+  check('uploaded f32 taps preserve complex channel sums', floatChannelError, 2e-6);
+  check('pixel integrals versus independent segment quadrature', quadratureError, 1e-11);
+  check('radius interpolation integrated absolute kernel error', integratedError, 0.01);
   check('radius-table continuity at every node', continuity, 1e-5);
 }
 
