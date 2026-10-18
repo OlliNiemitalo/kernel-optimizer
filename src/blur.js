@@ -1550,6 +1550,8 @@ export class BlurRenderer {
     const encoder = device.createCommandEncoder();
     encoder.copyBufferToBuffer(this.source, y0 * width * 16, this.pickBuffer, 0, bytes);
     device.queue.submit([encoder.finish()]);
+    // A source whose scale can change (Shapes) wrote depths for the scale it was last encoded at.
+    const encodedScale = this.animated.encodedScale ?? 1;
     await this.pickBuffer.mapAsync(GPUMapMode.READ, 0, bytes);
     const data = new Float32Array(this.pickBuffer.getMappedRange(0, bytes).slice(0));
     this.pickBuffer.unmap();
@@ -1561,7 +1563,7 @@ export class BlurRenderer {
         if (best === null || inv > best) best = inv;
       }
     }
-    return best;
+    return best === null ? null : (best * encodedScale) / (this.animated.scale ?? 1);
   }
 }
 

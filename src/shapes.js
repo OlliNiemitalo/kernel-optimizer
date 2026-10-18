@@ -177,6 +177,7 @@ export class Shapes {
     new Float32Array(u, 8, 3).set([this.yaw, this.pitch, aperture]);
     new Uint32Array(u, 20, 1)[0] = coc ? 1 : 0;
     new Float32Array(u, 24, 3).set([invFocus, this.distance, this.scale]);
+    this.encodedScale = this.scale;
     this.device.queue.writeBuffer(this.uniform, 0, u);
     const bindGroup = this.device.createBindGroup({
       layout: this.layout,

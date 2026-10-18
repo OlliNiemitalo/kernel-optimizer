@@ -474,7 +474,12 @@ function wheelScale(e) {
   if (state.source !== "shapes") return;
   e.preventDefault();
   const factor = state.shapes.zoom(Math.exp(e.deltaY * 0.001));
-  setFocusSlider(Math.min(1, num("focus") / Math.sqrt(factor)));
+  // Slider values are sqrt(1 / distance); the hover preview's saved, target and current ones too.
+  const scaled = (v) => Math.min(1, v / Math.sqrt(factor));
+  hover.saved = scaled(hover.saved);
+  hover.target = scaled(hover.target);
+  hover.value = scaled(hover.value);
+  setFocusSlider(scaled(num("focus")));
 }
 
 async function clickFocus(e) {
