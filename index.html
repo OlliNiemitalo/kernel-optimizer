@@ -16,9 +16,10 @@
       <p>
         Disc kernels as sums of phased Gaussians <code>(cos(c r²)·r<sub>w</sub> + sin(c r²)·i<sub>w</sub>)·e<sup>−b r²</sup></code>
         and, optionally, merged pairs (repeated rates) with an extra r² term,
-        each separable into horizontal and vertical complex 1-D passes. Global search by differential evolution and
-        gradient fine-tuning on <a href="https://github.com/hamk-uas/jax-js-nonconsuming">jax-js-nonconsuming</a>;
-        the blur demo is plain WebGPU shaders. After
+        each separable into horizontal and vertical complex 1-D passes. Global search by differential evolution over
+        decays and frequencies, with exact minimax weights solved by Remez exchange on CPU workers (or over all parameters
+        on the GPU with <a href="https://github.com/hamk-uas/jax-js-nonconsuming">jax-js-nonconsuming</a>), then local
+        Remez refinement or gradient fine-tuning; the blur demo is plain WebGPU shaders. After
         <a href="https://yehar.com/blog/?p=1495">Olli Niemitalo: Circularly symmetric convolution and lens blur</a>.
       </p>
       <nav class="links" aria-label="Documentation">
@@ -155,7 +156,7 @@
 
       <!-- ============================== Optimizer ============================== -->
       <section class="panel" aria-labelledby="optTitle">
-        <h2 id="optTitle" class="panel-title">Kernel optimizer <span class="subtitle">fits the disc, on jax-js</span></h2>
+        <h2 id="optTitle" class="panel-title">Kernel optimizer <span class="subtitle">fits the disc</span></h2>
         <p id="status" class="status">Starting…</p>
         <div class="optimizer">
           <div class="sidebar controls">
@@ -205,7 +206,8 @@
                 </div>
                 <label class="check" title="Applies to both population buttons. For Population around current, unchecked means every member is perturbed; checked retains the exact current kernel as one member."><input id="seedWithCurrent" type="checkbox" /> Include current kernel in a new population</label>
               </fieldset>
-              <label>Population <input id="population" type="number" min="8" max="16384" step="8" value="512" /></label>
+              <label class="check" title="Search only decays and frequencies; each candidate's weights are the exact minimax optimum, solved by Remez exchange on CPU workers. Unchecked: search all parameters on the GPU."><input id="projected" type="checkbox" checked /> Solve weights exactly (CPU workers)</label>
+              <label>Population <input id="population" type="number" min="8" max="16384" step="8" value="32" data-auto="1" /></label>
               <label>Differential weight F <input id="F" type="number" min="0.05" max="2" step="0.01" value="0.76" /></label>
               <label>Crossover continuation CR <input id="CR" type="number" min="0" max="1" step="0.001" value="0.999" /></label>
               <label>Seed <input id="seed" type="number" min="0" step="1" value="1" /></label>

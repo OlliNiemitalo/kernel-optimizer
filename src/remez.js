@@ -75,39 +75,43 @@ const weighted = (e, wPlus, wMinus) => Math.abs(e) * (e > 0 ? wPlus : wMinus);
 
 // Rows chosen greedily by largest residual norm (row-pivoted Gram–Schmidt), plus the worst row
 // of their interpolant.
-function initialReference(rows, m, target, wPlus, wMinus) {
-  const n = rows.length;
-  const res = rows.map((r) => Float64Array.from(r));
+function initialReference(flat, n, m, target, wPlus, wMinus) {
+  const res = Float64Array.from(flat);
   const used = new Uint8Array(n);
   const ref = [];
+  const q = new Float64Array(m);
   for (let k = 0; k < m; k++) {
     let best = -1, bestNorm = 0;
     for (let j = 0; j < n; j++) {
       if (used[j]) continue;
       let s = 0;
-      for (let c = 0; c < m; c++) s += res[j][c] ** 2;
-      if (s > bestNorm) [best, bestNorm] = [j, s];
+      for (let c = 0, o = j * m; c < m; c++) s += res[o + c] * res[o + c];
+      if (s > bestNorm) {
+        best = j;
+        bestNorm = s;
+      }
     }
     if (best < 0) throw new Error("Chebyshev basis is rank deficient on the grid.");
     used[best] = 1;
     ref.push(best);
-    const q = res[best].map((x) => x / Math.sqrt(bestNorm));
+    for (let c = 0; c < m; c++) q[c] = res[best * m + c] / Math.sqrt(bestNorm);
     for (let j = 0; j < n; j++) {
       if (used[j]) continue;
+      const o = j * m;
       let d = 0;
-      for (let c = 0; c < m; c++) d += res[j][c] * q[c];
-      for (let c = 0; c < m; c++) res[j][c] -= d * q[c];
+      for (let c = 0; c < m; c++) d += res[o + c] * q[c];
+      for (let c = 0; c < m; c++) res[o + c] -= d * q[c];
     }
   }
   const A = new Float64Array(m * m);
-  ref.forEach((j, i) => A.set(rows[j], i * m));
+  ref.forEach((j, i) => A.set(flat.subarray(j * m, (j + 1) * m), i * m));
   const { Q, R } = qr(A, m, m);
   const z = solveLeast(Q, R, m, m, ref.map((j) => target[j]));
   let worst = -1, worstErr = -1;
   for (let j = 0; j < n; j++) {
     if (used[j]) continue;
     let k = 0;
-    for (let c = 0; c < m; c++) k += rows[j][c] * z[c];
+    for (let c = 0; c < m; c++) k += flat[j * m + c] * z[c];
     const a = weighted(target[j] - k, wPlus[j], wMinus[j]);
     if (a > worstErr) [worst, worstErr] = [j, a];
   }
@@ -126,10 +130,12 @@ export function chebyshev(rows, target, wPlus, wMinus, { reference = null, maxIt
   let fresh = false;
   const A = new Float64Array(p * m);
   const e = new Float64Array(n);
+  const flat = new Float64Array(n * m);
+  rows.forEach((row, j) => flat.set(row, j * m));
   let result = null;
   for (let it = 0; it < maxIterations; it++) {
     if (!ref) {
-      ref = initialReference(rows, m, target, wPlus, wMinus);
+      ref = initialReference(flat, n, m, target, wPlus, wMinus);
       fresh = true;
     }
     ref.forEach((j, i) => A.set(rows[j], i * m));
@@ -157,11 +163,14 @@ export function chebyshev(rows, target, wPlus, wMinus, { reference = null, maxIt
     let worst = 0, worstErr = -1;
     for (let j = 0; j < n; j++) {
       let k = 0;
-      const row = rows[j];
-      for (let c = 0; c < m; c++) k += row[c] * z[c];
-      e[j] = target[j] - k;
-      const a = weighted(e[j], wPlus[j], wMinus[j]);
-      if (a > worstErr) [worst, worstErr] = [j, a];
+      for (let c = 0, o = j * m; c < m; c++) k += flat[o + c] * z[c];
+      const ej = target[j] - k;
+      e[j] = ej;
+      const a = ej > 0 ? ej * wPlus[j] : -ej * wMinus[j];
+      if (a > worstErr) {
+        worst = j;
+        worstErr = a;
+      }
     }
     result = { z, delta, error: worstErr, reference: [...ref], iterations: it + 1, converged: false };
     if (worstErr <= delta * (1 + tolerance) + 1e-300 || ref.includes(worst)) {
@@ -193,7 +202,10 @@ export function chebyshev(rows, target, wPlus, wMinus, { reference = null, maxIt
 
 // Parameter index layout: linear weights (r, i and, for merged pairs, r₁, i₁) and rates (b, c).
 function layout(params) {
-  const mult = multiplicities(params);
+  return layoutFor(multiplicities(params));
+}
+
+function layoutFor(mult) {
   const linear = [];
   const rates = [];
   mult.forEach((mu, u) => {
@@ -254,14 +266,66 @@ function errorWeights(grid) {
 
 // Minimax-optimal linear weights (r, i, r₁, i₁) for the given decays and frequencies.
 export function optimalWeights(params, grid) {
-  const s = Float64Array.from(grid.x, (x) => x * x);
-  const { linear } = layout(params);
-  const { rows, scale } = scaledRows(columns(params, s, linear), s.length);
-  const { wPlus, wMinus } = errorWeights(grid);
-  const sol = chebyshev(rows, Float64Array.from(grid.target), wPlus, wMinus);
-  const out = Array.from(params);
-  linear.forEach((j, c) => (out[j] = sol.z[c] / scale[c]));
-  return { params: out, error: maxError(out, grid), level: sol.delta, exchanges: sol.iterations };
+  const sol = new WeightSolver(grid, multiplicities(params)).solve(params);
+  return { params: sol.params, error: sol.error, level: sol.level, exchanges: sol.exchanges };
+}
+
+// Reusable weight solver for one grid and component structure; a previous reference warm-starts it.
+export class WeightSolver {
+  constructor(grid, multiplicity) {
+    this.grid = grid;
+    this.s = Float64Array.from(grid.x, (x) => x * x);
+    this.target = Float64Array.from(grid.target);
+    Object.assign(this, errorWeights(grid));
+    this.multiplicity = multiplicity;
+    this.linear = layoutFor(multiplicity).linear;
+    const n = this.s.length, m = this.linear.length;
+    this.flat = new Float64Array(n * m);
+    this.rows = Array.from({ length: n }, (_, t) => this.flat.subarray(t * m, (t + 1) * m));
+    this.scale = new Float64Array(m);
+  }
+
+  solve(params, reference = null) {
+    const { s, flat, scale, linear } = this;
+    const n = s.length, m = linear.length;
+    // Basis columns, each scaled to unit maximum magnitude (same order as `linear`).
+    scale.fill(0);
+    let col = 0;
+    this.multiplicity.forEach((mu, u) => {
+      const b = params[u * PARAMS_PER_COMPONENT], c = params[u * PARAMS_PER_COMPONENT + 1];
+      for (let t = 0; t < n; t++) {
+        const st = s[t], E = Math.exp(-b * st);
+        const i = t * m + col;
+        flat[i] = Math.cos(c * st) * E;
+        flat[i + 1] = Math.sin(c * st) * E;
+        if (mu === 2) {
+          flat[i + 2] = st * flat[i];
+          flat[i + 3] = st * flat[i + 1];
+        }
+      }
+      col += mu === 2 ? 4 : 2;
+    });
+    for (let t = 0; t < n; t++) for (let k = 0; k < m; k++) scale[k] = Math.max(scale[k], Math.abs(flat[t * m + k]));
+    for (let k = 0; k < m; k++) scale[k] ||= 1;
+    for (let t = 0; t < n; t++) for (let k = 0; k < m; k++) flat[t * m + k] /= scale[k];
+    const sol = chebyshev(this.rows, this.target, this.wPlus, this.wMinus, { reference: reference ?? this.last });
+    this.last = sol.reference;
+    const out = Array.from(params);
+    linear.forEach((j, k) => (out[j] = sol.z[k] / scale[k]));
+    // Below 1 the pass band can't be negative, so the exchange's error equals maxError.
+    const error = sol.error < 1 ? sol.error : maxError(out, this.grid);
+    return { params: out, error, level: sol.delta, exchanges: sol.iterations, reference: sol.reference };
+  }
+}
+
+// A search candidate's re-solved weights, or infinite cost if its basis is singular.
+export function solveCandidate(solver, { params, reference }) {
+  try {
+    const sol = solver.solve(params, reference);
+    return { params: sol.params, cost: Number.isFinite(sol.error) ? sol.error : Infinity, reference: sol.reference };
+  } catch {
+    return { params, cost: Infinity, reference: null };
+  }
 }
 
 // Profile on the grid, summed in the same order as problem.js profile().

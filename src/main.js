@@ -53,6 +53,7 @@ const VIDEO_SAMPLES = [
     credit: TUM_CREDIT,
   }]);
 import { DifferentialEvolution } from "./de.js";
+import { ProjectedEvolution, workerSolvers } from "./projected-de.js";
 import { FineTuner } from "./finetune.js";
 import { remezSteps } from "./remez.js";
 import { drawConvergence, drawDisc, drawError, drawProfile, populationPreview } from "./plots.js";
@@ -214,8 +215,9 @@ function createDE({ centered = false, autoStart = false } = {}) {
   // always honor their checkbox instead.
   const candidate = (autoStart ? state.include : null) ?? ($("seedWithCurrent").checked ? state.current?.params : null);
   const seedWith = candidate?.length === D ? candidate : null;
+  let solvers = null;
   try {
-    const de = new DifferentialEvolution({
+    const options = {
       components: problem.components,
       grid: sampleGrid(problem),
       bounds: bounds(problem),
@@ -223,15 +225,19 @@ function createDE({ centered = false, autoStart = false } = {}) {
       F: num("F"),
       CR: num("CR"),
       seed: Math.round(num("seed")) >>> 0,
-      startingPoint: seedWith && Float32Array.from(seedWith),
       populationCenter: centered ? state.current?.params : null,
       includeCenter: $("seedWithCurrent").checked,
-    });
+    };
+    if ($("projected").checked) solvers = workerSolvers(Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1)));
+    const de = solvers
+      ? new ProjectedEvolution({ ...options, multiplicity: problem.multiplicity, startingPoint: seedWith, solvers })
+      : new DifferentialEvolution({ ...options, startingPoint: seedWith && Float32Array.from(seedWith) });
     state.de?.dispose();
     state.de = de;
     state.include = null;
     updateRunButton();
   } catch (e) {
+    solvers?.dispose();
     setStatus(`Could not create optimizer: ${e.message}`);
     return false;
   }
@@ -258,7 +264,7 @@ async function observe(startTime, generationsRun, { rescored = false } = {}) {
   const now = performance.now();
   const rate = generationsRun > 0 ? (generationsRun * de.P) / ((now - startTime) / 1000) : 0;
   setStatus(
-    `Optimizer on ${state.backend} · generation ${de.generation} · ` +
+    `Optimizer on ${de.solvers ? `CPU (${de.solvers.threads} workers)` : state.backend} · generation ${de.generation} · ` +
       (rate ? `${Math.round(rate).toLocaleString()} evaluations/s · ` : "") +
       `population best ±${snap.bestCost.toFixed(6)}, mean ${snap.meanCost.toFixed(5)}` +
       (rescored ? " · Same population re-scored; convergence history restarted for the new objective." : ""),
@@ -882,7 +888,7 @@ function wire() {
       } else drawAll();
     });
   }
-  for (const id of ["components", "multiplicity", "population", "F", "CR", "seed"]) {
+  for (const id of ["components", "multiplicity", "population", "F", "CR", "seed", "projected"]) {
     // The component count reacts while typing or stepping, not only when the field loses focus.
     $(id).addEventListener(id === "components" ? "input" : "change", () => {
       if (id === "components" && !(num("components") >= 1)) return;
@@ -927,6 +933,11 @@ function wire() {
   $("finetune").onclick = fineTune;
   $("remez").onclick = remezRefine;
   $("ftLr").addEventListener("input", () => delete $("ftLr").dataset.auto);
+  // Exact weights need far fewer, costlier members than the GPU search, unless the user chose a size.
+  $("population").addEventListener("input", () => delete $("population").dataset.auto);
+  $("projected").addEventListener("change", () => {
+    if ($("population").dataset.auto) $("population").value = $("projected").checked ? 32 : 512;
+  });
   $("copy").onclick = () => navigator.clipboard.writeText($("output").value);
   $("applyPasted").onclick = () => {
     const box = $("pasted");

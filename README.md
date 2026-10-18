@@ -4,9 +4,10 @@ Interactive optimizer and WebGPU reference implementation for **circularly symme
 built from complex Gaussians**: disc ("bokeh") blurs computed with a horizontal and a vertical 1-D
 pass, at a cost proportional to the blur radius rather than its area.
 
-- **Optimizer**: differential evolution (global search) and gradient fine-tuning, both running on
+- **Optimizer**: differential evolution (global search) with exact minimax weights solved by
+  Remez exchange on CPU workers, or over all parameters on the GPU; gradient fine-tuning on
   [jax-js-nonconsuming](https://github.com/hamk-uas/jax-js-nonconsuming) (WebGPU, with a WebAssembly
-  fallback), and a Remez exchange refinement (float64 on the CPU) that converges to a local minimax
+  fallback); and a Remez exchange refinement (float64 on the CPU) that converges to a local minimax
   optimum in a few iterations.
 - **Live visualizations**: radial cross-section with the evolving population, error curve,
   convergence, and the 2-D kernel.
@@ -484,7 +485,7 @@ subset of members and do not reshuffle when re-scored. The highlighted best memb
 under the new objective. Convergence history is cleared because
 costs under different objectives are not comparable. Frequency-band changes constrain future
 trial candidates without replacing existing members. Changes to component structure, population
-size, DE parameters or seed discard the population, so the button returns to Start.
+size, DE parameters, search mode or seed discard the population, so the button returns to Start.
 
 **Differential evolution** ([`src/de.js`](src/de.js)) is generation-synchronous, so that each
 generation is one jitted GPU call with no data read back:
@@ -507,6 +508,28 @@ Search heuristics, mostly taken from the article's solutions:
   the two slots it occupies.
 - Initial decay $b \in [0.3,\ 1 + N_\text{ch}]$.
 - Initial weights within $\pm 2 \cdot 2.5^{N_\text{ch} - 1}$.
+
+**Exact weights (variable projection, the default).** With **Solve weights exactly (CPU
+workers)** checked, differential evolution ([`src/projected-de.js`](src/projected-de.js)) searches
+only the decays and frequencies, $2N$ dimensions instead of $4N$ (or $6N$ with merged pairs). Each
+candidate's weights are the minimax optimum for its rates, solved by the exchange algorithm of
+the Remez refinement (below) on the DE grid, so its cost is
+$\delta(\theta) = \min_w \max_j W_j |t_j - K(x_j; \theta, w)|$. The weights are thereby always exactly
+balanced, and no search effort goes into the many large, cancelling weights. The same
+three steps above apply to the rate genes. A trial starts the exchange from its target's
+reference (the members' extremal points are similar), the first evaluation from the previous
+solve's, so a solve takes about 10–20 exchanges. Solves run in float64 in a pool of Web Workers
+([`src/weight-worker.js`](src/weight-worker.js)), one fewer than the logical cores (at most 8).
+A candidate whose basis is singular (coinciding rates) gets infinite cost. A re-scored population
+keeps its rates and re-solves its weights.
+
+This is far slower per candidate than the GPU search (roughly 1 ms in Node on the test laptop
+versus 4–10 µs), but each candidate is worth much more. From random 5-component populations,
+on the 200 + 200 grid, with 40,000 evaluations (3 seeds each): population 32 reached
+±0.00358–±0.00360, population 64 ±0.0037–±0.0039, population 128 ±0.0055–±0.0059. Hence the population defaults to 32 in this
+mode (512 for the GPU search) unless you set it. In the browser, 90 s from a random population
+reached ±0.0066 with exact weights, against ±1.7 for the GPU search (both in a background tab,
+which throttles both).
 
 **Gradient fine-tuning** ([`src/finetune.js`](src/finetune.js)) minimizes a smooth maximum of the
 absolute error $a_j = \sqrt{e_j^2 + 10^{-12}}$ on a dense grid (2000 + 2000 samples):
@@ -624,6 +647,7 @@ candidates per second.
 | `src/problem.js` | Kernel model, sample grids, bounds and heuristics, separable channels, export and import |
 | `src/model.js`, `src/trig.js` | Traced (jax-js) kernel profile and accurate sine and cosine |
 | `src/de.js`, `src/finetune.js` | Differential evolution and gradient fine-tuning |
+| `src/projected-de.js`, `src/weight-worker.js`, `src/population.js` | Differential evolution with exact weights (variable projection) on CPU workers; shared population initialization |
 | `src/remez.js` | Exchange (dual simplex) linear minimax solver and Remez refinement of all parameters |
 | `src/blur.js` | WebGPU blur: WGSL compute and display shaders |
 | `src/world.js` | Animated 3D night street ray-cast on the GPU: procedural textures, puddles with traced reflections, glossy highlights; adaptive 4× antialiasing and procedural patterns box-filtered over the pixel footprint; the circle of confusion from the z-buffer |
@@ -634,6 +658,7 @@ candidates per second.
 | `src/plots.js`, `src/scene.js`, `src/main.js` | Plots, procedural HDR test scene, user interface |
 | `test/smoke.js` | Checks the math and runs the optimizer, fine-tuner and Remez refinement in Node |
 | `test/merged-de.js` | Experiment: DE convergence with and without merged pairs |
+| `test/projected-sizes.js` | Experiment: exact-weight DE results by population size at a fixed evaluation budget |
 | `vendor/jax-js-nonconsuming/` | jax-js-nonconsuming v0.12.14 TypeScript sources (MIT), compiled by Vite |
 | `public/coi-serviceworker.js` | coi-serviceworker v0.1.7 (MIT), served unbundled at the site root; cross-origin requests bypass it to support video range requests |
 | `public/favicon.png`, `public/apple-touch-icon.png` | Center of the article's [5-component square-wave kernel image](https://yehar.com/blog/wp-content/uploads/2010/09/squarewave5componentreal.png) |

@@ -7,11 +7,12 @@ import { continuousKernel, integratedKernel, kernelProfile } from "../src/contin
 import { radiusTables } from "../src/radius-tables.js";
 import { FineTuner } from "../src/finetune.js";
 import { chebyshev, optimalWeights, remezPolish } from "../src/remez.js";
+import { ProjectedEvolution } from "../src/projected-de.js";
 import { testViewControls } from './view-controls.js';
 import { populationPreview } from '../src/plots.js';
 import {
   bounds, defaultProblem, maxError, multiplicities, nonnegativePresetParams, parseParams, presetParams, profile, sampleGrid,
-  separableChannels,
+  separableChannels, sortByFrequency,
 } from "../src/problem.js";
 
 const devices = await init();
@@ -439,4 +440,41 @@ for (const multiplicity of [[1, 1], [2, 1]]) {
   const rn = remezPolish(nonnegativePresetParams(2), nn);
   console.log(`Remez non-negative preset 2 (gain 100): ±${maxError(nonnegativePresetParams(2), nn).toFixed(6)} → ±${rn.error.toFixed(6)}`);
   check("Remez improves the negative-gain objective", rn.error < maxError(nonnegativePresetParams(2), nn) ? 0 : 1, 0);
+}
+
+// Projected DE: rates searched, weights solved exactly; members' costs are their true errors.
+{
+  const memberErrors = (snap, grid, D) =>
+    Math.max(...Array.from(snap.costs, (c, k) => Math.abs(c - maxError(Array.from(snap.population.subarray(k * D, (k + 1) * D)), grid) )));
+  const problem = problemFor([1, 1]);
+  const grid = sampleGrid(problem);
+  const de = new ProjectedEvolution({ components: 2, multiplicity: [1, 1], grid, bounds: bounds(problem), populationSize: 32, F: 0.76, CR: 0.999, seed: 5 });
+  de.step(120);
+  let snap = await de.snapshot();
+  console.log(`projected DE 2 components: generation ${de.generation}, best ±${snap.bestCost.toFixed(6)}`);
+  check("projected DE reaches the 2-component optimum (±0.0760)", snap.bestCost, 0.0760);
+  check("projected DE member costs match JS (float32 export)", memberErrors(snap, grid, 12), 1e-4);
+  check("projected DE best cost is exact", Math.abs(snap.bestCost - maxError(snap.best, grid)), 1e-12);
+  check("projected DE keeps x² weights of single components zero", Math.max(...[4, 5, 10, 11].map((j) => Math.abs(snap.best[j]))), 0);
+
+  const nnGrid = { ...grid, negativeWeight: 30 };
+  de.updateProblem(nnGrid, bounds({ ...problem, negativeWeight: 30 }));
+  snap = await de.snapshot();
+  check("projected DE re-solves weights for a new negative gain", Math.abs(snap.bestCost - maxError(snap.best, nnGrid)), 1e-12);
+  const sorted2 = sortByFrequency(presetParams(2));
+  const seed = optimalWeights(sorted2, nnGrid);
+  de.inject(seed.params);
+  snap = await de.snapshot();
+  check("projected DE injection keeps the injected kernel's cost", Math.min(...snap.costs) <= seed.error + 1e-6 ? 0 : 1, 0);
+
+  const centered = new ProjectedEvolution({ components: 2, multiplicity: [1, 1], grid, bounds: bounds(problem), populationSize: 16, F: 0.76, CR: 0.999, seed: 5, populationCenter: sorted2 });
+  snap = await centered.snapshot();
+  check("projected DE keeps the exact center as member zero (rates, solved weights)",
+    Math.abs(snap.costs[0] - optimalWeights(sorted2, grid).error), 1e-6);
+
+  const merged = new ProjectedEvolution({ components: 2, multiplicity: [2, 1], grid, bounds: bounds(problemFor([2, 1])), populationSize: 32, F: 0.76, CR: 0.999, seed: 5 });
+  merged.step(30);
+  snap = await merged.snapshot();
+  console.log(`projected DE merged [2, 1]: best ±${snap.bestCost.toFixed(6)}`);
+  check("projected DE solves merged-pair x² weights", multiplicities(snap.best).join() === "2,1" && Math.abs(snap.best[10]) + Math.abs(snap.best[11]) === 0 ? 0 : 1, 0);
 }
