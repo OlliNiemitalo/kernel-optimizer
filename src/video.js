@@ -1,9 +1,13 @@
-// RGB-D video as an animated source for the blur, in one of two layouts:
+// RGB-D video as an animated source for the blur, in one of three layouts:
 // - stacked: one video, color on top and depth below as grayscale inverse depth (white = near);
 // - pair: a color video and a separate depth video coded with matplotlib's "inferno" colormap
-//   (black = far, yellow = near), as Video Depth Anything's visualizations are.
+//   (black = far, yellow = near), as Video Depth Anything's visualizations are;
+// - side: one video, color on the left and inferno-coded depth on the right (Video Depth
+//   Anything's long-video results).
 // Depth is relative inverse depth v in [0, 1], used as 1/z = invDepthScale · v per meter: 2 for
 // the stacked layout (v = 1 at 0.5 m), 1 for relative depth from an estimator (v = 1 at 1 m).
+// A pair can have a second element of the same depth video one depth frame ahead; the shader then
+// interpolates depth in time to the color frame, for depth at a lower frame rate than the color.
 // Writes linear color (with the same highlight boost as still images) and the signed circle of
 // confusion, computed as for the 3D world, at a resolution of at most maxWidth pixels across.
 
@@ -15,8 +19,9 @@ struct Params {
   invFocus: f32,     // 1 / focus distance, 1/m
   boost: f32,        // highlight boost, as for still images
   dof: u32,          // 1: write the circle of confusion
-  pair: u32,         // 1: separate inferno-coded depth video; 0: gray depth stacked below color
+  packing: u32,      // 0: stacked, 1: pair, 2: side by side
   invDepthScale: f32, // 1/m at v = 1
+  depthMix: f32,     // weight of depthNext (the following depth frame)
 }
 
 @group(0) @binding(0) var<uniform> V: Params;
@@ -26,6 +31,7 @@ struct Params {
 @group(0) @binding(4) var<storage, read_write> color: array<vec4f>;
 @group(0) @binding(5) var<storage, read_write> coc: array<f32>;
 @group(0) @binding(6) var<storage, read> inferno: array<f32>; // 32^3 RGB cells -> v
+@group(0) @binding(7) var depthNext: texture_external;
 
 const Z_REF = 2.0;
 
@@ -33,21 +39,47 @@ fn toLinear(c: vec3f) -> vec3f {
   return select(pow((c + 0.055) / 1.055, vec3f(2.4)), c / 12.92, c <= vec3f(0.04045));
 }
 
+fn infernoV(rgb: vec3f) -> f32 {
+  let q = min(vec3u(clamp(rgb, vec3f(0.0), vec3f(1.0)) * 32.0), vec3u(31u));
+  return inferno[(q.r * 32u + q.g) * 32u + q.b];
+}
+
+// Colormap colors don't blend into colormap colors, so decode texels first, then interpolate.
+// The depth occupies the region [lo, lo + extent) of the frame, in texture coordinates.
+fn infernoDepth(frame: texture_external, uv: vec2f, lo: vec2f, extent: vec2f) -> f32 {
+  let size = vec2f(textureDimensions(frame));
+  let p = (lo + uv * extent) * size - 0.5;
+  let first = vec2i(lo * size);
+  let last = vec2i((lo + extent) * size) - 1;
+  let p0 = vec2i(floor(p));
+  let f = p - floor(p);
+  let a = clamp(p0, first, last);
+  let b = clamp(p0 + 1, first, last);
+  let top = mix(infernoV(textureLoad(frame, a).rgb), infernoV(textureLoad(frame, vec2i(b.x, a.y)).rgb), f.x);
+  let bottom = mix(infernoV(textureLoad(frame, vec2i(a.x, b.y)).rgb), infernoV(textureLoad(frame, b).rgb), f.x);
+  return mix(top, bottom, f.y);
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= V.width || id.y >= V.height) { return; }
   let i = id.y * V.width + id.x;
   let uv = (vec2f(id.xy) + 0.5) / vec2f(f32(V.width), f32(V.height));
-  let colorUv = select(vec2f(uv.x, 0.5 * uv.y), uv, V.pair == 1u);
+  let region = vec2f(select(1.0, 0.5, V.packing == 2u), select(1.0, 0.5, V.packing == 0u));
+  // Keep bilinear color taps out of the depth half.
+  let texel = 0.5 / vec2f(textureDimensions(colorFrame));
+  let colorUv = clamp(uv * region, texel, region - texel);
   var c = toLinear(clamp(textureSampleBaseClampToEdge(colorFrame, linearSampler, colorUv).rgb, vec3f(0.0), vec3f(1.0)));
   let lum = dot(c, vec3f(0.2126, 0.7152, 0.0722));
   c *= 1.0 + V.boost * pow(min(lum, 1.0), 8.0);
   color[i] = vec4f(c, 0.0);
   if (V.dof == 1u) {
     var v: f32;
-    if (V.pair == 1u) {
-      let q = min(vec3u(clamp(textureSampleBaseClampToEdge(depthFrame, linearSampler, uv).rgb, vec3f(0.0), vec3f(1.0)) * 32.0), vec3u(31u));
-      v = inferno[(q.r * 32u + q.g) * 32u + q.b];
+    if (V.packing == 1u) {
+      v = infernoDepth(depthFrame, uv, vec2f(0.0), vec2f(1.0));
+      if (V.depthMix > 0.0) { v = mix(v, infernoDepth(depthNext, uv, vec2f(0.0), vec2f(1.0)), V.depthMix); }
+    } else if (V.packing == 2u) {
+      v = infernoDepth(colorFrame, uv, vec2f(0.5, 0.0), vec2f(0.5, 1.0));
     } else {
       v = textureSampleBaseClampToEdge(depthFrame, linearSampler, vec2f(uv.x, 0.5 + 0.5 * uv.y)).r;
     }
@@ -86,14 +118,20 @@ let infernoTable = null;
 
 export class VideoSource {
   // color: an HTMLVideoElement; depth: an inferno-coded depth video in sync with it, or null for
-  // the stacked layout.
-  constructor(device, color, depth = null, { invDepthScale = depth ? 1 : 2, maxWidth = 960 } = {}) {
+  // the stacked or side layout. depthNext: the same depth video one frame ahead (at depthFps), or null.
+  constructor(device, color, depth = null, {
+    layout = depth ? "pair" : "stacked", invDepthScale = layout === "stacked" ? 2 : 1, maxWidth = 960,
+    depthNext = null, depthFps = 0,
+  } = {}) {
     this.device = device;
     this.color = color;
     this.depth = depth;
+    this.depthNext = depthNext;
+    this.depthFps = depthFps;
+    this.layout = ["stacked", "pair", "side"].indexOf(layout);
     this.invDepthScale = invDepthScale;
-    const fullWidth = color.videoWidth;
-    const fullHeight = depth ? color.videoHeight : Math.floor(color.videoHeight / 2);
+    const fullWidth = layout === "side" ? Math.floor(color.videoWidth / 2) : color.videoWidth;
+    const fullHeight = layout === "stacked" ? Math.floor(color.videoHeight / 2) : color.videoHeight;
     const scale = Math.min(1, maxWidth / fullWidth);
     this.width = Math.round(fullWidth * scale);
     this.height = Math.round(fullHeight * scale);
@@ -103,23 +141,34 @@ export class VideoSource {
       compute: { module: device.createShaderModule({ code: videoShader }), entryPoint: "main" },
     });
     this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
-    this.uniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.uniform = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.noCoc = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE });
     infernoTable ??= infernoInverse();
     this.inferno = device.createBuffer({ size: infernoTable.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.inferno, 0, infernoTable);
   }
 
+  // Weight of the following depth frame: where the color time lies between the frames shown by
+  // depth and depthNext, if they are consecutive (otherwise they are resyncing; use depth alone).
+  depthMix() {
+    if (!this.depthNext) return 0;
+    const f = this.depthFps;
+    const k = Math.floor(this.depth.currentTime * f + 1e-3);
+    if (Math.floor(this.depthNext.currentTime * f + 1e-3) !== k + 1) return 0;
+    return Math.min(1, Math.max(0, this.color.currentTime * f - k));
+  }
+
   encode(encoder, { color, coc, width, height, aperture, invFocus = 0, timestampWrites }) {
-    const u = new ArrayBuffer(32);
+    const u = new ArrayBuffer(48);
     new Uint32Array(u, 0, 2).set([width, height]);
     new Float32Array(u, 8, 3).set([aperture, invFocus, this.boost]);
-    new Uint32Array(u, 20, 2).set([coc ? 1 : 0, this.depth ? 1 : 0]);
-    new Float32Array(u, 28, 1)[0] = this.invDepthScale;
+    new Uint32Array(u, 20, 2).set([coc ? 1 : 0, this.layout]);
+    new Float32Array(u, 28, 2).set([this.invDepthScale, this.depthMix()]);
     this.device.queue.writeBuffer(this.uniform, 0, u);
     // External textures are valid only until the end of this task, so they are imported per frame.
     const colorFrame = this.device.importExternalTexture({ source: this.color });
     const depthFrame = this.depth ? this.device.importExternalTexture({ source: this.depth }) : colorFrame;
+    const depthNext = this.depthNext ? this.device.importExternalTexture({ source: this.depthNext }) : depthFrame;
     const pass = encoder.beginComputePass(timestampWrites ? { timestampWrites } : {});
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(
@@ -134,6 +183,7 @@ export class VideoSource {
           { binding: 4, resource: { buffer: color } },
           { binding: 5, resource: { buffer: coc ?? this.noCoc } },
           { binding: 6, resource: { buffer: this.inferno } },
+          { binding: 7, resource: depthNext },
         ],
       }),
     );

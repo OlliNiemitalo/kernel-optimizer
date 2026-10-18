@@ -6,17 +6,23 @@ import { Shapes } from "./shapes.js";
 import { VideoSource } from "./video.js";
 
 // RGB-D video samples. Video Depth Anything's comparison clips are fetched from its project page
-// (served with CORS): color in origin/, inferno-coded relative depth in ours/.
+// (served with CORS): color in origin/, inferno-coded relative depth in ours/. Its long-video
+// results are single videos with color on the left and depth on the right.
 const VDA = "https://videodepthanything.github.io/videos/comparison/";
+const VDA_LONG = "https://videodepthanything.github.io/videos/long_videos/";
 const VDA_CREDIT =
   'Video and depth: <a href="https://videodepthanything.github.io/">Video Depth Anything</a> project page ' +
   "(S. Chen et al., CVPR 2025), loaded from its site; depth is estimated and relative.";
 const TUM_CREDIT =
   'RGB-D video: TUM RGB-D benchmark, sequence fr3/sitting_static (J. Sturm et al., IROS 2012), ' +
   '<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>; depth holes filled, converted to inverse depth, re-encoded.';
+const WOMAN_CREDIT =
+  'Video: Yaroslav Shuraev, <a href="https://www.pexels.com/video/woman-standing-in-the-middle-of-green-grass-4511004/">' +
+  "Woman standing in the middle of green grass</a> (Pexels license), first 13 s at 1920×1080. Depth: " +
+  '<a href="https://videodepthanything.github.io/">Video Depth Anything</a> (S. Chen et al., CVPR 2025) at 15 fps, ' +
+  "interpolated to 24 fps in the shader; estimated and relative.";
 const VIDEO_SAMPLES = [
   // [color file, depth file if named differently, focus slider position, label]
-  ["4511004-uhd_3840_2160_24fps_rgb.mp4", null, 0.675, "woman in a field"], // focused on her: v ≈ 0.455
   ["1753029-hd_1920_1080_30fps.mp4"],
   ["4158877-uhd_3840_2160_30fps_rgb.mp4"],
   ["Balloons-32132.mp4"],
@@ -44,14 +50,38 @@ const VIDEO_SAMPLES = [
       credit: VDA_CREDIT,
     };
   })
-  .concat([{
-    label: "TUM RGB-D: two people talking (measured depth)",
-    color: `${import.meta.env.BASE_URL}tum-sitting-rgbd.mp4`,
+  .concat([
+    ["bicycle_wild_1080_depth-720_x3.mp4", "bicycle in the wild, 3× speed", 30],
+    ["ParkourFPV-cut_depth-576.mp4", "parkour FPV", 25],
+    ["Single-TakeFPVOff-road-1080-cut_depth_x3.mp4", "off-road FPV, 3× speed", 30],
+  ].map(([file, name, fps]) => ({
+    label: `Video Depth Anything long videos: ${name}`,
+    color: VDA_LONG + file,
     depth: null,
-    fps: 30,
-    focus: 0.75, // 1.8 m: the people
-    credit: TUM_CREDIT,
-  }]);
+    layout: "side",
+    fps,
+    focus: 0.7,
+    credit: VDA_CREDIT,
+  })));
+// Default: the original footage of Video Depth Anything's 4511004 clip (which is 1280×720 at 15 fps),
+// with its depth video also loaded one depth frame ahead, for interpolation.
+VIDEO_SAMPLES.unshift({
+  label: "Pexels: woman in a field, 1080p 24 fps (Video Depth Anything depth, interpolated)",
+  color: `${import.meta.env.BASE_URL}woman-4511004-1080p.mp4`,
+  depth: `${import.meta.env.BASE_URL}woman-4511004-vda-depth.mp4`,
+  depthFps: 15,
+  fps: 24,
+  focus: Math.sqrt(1 / 2.4), // 2.4 m in its relative depth units
+  credit: WOMAN_CREDIT,
+});
+VIDEO_SAMPLES.push({
+  label: "TUM RGB-D: two people talking (measured depth)",
+  color: `${import.meta.env.BASE_URL}tum-sitting-rgbd.mp4`,
+  depth: null,
+  fps: 30,
+  focus: 0.75, // 1.8 m: the people
+  credit: TUM_CREDIT,
+});
 import { DifferentialEvolution } from "./de.js";
 import { ProjectedEvolution, workerSolvers } from "./projected-de.js";
 import { FineTuner } from "./finetune.js";
@@ -429,7 +459,7 @@ function seekScene(time) {
   state.sceneTime = Math.max(0, time);
   if (state.source === "video") {
     state.video.element.currentTime = state.sceneTime; // renders on "seeked"
-    if (state.video.depth) state.video.depth.currentTime = state.sceneTime;
+    syncDepthVideo(true);
   }
   else requestBlur();
   showSceneTime();
@@ -441,8 +471,7 @@ function setPlaying(playing) {
   $("playPause").title = playing ? "Pause" : "Play";
   $("playPause").setAttribute("aria-label", $("playPause").title);
   if (state.source === "video") {
-    for (const element of [state.video.element, state.video.depth]) {
-      if (!element) continue;
+    for (const element of videoElements()) {
       if (playing) element.play().catch(() => {});
       else element.pause();
     }
@@ -460,8 +489,7 @@ function stepScene(frames) {
 }
 
 function applyVideoPlayback() {
-  for (const element of [state.video?.element, state.video?.depth]) {
-    if (!element) continue;
+  for (const element of videoElements()) {
     element.playbackRate = num("playbackRate");
     element.loop = $("loop").checked;
   }
@@ -782,8 +810,7 @@ async function renderBlur() {
 function stopVideo() {
   state.scene = (state.scene ?? 0) + 1; // invalidates video loads in progress
   if (!state.video) return;
-  for (const element of [state.video.element, state.video.depth]) {
-    if (!element) continue;
+  for (const element of videoElements()) {
     element.pause();
     element.removeAttribute("src");
     element.load();
@@ -840,14 +867,18 @@ async function useVideo(sample) {
   stopVideo();
   const scene = state.scene;
   $("blurStats").textContent = `Loading ${sample.label}…`;
-  const [element, depth] = await Promise.all([loadVideo(sample.color), sample.depth ? loadVideo(sample.depth) : null]);
+  const [element, depth, depthNext] = await Promise.all([
+    loadVideo(sample.color),
+    sample.depth ? loadVideo(sample.depth) : null,
+    sample.depthFps ? loadVideo(sample.depth) : null,
+  ]);
   if (scene !== state.scene) {
-    for (const e of [element, depth]) e?.removeAttribute("src");
+    for (const e of [element, depth, depthNext]) e?.removeAttribute("src");
     return;
   }
-  const source = new VideoSource(state.blur.device, element, depth);
+  const source = new VideoSource(state.blur.device, element, depth, { depthNext, depthFps: sample.depthFps, layout: sample.layout });
   source.boost = num("boost");
-  state.video = { element, depth, source, name: sample.label, fps: sample.fps ?? 30 };
+  state.video = { element, depth, depthNext, source, name: sample.label, fps: sample.fps ?? 30, depthFps: sample.depthFps };
   applyVideoPlayback();
   $("videoCredit").innerHTML = sample.credit ?? "";
   $("videoCredit").hidden = !sample.credit;
@@ -860,11 +891,18 @@ async function useVideo(sample) {
   requestBlur(true);
 }
 
+const videoElements = () => [state.video?.element, state.video?.depth, state.video?.depthNext].filter(Boolean);
+
 // The depth video follows the color video; while playing they drift apart by up to a frame or so.
-function syncDepthVideo() {
-  const { element, depth, fps } = state.video;
-  if (depth && Math.abs(depth.currentTime - element.currentTime) > (element.paused ? 0.25 : 3) / fps) {
-    depth.currentTime = element.currentTime;
+// A second depth element (for interpolation) runs one depth frame ahead. force: seek exactly.
+function syncDepthVideo(force = false) {
+  const { element, depth, depthNext, fps, depthFps } = state.video;
+  const tolerance = (element.paused ? 0.25 : 3) / fps;
+  for (const [e, offset] of [[depth, 0], [depthNext, 1 / depthFps]]) {
+    if (!e) continue;
+    const end = e.duration || Infinity;
+    const target = element.loop ? (element.currentTime + offset) % end : Math.min(element.currentTime + offset, end);
+    if (force || Math.abs(e.currentTime - target) > tolerance) e.currentTime = target;
   }
 }
 
@@ -981,6 +1019,13 @@ function wire() {
   $("finetune").onclick = fineTune;
   $("remez").onclick = remezRefine;
   $("ftLr").addEventListener("input", () => delete $("ftLr").dataset.auto);
+  // Space plays or pauses, unless a control that uses the key has focus.
+  document.addEventListener("keydown", (e) => {
+    if (e.code !== "Space" || e.repeat || e.ctrlKey || e.metaKey || e.altKey || $("playPause").disabled) return;
+    if (e.target.closest?.("input, textarea, select, button, summary, [contenteditable]")) return;
+    e.preventDefault();
+    setPlaying(!state.playing);
+  });
   // Exact weights need far fewer, costlier members than the GPU search, unless the user chose a size.
   $("population").addEventListener("input", () => delete $("population").dataset.auto);
   $("projected").addEventListener("change", () => {
@@ -1108,8 +1153,10 @@ function wire() {
   $("seek").addEventListener("input", () => seekScene(num("seek")));
   $("playbackRate").addEventListener("input", applyVideoPlayback);
   $("loop").addEventListener("input", applyVideoPlayback);
-  $("fullscreen").onclick = () =>
+  const toggleFullscreen = () =>
     document.fullscreenElement ? document.exitFullscreen() : $("viewport").requestFullscreen().catch(() => {});
+  $("fullscreen").onclick = toggleFullscreen;
+  $("blurCanvas").addEventListener("dblclick", toggleFullscreen);
   document.addEventListener("fullscreenchange", fitFullscreen);
   addEventListener("resize", fitFullscreen);
   $("stepBack").onclick = () => stepScene(-1);
