@@ -3,6 +3,7 @@ import { BlurRenderer } from '../src/blur.js';
 import { presetParams } from '../src/problem.js';
 import { Shapes } from '../src/shapes.js';
 import { continuousGPU } from './continuous-gpu.js';
+import { layersGPU } from './layers-gpu.js';
 
 async function read(device, buffer) {
   const staging = device.createBuffer({ size: buffer.size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -109,6 +110,7 @@ export async function run() {
       }
       check(`tetra empty-layer identity (scale ${scale})`, difference, 1e-5);
     }
+    await layersGPU(renderer, check, read);
     check('WebGPU validation errors', errors.length, 0);
     return { passed: tests.every(t => t.pass), tests, errors };
   } finally {

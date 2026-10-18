@@ -276,13 +276,19 @@ shows through the object's semi-transparent edge, as in a real lens.
   estimated depth fell behind (a zipper on a coat) stay with their surface. Because membership is
   a function of the source pixel alone, each layer is a linear image and the separable passes
   stay exact.
-- **Smooth blur levels within a layer.** Estimated depth is noisy, and with scatter-as-gather,
-  neighbors with different disc sizes do not sum to unit weight. The source levels are smoothed
-  by a median (a sorting network over the window) and then a mean over ±6 px of the pixels on the
-  same side of the split, never across it, so silhouettes keep their depth jumps. One smoothed
-  floating-point map serves both layers, without rounding the smoothed radii back to integer levels.
-  The median/mean neighborhood rules are unchanged; their depth-boundary artifacts are a separate
-  issue from radius quantization and are not fixed by profile interpolation.
+- **Depth-guided source-radius smoothing.** Estimated depth is noisy, and with scatter-as-gather,
+  neighbors with different disc sizes do not sum to unit weight. Two separable passes over ±6 px
+  denoise the signed log-radius using triangular spatial weights and compact range weights
+  $(\max(0,1-d^2))^2$, where $d$ is the signed-level difference divided by six (one octave away
+  from the subpixel region). Both passes use the **original depth** as their guide; the second
+  also checks its filtered input, preventing diffusion across rejected depth edges. An original
+  center sample anchors the average. Radii of magnitude at most 0.5 px are untouched; smoothing
+  strength rises continuously to full strength at 2 px. One floating-point map serves both layers.
+  Layer membership controls visibility, not which pixels belong to the same surface: thresholding
+  its soft mask at 50% previously mixed sharp silhouettes with distant background and made a
+  notch where a continuous surface crossed that threshold. The filter no longer reads membership.
+  Large depth outliers are deliberately not replaced by unrelated neighbors; this is denoising,
+  not reconstruction of missing or incorrect depth.
 - **Back to front.** The far layer runs first; where its coverage is below ½ (behind the near
   layer's sources), it is completed by pull-push (a pyramid of coverage-weighted averages built by
   halving, then filled from coarse to fine with bilinear upsampling). The near layer, its color
@@ -315,6 +321,19 @@ Radius tests compare GPU impulse responses and mixed-radius ramps with the CPU m
 nearest and interpolated modes, including the last node and both intermediate precisions. They
 check fractional vertical radii, default-off behavior, nearest-node plateaus, and continuity when
 interpolation is enabled.
+
+Layer-smoothing regressions include an in-focus narrow triangle against a blurred background
+with a separate active foreground layer, both transposed axes, both lookup modes and precisions,
+subpixel radius preservation, and foreground noise reduction. The reproduced 960×600 tetra view
+also checks the sharp vertices and the soft-membership boundary: the old smoother inflated
+near-focus radii by up to 67.0 px and introduced an 8.47 px adjacent-radius jump there; the guided
+filter measures 0.318 px and 0.111 px respectively, with subpixel radii unchanged. These are
+measurements for that view, not universal error bounds. All 796 GPU checks pass.
+The change replaces four smoothing dispatches with two and adds no buffers. In an 11-sample
+alternating Intel Gen9 comparison with the previous integrated-kernel revision (`ded76b1`),
+two-layer nearest-mode total GPU time improved by about 2–8% on the tetra scene; the frozen
+woman video ranged from 3% slower to 5% faster across radii 15/69 and f32/packed intermediates.
+Clocks varied during the run. This is primarily a correctness change, not a general speedup.
 
 The **Layer view** selector shows the composite, the near layer's opacity (tinted, or as gray at
 half scale), the near layer alone, the hole-filled far layer alone, or, with one layer, the summed
