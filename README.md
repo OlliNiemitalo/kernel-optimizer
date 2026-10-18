@@ -483,8 +483,9 @@ population, preserving its members, generation count and random state. This allo
 negative-gain ramps: pause, change gain, then continue. The faint population curves use a stable
 subset of members and do not reshuffle when re-scored. The highlighted best member can change
 under the new objective. Convergence history is cleared because
-costs under different objectives are not comparable. Frequency-band changes constrain future
-trial candidates without replacing existing members. Changes to component structure, population
+costs under different objectives are not comparable. The frequency-band option (under
+**Differential evolution**; Remez refinement and fine-tuning ignore it) is handled the same way: it
+constrains future trial candidates without replacing existing members. Changes to component structure, population
 size, DE parameters, search mode or seed discard the population, so the button returns to Start.
 
 **Differential evolution** ([`src/de.js`](src/de.js)) is generation-synchronous, so that each
