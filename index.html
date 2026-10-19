@@ -279,7 +279,9 @@
                 <p class="note">Each component's own separable form: one complex channel √a<sub>0</sub> e<sup>λx²</sup> ×
                   √a<sub>0</sub> e<sup>λy²</sup> for a single component (the article's), or <i>m</i> channels x<sup>2j</sup> e<sup>λx²</sup> ×
                   Q<sub>j</sub>(y²) e<sup>λy²</sup> for multiplicity <i>m</i>, summed into the component u, and the components into the
-                  kernel K. Rows are real terms h(x) v(y) as in Channels; their sizes show any cancellation between components.</p>
+                  kernel K. Rows are real terms h(x) v(y) as in Channels; their sizes show any cancellation between components.
+                  The blur doesn't compute these: this is the math view, showing that each component (the sum of its terms)
+                  is circularly symmetric.</p>
                 <canvas id="componentsFigure" aria-label="Components summed into the kernel"></canvas>
               </figure>
               <figure>
@@ -287,7 +289,9 @@
                 <p class="note">The blur's separable passes, transformed from the components as a whole. Each row is a
                   horizontal 1-D kernel h(x) times a vertical one v(y); pairs of these real terms are the complex channels
                   Re[h(x) v(y)] = h<sub>re</sub>v<sub>re</sub> − h<sub>im</sub>v<sub>im</sub>, summed into K as the shader accumulates them.
-                  Compare their peaks with those of the components' own forms.</p>
+                  The shader never forms the two terms of a channel separately: its horizontal pass filters with complex
+                  h, and its vertical pass multiplies by complex v and keeps the real part, which is their sum. A channel
+                  alone is not circularly symmetric; only K is. Compare the peaks with those of the components' own forms.</p>
                 <canvas id="channelsFigure" aria-label="Separable channels summed into the kernel"></canvas>
               </figure>
             </div>

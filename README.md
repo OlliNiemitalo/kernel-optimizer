@@ -250,8 +250,12 @@ At the bottom of the optimizer, **How the kernel is formed** has two figures, bo
 separable terms $h(x)\,v(y)$: each term's horizontal and vertical 1-D kernels and their product, with pairs
 of terms summed into complex channels. **Components** uses each component's own separable form (the
 article's $\sqrt{a_0}$ form, or the $x^{2j} \times Q_j$ channels above). Its channels sum into the
-component, and the components into the kernel, which shows how much the components cancel.
+component, and the components into the kernel, which shows how much the components cancel. This is
+the math view: the blur never computes components, but the figure shows each component's circular
+symmetry.
 **Channels** uses the rendering channels, summed into the kernel as the shader accumulates them.
+The shader never forms a channel's two real terms separately. Its complex horizontal and vertical
+passes give $\mathrm{Re}[h v]$, their sum, directly. A channel alone is not circularly symmetric.
 Each image uses its own scale, printed below it.
 
 ### 4. Discrete implementation (WebGPU)
