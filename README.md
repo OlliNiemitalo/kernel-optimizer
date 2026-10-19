@@ -289,9 +289,10 @@ linearly with the radius.
 
 For uniform blur, besides the source image, tap tables and the 4-lane accumulator (source and
 accumulator are 16 bytes per pixel each), the main working buffer is one channel's intermediate:
-4 complex lanes, 32 bytes per pixel in f32. The "16-bit float (packed)" option stores each
+4 complex lanes, 32 bytes per pixel in f32. The "16-bit float (packed)" option, the default, stores each
 complex lane as two half floats in one `u32`
-(`pack2x16float`): 16 bytes per pixel, with no optional GPU feature needed. At 960×600 the
+(`pack2x16float`, core WGSL): 16 bytes per pixel, with no optional GPU feature needed, so every
+WebGPU device supports it. At 960×600 the
 intermediate is 17.6 MiB, or 8.8 MiB packed, whatever the number of channels. Keeping all
 channels at once would take channels × that.
 
@@ -538,7 +539,9 @@ terms get amplified.
 
 - **Accumulate in f32.** Measured with an impulse input against the exact kernel (4-component
   preset), the f32 path has $2.5 \times 10^{-6}$ relative error, and the packed 16-bit
-  intermediate about $9 \times 10^{-3}$.
+  intermediate had about $9 \times 10^{-3}$ with per-component channels. With the rendering channels
+  (section 3), 16-bit intermediates are the default. Even for a strongly cancelling kernel, they
+  render within 1/255 of f32. Choose f32 under **Intermediate storage** for reference renders.
 - **Don't trust GPU `sin`/`cos` for kernel coefficients.** On the tested GPU they had about
   $6 \times 10^{-5}$ absolute error. That is negligible alone, but multiplied by weights near 100
   it exceeds a ripple of $\pm 0.004$. This app computes tap tables on the CPU, and the optimizer
