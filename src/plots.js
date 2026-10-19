@@ -1,5 +1,7 @@
 // Canvas 2-D plotting for profiles, errors, convergence, and the 2-D disc.
-import { PARAMS_PER_COMPONENT, componentProfile, profile } from "./problem.js";
+import {
+  PARAMS_PER_COMPONENT, channelSide, componentChannels, componentProfile, multiplicities, profile, separableChannels,
+} from "./problem.js";
 
 const COLORS = ["#4cc9f0", "#f72585", "#90be6d", "#f9c74f", "#b5179e", "#43aa8b", "#f3722c", "#577590"];
 
@@ -203,4 +205,106 @@ export function drawDisc(canvas, best, xmax) {
     }
   }
   ctx.putImageData(img, 0, 0);
+}
+
+const srgbLevel = (v) => 255 * (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
+
+// Values (row-major w × h) as drawDisc colors, normalized to their own peak, which is returned.
+function valueImage(ctx, values, w, h) {
+  const peak = values.reduce((m, v) => Math.max(m, Math.abs(v)), 0) || 1;
+  const img = ctx.createImageData(w, h);
+  values.forEach((value, i) => {
+    const v = value / peak;
+    const level = srgbLevel(Math.min(Math.abs(v), 1));
+    img.data.set([level, v >= 0 ? level : 0, v >= 0 ? level : 0, 255], 4 * i);
+  });
+  return { img, peak };
+}
+
+// How the kernel is formed, as real separable terms h(x) v(y) (pairs of which are complex channels
+// Re[h v]) summed into the kernel: "components" uses each component's own separable form, its channels
+// summed into the component; "channels" uses the renderer's channels, summed as the shader accumulates
+// them. Each image is normalized to its own peak, printed under it.
+export function drawDecomposition(canvas, best, transition, mode) {
+  const T = 56, gap = 46, rowH = T + 20, strip = 7, top = 8, left = 8;
+  const dpr = window.devicePixelRatio || 1;
+  const n = Math.round(T * dpr);
+  const S = 1 + transition;
+  const xs = Array.from({ length: n }, (_, i) => ((i + 0.5) / n * 2 - 1) * S);
+  const mult = best ? multiplicities(best) : [];
+  const channels = !best ? [] : mode === "components" ? componentChannels(best) : separableChannels(best, S);
+  const leaves = [];
+  const groups = channels.map((ch, j) => {
+    const caption = mode === "channels" ? `ch${j}`
+      : mult[ch.component] === 1 ? `u${ch.component}`
+      : `u${ch.component}.${j - channels.findIndex((c) => c.component === ch.component)}`;
+    const h = xs.map((x) => channelSide(ch.h, x * x));
+    const v = xs.map((y) => channelSide(ch.v, y * y));
+    const group = { caption, component: ch.component, leaves: [] };
+    // Re[h v] = h_re v_re + h_im (−v_im)
+    for (const [hs, vs] of [[h.map((z) => z[0]), v.map((z) => z[0])], [h.map((z) => z[1]), v.map((z) => -z[1])]]) {
+      if (!hs.some((a) => a) || !vs.some((a) => a)) continue;
+      const tile = new Float64Array(n * n);
+      for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) tile[y * n + x] = hs[x] * vs[y];
+      group.leaves.push(leaves.length);
+      leaves.push({ tile, h: hs, v: vs });
+    }
+    if (group.leaves.length === 1) leaves[group.leaves[0]].caption = caption;
+    return group;
+  });
+  const tileX = left + T + 20 + strip + 24;
+  const colX = (col) => tileX + col * (T + gap);
+  // Terms into channels, channels into components (component form), then one sum into the kernel.
+  const ops = [];
+  const leafNodes = leaves.map((leaf, i) => ({ tile: leaf.tile, y: top + i * rowH + T / 2, col: 0 }));
+  const combine = (children, caption = "") => {
+    if (children.length === 1) return children[0];
+    const tile = new Float64Array(n * n);
+    for (const c of children) for (let i = 0; i < tile.length; i++) tile[i] += c.tile[i];
+    const node = { tile, y: (children[0].y + children.at(-1).y) / 2, col: Math.max(...children.map((c) => c.col)) + 1 };
+    ops.push({ node, children, caption });
+    return node;
+  };
+  let nodes = groups.map((g) => ({ ...g, node: combine(g.leaves.map((i) => leafNodes[i]), g.caption) }));
+  nodes = mode === "components"
+    ? mult.map((_, u) => combine(nodes.filter((g) => g.component === u).map((g) => g.node), `u${u}`))
+    : nodes.map((g) => g.node);
+  if (nodes.length) combine(nodes);
+  const columns = Math.max(0, ...ops.map((o) => o.node.col)) + 1;
+  canvas.style.width = `${colX(columns) - gap + 8}px`;
+  canvas.style.height = `${top + Math.max(1, leaves.length) * rowH}px`;
+  const { ctx } = setupCanvas(canvas);
+  const put = (values, w, h, x, y) => {
+    const { img, peak } = valueImage(ctx, values, w, h);
+    ctx.putImageData(img, Math.round(x * dpr), Math.round(y * dpr));
+    return peak;
+  };
+  const label = (text, x, y, size = 10) => {
+    ctx.font = `${size}px system-ui, sans-serif`;
+    ctx.fillStyle = size > 10 ? "#c9d1e3" : "#8b93a7";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, x, y);
+  };
+  const drawTile = (node, caption) => {
+    const peak = put(node.tile, n, n, colX(node.col), node.y - T / 2);
+    label(`${caption ? `${caption} ` : ""}±${peak.toPrecision(2)}`, colX(node.col) + T / 2, node.y + T / 2 + 8);
+  };
+  const ds = Math.round(strip * dpr);
+  leaves.forEach((leaf, i) => {
+    const node = { tile: leaf.tile, y: top + i * rowH + T / 2, col: 0 };
+    if (leaf.h) {
+      put(Array.from({ length: ds }, () => leaf.h).flat(), n, ds, left, node.y - strip / 2);
+      label("*", left + T + 10, node.y, 18);
+      put(leaf.v.flatMap((a) => Array(ds).fill(a)), ds, n, left + T + 20, node.y - T / 2);
+      label("=", left + T + 20 + strip + 12, node.y, 18);
+    }
+    drawTile(node, leaf.caption);
+  });
+  for (const { node, children, caption } of ops) {
+    const plusX = colX(Math.max(...children.map((c) => c.col))) + T + gap / 2 - 10;
+    for (let i = 1; i < children.length; i++) label("+", plusX, (children[i - 1].y + children[i].y) / 2, 18);
+    label("=", colX(node.col) - gap / 2 + 10, node.y, 18);
+    drawTile(node, ops.at(-1).node === node ? "K" : caption);
+  }
 }

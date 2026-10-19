@@ -26,7 +26,7 @@ pass, at a cost proportional to the blur radius rather than its area.
 
 Based on Olli Niemitalo,
 [Circularly symmetric convolution and lens blur](https://yehar.com/blog/?p=1495) (2010), extended
-with merged pairs (repeated rates).
+with repeated rates (components of multiplicity up to 10).
 
 ## Running
 
@@ -135,16 +135,30 @@ As two nearly equal rates, the same shape would need weights of size $A/\delta$ 
 losing precision. The direct form above has no such cancellation. In this app a merged pair has
 one shared rate and costs two channels, the same as two single components.
 
-The full kernel is a sum of components. Parameters are stored as six numbers per component
-$[b, c, r_w, i_w, r_1, i_1]$, with $r_1 = i_1 = 0$ pinned for single components.
+More generally, a component of **multiplicity** $m$ is the limit of $m$ coinciding rates, a
+polynomial of degree $m - 1$ in $s$:
+
+$$
+K(s) = \mathrm{Re}\,\bigl[P(s)\, e^{\lambda s}\bigr], \qquad P(s) = \sum_{k=0}^{m-1} a_k s^k, \qquad a_k = r_k - i\, i_k ,
+$$
+
+with $a_0 = B$ and $a_1 = A$ above. The term $a_k s^k e^{\lambda s}$ is $k!\,a_k$ times the $k$-th divided
+difference of $e^{\mu s}$ over $k + 1$ rates $\mu$ that all tend to $\lambda$. Multiplicity 1 is a single
+component and 2 a merged pair; the app supports up to 10. The blur demo renders at most 16
+channels in total.
+
+The full kernel is a sum of components. Parameters are stored as 22 numbers per component
+$[b, c, r_0, i_0, r_1, i_1, \dots, r_9, i_9]$ ($r_0 = r_w$, $i_0 = i_w$), with the weights of unused
+powers of $s$ pinned to zero. A copied view state records this as `kernelStride`; older view states
+without it have six numbers per component and are converted.
 
 ### 3. From components to separable channels
 
 The renderer works with **channels**. A channel $n$ is a pair of 1-D complex kernels,
-horizontal $h_n$ and vertical $v_n$, each of the form
+horizontal $h_n$ and vertical $v_n$. In the per-component forms below, each has the form
 
 $$
-h(t) = (h_0 + h_2 t^2)\, e^{\lambda t^2},
+h(t) = (h_0 + h_2 t^2 + h_4 t^4 + \dots)\, e^{\lambda t^2},
 $$
 
 and the 2-D kernel is
@@ -167,11 +181,78 @@ $$
 + \underbrace{\bigl[\sigma x^2 e^{\lambda x^2}\bigr]\bigl[\tfrac{A}{\sigma} e^{\lambda y^2}\bigr]}_{\text{channel 2}} .
 $$
 
-Any $\sigma \ne 0$ works; the code uses $\sigma = \sqrt{\max(|A|, |B|)}$ to balance magnitudes between
-the passes. See `separableChannels` in [`src/problem.js`](src/problem.js); the smoke test checks
-that the channels reproduce the 2-D kernel to $10^{-12}$.
+Any $\sigma \ne 0$ works, and each channel may use its own; the code balances magnitudes between
+the passes with $\sigma_0 = \sqrt{\max(|A|, |B|)}$ and $\sigma_1 = \sqrt{|A|}$, as below.
 
-The "Current kernel" panel exports these channel coefficients, ready to use in other code.
+- **Multiplicity $m$ → $m$ channels.** Expanding $(x^2 + y^2)^k$ binomially,
+
+$$
+P(x^2 + y^2) = \sum_{j=0}^{m-1} x^{2j}\, Q_j(y^2), \qquad Q_j(t) = \sum_{l=0}^{m-1-j} \binom{j+l}{j} a_{j+l}\, t^l ,
+$$
+
+  so channel $j$ has $h_j(x) = \sigma_j x^{2j} e^{\lambda x^2}$ and $v_j(y) = Q_j(y^2) e^{\lambda y^2} / \sigma_j$, with
+  $\sigma_j = \sqrt{\max_l |\text{coefficient } l \text{ of } Q_j|}$. For $m = 2$ this is the merged pair above.
+  Fewer channels are impossible when $c \ne 0$: in the basis $x^{2j} e^{\lambda x^2}$, $x^{2j} e^{\bar\lambda x^2}$
+  (and likewise in $y$), the real kernel $\mathrm{Re}\,F = (F + \bar F)/2$ has a block-diagonal coefficient
+  matrix whose two blocks are anti-triangular with $\binom{m-1}{j} a_{m-1} \ne 0$ (or its conjugate) on the
+  anti-diagonal. Its rank is $2m$, and each channel's $\mathrm{Re}\,[h v] = h_\mathrm{re} v_\mathrm{re} - h_\mathrm{im} v_\mathrm{im}$
+  adds at most 2. A multiplicity-$m$ component therefore costs exactly as many channels as $m$
+  single components.
+
+These per-component forms show what is possible, but the renderer doesn't use them: their passes
+can be far larger than the kernel. Only the real part of $\sum h v$ is the kernel, and an
+optimized kernel may have huge, cancelling imaginary parts. For example, a multiplicity-6
+kernel with ripple ±0.000064 had weights near $2 \cdot 10^6$, and $\sum_n |h_n(x)||v_n(y)|$ reached
+$5 \cdot 10^5$. 16-bit intermediates (relative precision $5 \cdot 10^{-4}$) then give errors far above 1.
+
+**Rendering channels.** Instead, `separableChannels` in [`src/problem.js`](src/problem.js)
+decomposes the real kernel as a whole. In the real basis $f$ of all components' functions
+$t^k \cos(c x^2) e^{-bx^2}$ and $t^k \sin(c x^2) e^{-bx^2}$ ($t = 2bx^2$, $k < m$), the kernel is
+$f(x)^\mathsf{T} C f(y)$, with $C$ real symmetric from
+$\mathrm{Re}[a (\cos + i \sin)(\cos + i \sin)]$. The basis is orthonormalized over the kernel's
+support $[0, 1+\tau]$ by a QR factorization $R$ of its samples. The eigendecomposition
+$R C R^\mathsf{T} = \sum_j e_j u_j u_j^\mathsf{T}$ then gives
+
+$$
+K(x, y) = \sum_j e_j\, g_j(x)\, g_j(y), \qquad g_j = f^\mathsf{T} C R^\mathsf{T} u_j / e_j ,
+$$
+
+with orthonormal $g_j$. Two terms make one complex channel:
+
+$$
+\mathrm{Re}\bigl[(\sqrt{|e_a|}\, g_a + i \sqrt{|e_b|}\, g_b)(\pm\sqrt{|e_a|}\, g_a \mp i \sqrt{|e_b|}\, g_b)\bigr]
+= e_a g_a g_a + e_b g_b g_b .
+$$
+
+The real rank is at most twice the number of rates, so this needs no more channels than the
+per-component forms. Negligible terms ($|e_j| < 10^{-14} \max |e|$) are dropped. A channel's pass is
+then a sum over components of $\bigl(C(x^2)\cos(cx^2) + S(x^2)\sin(cx^2)\bigr)e^{-bx^2}$, with
+complex polynomials $C$ and $S$. Here $\sum_n |h_n||v_n|$ stays near the kernel's own size:
+
+| Kernel | Per-component channels | Rendering channels |
+|---|---|---|
+| Multiplicity 6 above | $5.1 \cdot 10^5$ | 1.38 |
+| Article preset 6 | 556 | 1.48 |
+
+With the first kernel, 16-bit and f32 intermediates now render within 1/255 of each other.
+The smoke test checks that the channels reproduce the 2-D kernel to $10^{-10}$, for multiplicities up
+to 10, and bounds $\sum_n |h_n||v_n|$.
+
+The "Current kernel" panel exports this transformation for every kernel as two complex matrices,
+$H$ and $V$ (channels × basis functions $f$), with $h = H f(x)$ and $v = V f(y)$. Then
+$K(x, y) = f(x)^\mathsf{T} \mathrm{Re}(H^\mathsf{T} V) f(y)$, and $\mathrm{Re}(H^\mathsf{T} V)$ is the
+components' weight matrix $C$ in monomial units. The smoke test checks this to $10^{-8}$ relative, up to
+multiplicity 6. At multiplicity 10 the basis is nearly dependent, so only the functions match.
+For all-single kernels, the panel also shows the article's separable form. Pasting the whole panel
+text back (Use pasted parameters) reads its parameter section.
+
+At the bottom of the optimizer, **How the kernel is formed** has two figures, both drawn as real
+separable terms $h(x)\,v(y)$: each term's horizontal and vertical 1-D kernels and their product, with pairs
+of terms summed into complex channels. **Components** uses each component's own separable form (the
+article's $\sqrt{a_0}$ form, or the $x^{2j} \times Q_j$ channels above). Its channels sum into the
+component, and the components into the kernel, which shows how much the components cancel.
+**Channels** uses the rendering channels, summed into the kernel as the shader accumulates them.
+Each image uses its own scale, printed below it.
 
 ### 4. Discrete implementation (WebGPU)
 
@@ -524,14 +605,14 @@ generation is one jitted GPU call with no data read back:
 
 Search heuristics, mostly taken from the article's solutions:
 
-- Channel slot $k$ oscillates within $(1.14k + 0.5)\pi \pm 0.4\pi$; a merged pair spans the bands of
-  the two slots it occupies.
+- Channel slot $k$ oscillates within $(1.14k + 0.5)\pi \pm 0.4\pi$; a component of multiplicity $m$ spans
+  the bands of the $m$ slots it occupies.
 - Initial decay $b \in [0.3,\ 1 + N_\text{ch}]$.
 - Initial weights within $\pm 2 \cdot 2.5^{N_\text{ch} - 1}$.
 
 **Exact weights (variable projection, the default).** With **Solve weights exactly (CPU
 workers)** checked, differential evolution ([`src/projected-de.js`](src/projected-de.js)) searches
-only the decays and frequencies, $2N$ dimensions instead of $4N$ (or $6N$ with merged pairs). Each
+only the decays and frequencies, $2N$ dimensions instead of $2N + 2N_\text{ch}$ (all weights). Each
 candidate's weights are the minimax optimum for its rates, solved by the exchange algorithm of
 the Remez refinement (below) on the DE grid, so its cost is
 $\delta(\theta) = \min_w \max_j W_j |t_j - K(x_j; \theta, w)|$. The weights are thereby always exactly
@@ -572,10 +653,10 @@ $b \ge 0.05$. The best kernel by true maximum error is kept. Gradients come from
 
 **Remez exchange refinement** ([`src/remez.js`](src/remez.js)) solves the same minimax problem on
 the dense grid, in float64 on the CPU, using its structure: the profile is linear in the weights
-$w = (r, i, r_1, i_1)$ and nonlinear only in the rates $\theta = (b, c)$:
+$w = (r_0, i_0, r_1, i_1, \dots)$ and nonlinear only in the rates $\theta = (b, c)$:
 
 $$
-K(x) = \sum_k w_k \varphi_k(s; \theta), \qquad \varphi \in \{e^{-bs}\cos cs,\ e^{-bs}\sin cs,\ s e^{-bs}\cos cs,\ s e^{-bs}\sin cs\},\quad s = x^2.
+K(x) = \sum_k w_k \varphi_k(s; \theta), \qquad \varphi \in \{s^q e^{-bs}\cos cs,\ s^q e^{-bs}\sin cs\}_{q < m},\quad s = x^2.
 $$
 
 *1. Optimal weights for fixed rates* are a discrete linear Chebyshev problem,

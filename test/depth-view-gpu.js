@@ -24,7 +24,7 @@ export async function depthViewGPU(device, check) {
       const params = new ArrayBuffer(32);
       new Uint32Array(params, 0, 2).set([depths.length, 1]);
       new Float32Array(params, 8, 1)[0] = exposure;
-      new Uint32Array(params, 12, 4).set([1, showSource, layered, 6]);
+      new Uint32Array(params, 12, 3).set([showSource, layered, 6]);
       device.queue.writeBuffer(uniform, 0, params);
       const encoder = device.createCommandEncoder();
       const pass = encoder.beginRenderPass({ colorAttachments: [{ view: texture.createView(),

@@ -1,10 +1,13 @@
 // Problem definition for circularly symmetric disc kernels built from phased Gaussians.
-// Component u: ((cos(c x²) r + sin(c x²) i) + x² (cos(c x²) r₁ + sin(c x²) i₁)) exp(-b x²),
-// params laid out as [b, c, r, i, r₁, i₁]. A single component has r₁ = i₁ = 0; a merged pair
-// (the limit of two coinciding rates) uses the x² term and costs two complex channels per pass.
-// The same 1-D profile, with x² → x² + y², is the 2-D kernel.
+// Component u: Re[P(x²) e^{λ x²}], λ = −b + ic, P(s) = Σ_k a_k s^k, a_k = r_k − i·i_k, that is
+// Σ_k x^{2k} (cos(c x²) r_k + sin(c x²) i_k) exp(-b x²), params laid out as [b, c, r₀, i₀, r₁, i₁, …].
+// Multiplicity m (terms k < m in use) is the limit of m coinciding rates and costs m complex
+// channels per pass; unused terms are zero. The same 1-D profile, with x² → x² + y², is the 2-D kernel.
 
-export const PARAMS_PER_COMPONENT = 6;
+export const MAX_MULTIPLICITY = 10;
+export const PARAMS_PER_COMPONENT = 2 + 2 * MAX_MULTIPLICITY;
+
+const padded = (component) => [...component, ...Array(PARAMS_PER_COMPONENT - component.length).fill(0)];
 
 // Equiripple sets from the article's source (phaseGaussParallelOpti.cpp), transition bandwidth 0.2.
 export const PRESETS = {
@@ -43,7 +46,7 @@ export const PRESETS = {
 
 export function presetParams(n) {
   const p = PRESETS[n];
-  return Array.from({ length: n }, (_, u) => [...p.slice(u * 4, u * 4 + 4), 0, 0]).flat();
+  return Array.from({ length: n }, (_, u) => padded(p.slice(u * 4, u * 4 + 4))).flat();
 }
 
 // The article's "almost no negative values" sets, in its separable form (a, b, c, d): 1-D kernel
@@ -58,7 +61,7 @@ export const NONNEGATIVE_PRESETS = {
 
 // Re[(c + d i)² e^{(a + b i) s}] = (c² − d²) cos(bs) e^{as} − 2cd sin(bs) e^{as}.
 export function nonnegativePresetParams(n) {
-  return NONNEGATIVE_PRESETS[n].flatMap(([a, b, c, d]) => [-a, b, c * c - d * d, -2 * c * d, 0, 0]);
+  return NONNEGATIVE_PRESETS[n].flatMap(([a, b, c, d]) => padded([-a, b, c * c - d * d, -2 * c * d]));
 }
 
 // The kernel doesn't depend on component order; ascending frequency matches the search's
@@ -81,10 +84,26 @@ export function defaultProblem() {
   };
 }
 
-// 2 for components whose x² term is in use, else 1.
+// Per component, 1 + the highest power of s with a nonzero weight (at least 1).
 export function multiplicities(params) {
   const n = params.length / PARAMS_PER_COMPONENT;
-  return Array.from({ length: n }, (_, u) => (params[u * 6 + 4] || params[u * 6 + 5] ? 2 : 1));
+  return Array.from({ length: n }, (_, u) => {
+    let m = MAX_MULTIPLICITY;
+    const k = u * PARAMS_PER_COMPONENT;
+    while (m > 1 && !params[k + 2 * m] && !params[k + 2 * m + 1]) m--;
+    return m;
+  });
+}
+
+// Params stored with `stride` numbers per component (6 in older view states), in this layout.
+export function withStride(params, stride) {
+  const n = params.length / stride;
+  if (!Number.isInteger(n) || stride < 4 || stride % 2) throw new Error(`Bad kernel layout: ${params.length} numbers, ${stride} per component.`);
+  return Array.from({ length: n }, (_, u) => {
+    const component = params.slice(u * stride, (u + 1) * stride);
+    if (component.slice(PARAMS_PER_COMPONENT).some((v) => v)) throw new Error(`Multiplicity above ${MAX_MULTIPLICITY} is not supported.`);
+    return padded(component.slice(0, PARAMS_PER_COMPONENT));
+  }).flat();
 }
 
 export const channelCount = (multiplicity) => multiplicity.reduce((a, m) => a + m, 0);
@@ -94,7 +113,7 @@ export function centerFrequency(k) {
   return (k * 1.14 + 0.5) * Math.PI;
 }
 
-// Frequency band of each component: a merged pair spans the bands of the two slots it occupies.
+// Frequency band of each component: one of multiplicity m spans the bands of the m slots it occupies.
 export function frequencyBands(multiplicity) {
   let slot = 0;
   return multiplicity.map((m) => {
@@ -121,7 +140,7 @@ export function sampleGrid(problem, passSamples = problem.passSamples, stopSampl
 }
 
 // Reflection bounds keep the search in a sensible region; initial ranges seed the population.
-// The x² weights of single components are pinned to zero.
+// The weights of unused powers of s are pinned to zero.
 export function bounds(problem) {
   const n = problem.components;
   const d = n * PARAMS_PER_COMPONENT;
@@ -148,28 +167,41 @@ export function bounds(problem) {
       initLo[k + 1] = 0.2;
       initHi[k + 1] = topFrequency;
     }
-    const merged = problem.multiplicity[u] === 2;
-    for (const j of [2, 3, 4, 5]) {
-      const live = j < 4 || merged;
-      foldLo[k + j] = live ? -1e9 : 0;
-      foldHi[k + j] = live ? 1e9 : 0;
-      initLo[k + j] = live ? -weight : 0;
-      initHi[k + j] = live ? weight : 0;
+    const live = 2 + 2 * problem.multiplicity[u];
+    for (let j = 2; j < PARAMS_PER_COMPONENT; j++) {
+      foldLo[k + j] = j < live ? -1e9 : 0;
+      foldHi[k + j] = j < live ? 1e9 : 0;
+      initLo[k + j] = j < live ? -weight : 0;
+      initHi[k + j] = j < live ? weight : 0;
     }
   }
   return { foldLo, foldHi, initLo, initHi };
 }
 
+// Component at offset k of params, at s = x² (Horner in s).
+function componentAt(params, k, s) {
+  let re = 0;
+  let im = 0;
+  for (let j = k + PARAMS_PER_COMPONENT - 2; j > k; j -= 2) {
+    re = re * s + params[j];
+    im = im * s + params[j + 1];
+  }
+  return (Math.cos(params[k + 1] * s) * re + Math.sin(params[k + 1] * s) * im) * Math.exp(-params[k] * s);
+}
+
 export function componentProfile(params, u, x) {
-  const [b, c, r, i, r1, i1] = params.slice(u * 6, u * 6 + 6);
-  const s = x * x;
-  return (Math.cos(c * s) * (r + r1 * s) + Math.sin(c * s) * (i + i1 * s)) * Math.exp(-b * s);
+  return componentAt(params, u * PARAMS_PER_COMPONENT, x * x);
+}
+
+// Kernel profile at s = x².
+export function profileAt(params, s) {
+  let sum = 0;
+  for (let k = 0; k < params.length; k += PARAMS_PER_COMPONENT) sum += componentAt(params, k, s);
+  return sum;
 }
 
 export function profile(params, x) {
-  let sum = 0;
-  for (let u = 0; u < params.length / PARAMS_PER_COMPONENT; u++) sum += componentProfile(params, u, x);
-  return sum;
+  return profileAt(params, x * x);
 }
 
 // Max |K(x) − target|, weighted by grid.negativeWeight where K(x) < 0.
@@ -188,83 +220,297 @@ function complexSqrt([re, im]) {
   return [Math.sqrt((m + re) / 2), Math.sign(im || 1) * Math.sqrt(Math.max(0, (m - re) / 2))];
 }
 
-const scaled = ([re, im], k) => [re * k, im * k];
+// Complex polynomial Σ_k w[k] s^k at real s (Horner), as [re, im].
+export function channelWeight(w, s) {
+  let re = 0;
+  let im = 0;
+  for (let k = w.length - 1; k >= 0; k--) {
+    re = re * s + w[k][0];
+    im = im * s + w[k][1];
+  }
+  return [re, im];
+}
 
-// Separable channels: each has horizontal kernel h(x) = (h0 + h2 x²) e^{λ x²} and vertical kernel
-// v(y) = (v0 + v2 y²) e^{λ y²}, λ = -b + i c (complex coefficients as [re, im]), such that the
-// 2-D kernel is Re Σ h(x) v(y). With B = r - i·i and A = r₁ - i·i₁ a component is Re[(B + A s) e^{λ s}].
-//   Single:      one channel, h = v = √B e^{λ x²} (the article's weight absorption).
-//   Merged pair: two channels, σ × (B + A y²)/σ and σ x² × A/σ, summing to (B + A x² + A y²) e^{λ s};
-//                σ only balances magnitudes between the passes.
-export function separableChannels(params) {
-  const zero = [0, 0];
-  const out = [];
-  for (let u = 0; u < params.length / PARAMS_PER_COMPONENT; u++) {
-    const [b, c, r, i, r1, i1] = params.slice(u * 6, u * 6 + 6);
-    const B = [r, -i];
-    const A = [r1, -i1];
-    const base = { component: u, decay: b, phase: c };
-    if (!r1 && !i1) {
-      const w = complexSqrt(B);
-      out.push({ ...base, h0: w, h2: zero, v0: w, v2: zero });
-    } else {
-      const sigma = Math.sqrt(Math.max(Math.hypot(...A), Math.hypot(...B)));
-      out.push({ ...base, h0: [sigma, 0], h2: zero, v0: scaled(B, 1 / sigma), v2: scaled(A, 1 / sigma) });
-      out.push({ ...base, h0: zero, h2: [sigma, 0], v0: scaled(A, 1 / sigma), v2: zero });
+const binomial = (n, k) => {
+  let c = 1;
+  for (let j = 1; j <= k; j++) c = (c * (n - k + j)) / j;
+  return c;
+};
+
+// R of the Householder QR of a row-major rows × n matrix (rows ≥ n), as a row-major n × n array.
+function triangularFactor(A, rows, n) {
+  const a = Float64Array.from(A);
+  for (let k = 0; k < n; k++) {
+    let norm = 0;
+    for (let i = k; i < rows; i++) norm += a[i * n + k] ** 2;
+    norm = Math.sqrt(norm);
+    if (norm === 0) continue;
+    const alpha = a[k * n + k] > 0 ? -norm : norm;
+    a[k * n + k] -= alpha;
+    let vv = 0;
+    for (let i = k; i < rows; i++) vv += a[i * n + k] ** 2;
+    for (let j = k + 1; j < n; j++) {
+      let dot = 0;
+      for (let i = k; i < rows; i++) dot += a[i * n + k] * a[i * n + j];
+      const f = (2 * dot) / vv;
+      for (let i = k; i < rows; i++) a[i * n + j] -= f * a[i * n + k];
+    }
+    a[k * n + k] = alpha;
+  }
+  const R = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) for (let j = i; j < n; j++) R[i * n + j] = a[i * n + j];
+  return R;
+}
+
+// Eigenvalues and eigenvectors (columns of V) of a symmetric row-major n × n matrix, by cyclic Jacobi.
+function symmetricEigen(S, n) {
+  const a = Float64Array.from(S);
+  const V = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) V[i * n + i] = 1;
+  for (let sweep = 0; sweep < 50; sweep++) {
+    let off = 0;
+    let diag = 0;
+    for (let p = 0; p < n; p++) {
+      diag += a[p * n + p] ** 2;
+      for (let q = p + 1; q < n; q++) off += a[p * n + q] ** 2;
+    }
+    if (!(off > 1e-32 * diag)) break;
+    for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) {
+      const apq = a[p * n + q];
+      if (apq === 0) continue;
+      const theta = (a[q * n + q] - a[p * n + p]) / (2 * apq);
+      const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+      const c = 1 / Math.sqrt(t * t + 1);
+      const s = t * c;
+      for (let k = 0; k < n; k++) {
+        const x = a[k * n + p], y = a[k * n + q];
+        a[k * n + p] = c * x - s * y;
+        a[k * n + q] = s * x + c * y;
+      }
+      for (let k = 0; k < n; k++) {
+        const x = a[p * n + k], y = a[q * n + k];
+        a[p * n + k] = c * x - s * y;
+        a[q * n + k] = s * x + c * y;
+      }
+      for (let k = 0; k < n; k++) {
+        const x = V[k * n + p], y = V[k * n + q];
+        V[k * n + p] = c * x - s * y;
+        V[k * n + q] = s * x + c * y;
+      }
     }
   }
-  return out;
+  return { values: Array.from({ length: n }, (_, i) => a[i * n + i]), V };
 }
+
+// One pass of a channel at s = t²: Σ over terms (C(s) cos(phase s) + S(s) sin(phase s)) e^{-decay s},
+// with complex polynomials C and S in s (coefficients [re, im] of s^0, s^1, …). Returns [re, im].
+export function channelSide(side, s) {
+  let re = 0;
+  let im = 0;
+  for (const { decay, phase, cos, sin } of side) {
+    const e = Math.exp(-decay * s);
+    const [cr, ci] = channelWeight(cos, s);
+    const [sr, si] = channelWeight(sin, s);
+    const co = Math.cos(phase * s) * e;
+    const si_ = Math.sin(phase * s) * e;
+    re += cr * co + sr * si_;
+    im += ci * co + si * si_;
+  }
+  return [re, im];
+}
+
+// Each component's own separable form, in channelSide format: component u is Re[P(s) e^{λ s}] with
+// P(x² + y²) = Σ_{j<m} x^{2j} Q_j(y²), Q_j(t) = Σ_l C(j + l, j) a_{j+l} t^l, so channel j has
+// h = σ x^{2j} e^{λ x²} and v = Q_j(y²) e^{λ y²} / σ (m = 1: h = v = √a₀ e^{λ x²}, the article's form).
+export function componentChannels(params) {
+  const mult = multiplicities(params);
+  // P(s) e^{λ s} = (P cos + iP sin) e^{-b s}
+  const side = (u, P) => [{ decay: params[u * PARAMS_PER_COMPONENT], phase: params[u * PARAMS_PER_COMPONENT + 1], cos: P, sin: P.map(([re, im]) => [-im, re]) }];
+  return mult.flatMap((m, u) => {
+    const k0 = u * PARAMS_PER_COMPONENT;
+    const a = Array.from({ length: m }, (_, q) => [params[k0 + 2 + 2 * q], -params[k0 + 3 + 2 * q]]);
+    if (m === 1) {
+      const w = complexSqrt(a[0]);
+      return [{ component: u, h: side(u, [w]), v: side(u, [w]) }];
+    }
+    return Array.from({ length: m }, (_, j) => {
+      const Q = Array.from({ length: m - j }, (_, l) => a[j + l].map((z) => z * binomial(j + l, j)));
+      const sigma = Math.sqrt(Math.max(...Q.map((z) => Math.hypot(...z)))) || 1;
+      const h = Array.from({ length: j + 1 }, (_, q) => (q === j ? [sigma, 0] : [0, 0]));
+      return { component: u, h: side(u, h), v: side(u, Q.map((z) => z.map((c) => c / sigma))) };
+    });
+  });
+}
+const QUADRATURE_NODES = 1024;
+const NEGLIGIBLE_TERM = 1e-14;
+
+// Separable channels for rendering: the 2-D kernel is Re Σ_n h_n(x) v_n(y), each pass evaluated by
+// channelSide. The real kernel is fᵀ(x) C f(y) in the real basis f = t^k {cos, sin}(c x²) e^{−b x²}
+// (t = 2b x², every component and power k < m). Orthonormalizing f over [0, support] (QR, R) and
+// diagonalizing R C Rᵀ = Σ e_j u_j u_jᵀ gives Re K = Σ e_j g_j(x) g_j(y) with g_j = fᵀ C Rᵀ u_j / e_j,
+// paired into complex channels: Re[(√|e_a| g_a + i√|e_b| g_b)(±√|e_a| g_a ∓ i√|e_b| g_b)]. Unlike
+// per-component forms, the passes carry no large cancelling parts that f16 intermediates can't resolve.
+export function separableChannels(params, support = 2) {
+  const mult = multiplicities(params);
+  const terms = [];
+  mult.forEach((m, u) => {
+    const k0 = u * PARAMS_PER_COMPONENT;
+    for (const part of [0, 1]) for (let k = 0; k < m; k++) terms.push({ u, part, k, b: params[k0], c: params[k0 + 1] });
+  });
+  const n = terms.length;
+  const C = new Float64Array(n * n);
+  let start = 0;
+  mult.forEach((m, u) => {
+    const k0 = u * PARAMS_PER_COMPONENT;
+    const scale = 2 * params[k0];
+    for (let k = 0; k < m; k++) for (let l = 0; k + l < m; l++) {
+      const f = binomial(k + l, k) / scale ** (k + l);
+      const re = params[k0 + 2 + 2 * (k + l)] * f; // Re a_{k+l}
+      const im = -params[k0 + 3 + 2 * (k + l)] * f; // Im a_{k+l}
+      // Re[a (cos_x + i sin_x)(cos_y + i sin_y)] = Re a (cos cos − sin sin) − Im a (cos sin + sin cos)
+      C[(start + k) * n + start + l] = re;
+      C[(start + m + k) * n + start + m + l] = -re;
+      C[(start + k) * n + start + m + l] = -im;
+      C[(start + m + k) * n + start + l] = -im;
+    }
+    start += 2 * m;
+  });
+  const rows = QUADRATURE_NODES;
+  const A = new Float64Array(rows * n);
+  for (let i = 0; i < rows; i++) {
+    const x = ((i + 0.5) * support) / rows;
+    const s = x * x;
+    const w = Math.sqrt(support / rows);
+    terms.forEach(({ part, k, b, c }, p) => {
+      A[i * n + p] = w * (2 * b * s) ** k * (part ? Math.sin(c * s) : Math.cos(c * s)) * Math.exp(-b * s);
+    });
+  }
+  const R = triangularFactor(A, rows, n);
+  const T = new Float64Array(n * n); // C Rᵀ
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+    let sum = 0;
+    for (let k = j; k < n; k++) sum += C[i * n + k] * R[j * n + k];
+    T[i * n + j] = sum;
+  }
+  const S = new Float64Array(n * n); // R C Rᵀ
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+    let sum = 0;
+    for (let k = i; k < n; k++) sum += R[i * n + k] * T[k * n + j];
+    S[i * n + j] = sum;
+  }
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) S[i * n + j] = S[j * n + i] = (S[i * n + j] + S[j * n + i]) / 2;
+  const { values, V } = symmetricEigen(S, n);
+  const largest = Math.max(0, ...values.map(Math.abs));
+  const kept = values
+    .map((value, j) => ({ value, j }))
+    .filter(({ value }) => Math.abs(value) > NEGLIGIBLE_TERM * largest)
+    .sort((p, q) => Math.abs(q.value) - Math.abs(p.value))
+    .map(({ value, j }) => {
+      const coef = new Float64Array(n);
+      for (let i = 0; i < n; i++) {
+        let sum = 0;
+        for (let k = 0; k < n; k++) sum += T[i * n + k] * V[k * n + j];
+        coef[i] = sum / value;
+      }
+      return { value, coef };
+    });
+  // A pass as Σ_q factor_q g_q, factors complex: per component, cos and sin polynomials in s.
+  const side = (parts) => mult.map((m, u) => {
+    const k0 = u * PARAMS_PER_COMPONENT;
+    const scale = 2 * params[k0];
+    const poly = (part) => Array.from({ length: m }, (_, k) => {
+      const p = terms.findIndex((t) => t.u === u && t.part === part && t.k === k);
+      return parts.reduce(([re, im], { factor: [fr, fi], coef }) => [re + fr * coef[p] * scale ** k, im + fi * coef[p] * scale ** k], [0, 0]);
+    });
+    return { decay: params[k0], phase: params[k0 + 1], cos: poly(0), sin: poly(1) };
+  });
+  const channels = [];
+  for (let j = 0; j < kept.length; j += 2) {
+    const [a, b] = [kept[j], kept[j + 1]];
+    const sa = Math.sqrt(Math.abs(a.value));
+    const h = [{ factor: [sa, 0], coef: a.coef }];
+    const v = [{ factor: [Math.sign(a.value) * sa, 0], coef: a.coef }];
+    if (b) {
+      const sb = Math.sqrt(Math.abs(b.value));
+      h.push({ factor: [0, sb], coef: b.coef });
+      v.push({ factor: [0, -Math.sign(b.value) * sb], coef: b.coef });
+    }
+    channels.push({ h: side(h), v: side(v) });
+  }
+  return channels;
+}
+
+const powerOfX2 = (k) => Array(k).fill("x*x").join("*");
 
 export function formatParams(params, problem, error) {
   const n = params.length / PARAMS_PER_COMPONENT;
   const mult = multiplicities(params);
   const fmt = (v) => v.toFixed(10);
+  const higher = mult.filter((m) => m > 1).length;
   const lines = [
-    `Number of components: ${n} (${mult.filter((m) => m === 2).length} merged pairs, ` +
+    `Number of components: ${n} (${higher} with repeated rates, multiplicities ${mult.join(", ")}; ` +
       `${channelCount(mult)} complex channels per pass), transition bandwidth: ${problem.transition}, ` +
       `ripple: ±${error.toFixed(6)}`,
     "",
-    "// 1-D profile components (article format; merged pairs add an x*x term):",
+    "// 1-D profile components (article format; multiplicity m adds terms up to (x*x)^(m-1)):",
   ];
   for (let u = 0; u < n; u++) {
-    const [b, c, r, i, r1, i1] = params.slice(u * 6, u * 6 + 6);
-    const osc = (wr, wi) => `cos(x*x*${fmt(c)}) * ${fmt(wr)} + sin(x*x*${fmt(c)}) * ${fmt(wi)}`;
-    lines.push(
-      mult[u] === 1
-        ? `(${osc(r, i)}) * exp(-${fmt(b)}*x*x)`
-        : `((${osc(r, i)}) + x*x * (${osc(r1, i1)})) * exp(-${fmt(b)}*x*x)`,
-    );
+    const k = u * PARAMS_PER_COMPONENT;
+    const [b, c] = [params[k], params[k + 1]];
+    const osc = (q) => `cos(x*x*${fmt(c)}) * ${fmt(params[k + 2 + 2 * q])} + sin(x*x*${fmt(c)}) * ${fmt(params[k + 3 + 2 * q])}`;
+    const terms = Array.from({ length: mult[u] }, (_, q) => (q ? `${powerOfX2(q)} * (${osc(q)})` : `(${osc(q)})`));
+    lines.push(mult[u] === 1 ? `${terms[0]} * exp(-${fmt(b)}*x*x)` : `(${terms.join(" + ")}) * exp(-${fmt(b)}*x*x)`);
   }
-  lines.push("", "// b, c, r, i (single) or b, c, r, i, r1, i1 (merged pair):");
-  for (let u = 0; u < n; u++) lines.push(params.slice(u * 6, u * 6 + (mult[u] === 1 ? 4 : 6)).map(fmt).join(", "));
-  const channels = separableChannels(params);
+  lines.push("", "// b, c, r, i (single), followed by r1, i1, r2, i2, … (weights of x^2, x^4, …) for multiplicity > 1:");
+  for (let u = 0; u < n; u++) {
+    lines.push(params.slice(u * PARAMS_PER_COMPONENT, u * PARAMS_PER_COMPONENT + 2 + 2 * mult[u]).map(fmt).join(", "));
+  }
   if (mult.every((m) => m === 1)) {
     lines.push("", "// Separable form (article's update): a, b, c, d with 1-D kernel (c + d i) exp((a + b i) x²)");
-    for (const ch of channels) lines.push([-ch.decay, ch.phase, ...ch.h0].map(fmt).join(", "));
-  } else {
-    lines.push(
-      "",
-      "// Separable channels: kernel = Re Σ h(x) v(y), h(x) = (h0 + h2 x²) exp((a + b i) x²), v(y) likewise",
-      "// a, b, h0.re, h0.im, h2.re, h2.im, v0.re, v0.im, v2.re, v2.im",
-    );
-    for (const ch of channels) lines.push([-ch.decay, ch.phase, ...ch.h0, ...ch.h2, ...ch.v0, ...ch.v2].map(fmt).join(", "));
+    for (let u = 0; u < n; u++) {
+      const k = u * PARAMS_PER_COMPONENT;
+      lines.push([-params[k], params[k + 1], ...complexSqrt([params[k + 2], -params[k + 3]])].map(fmt).join(", "));
+    }
   }
+  const channels = separableChannels(params, 1 + problem.transition);
+  const basis = mult.flatMap((m, u) => Array.from({ length: m }, (_, k) => [`${u} cos x^${2 * k}`, `${u} sin x^${2 * k}`]).flat());
+  const row = (side) => side.flatMap(({ cos, sin }) => cos.flatMap((z, k) => [...z, ...sin[k]])).map(fmt).join(", ");
+  lines.push(
+    "",
+    `// Rendering channels (${channels.length}, as the blur uses them): kernel(x, y) = Re Σ_n h_n(x) v_n(y), with`,
+    "// h = H f(x) and v = V f(y), where f are the real basis functions of the components above:",
+    "//   'u cos x^2k' = x^2k cos(c_u x²) exp(-b_u x²), 'u sin x^2k' = x^2k sin(c_u x²) exp(-b_u x²).",
+    "// The kernel is f(x)ᵀ Re(Hᵀ V) f(y), and Re(Hᵀ V) is the components' weight matrix (up to rounding",
+    "// and, at high multiplicity, nearly dependent basis directions). Rows: channels; entries re, im; columns:",
+    `// ${basis.join(", ")}`,
+    "// H:",
+    ...channels.map((ch) => row(ch.h)),
+    "// V:",
+    ...channels.map((ch) => row(ch.v)),
+  );
   return lines.join("\n");
 }
 
-// One component per line: 4 numbers (single) or 6 (merged pair). Unstructured text: groups of 4.
+// One component per line: b, c, r, i and, for multiplicity m > 1, r1, i1, … up to r(m-1), i(m-1).
+// The whole "Current kernel" text also works: its parameter section is used. Unstructured text: groups of 4.
 export function parseParams(text) {
   const numbersIn = (s) => (s.match(/-?\d+(?:\.\d+)?(?:e[-+]?\d+)?/gi) ?? []).map(Number);
-  const rows = text.split(/\r?\n/).map(numbersIn).filter((row) => row.length > 0);
-  if (rows.length > 1 && rows.every((row) => row.length === 4 || row.length === 6)) {
-    return rows.flatMap((row) => (row.length === 4 ? [...row, 0, 0] : row));
+  let lines = text.split(/\r?\n/);
+  const section = lines.findIndex((line) => line.trim().startsWith("// b, c, r, i"));
+  if (section >= 0) {
+    const end = lines.findIndex((line, i) => i > section && (!line.trim() || line.trim().startsWith("//")));
+    lines = lines.slice(section + 1, end < 0 ? undefined : end);
+  }
+  const rows = lines.map(numbersIn).filter((row) => row.length > 0);
+  if (rows.length >= (section >= 0 ? 1 : 2) && rows.every((row) => row.length >= 4 && row.length % 2 === 0 && row.length <= PARAMS_PER_COMPONENT)) {
+    return rows.flatMap(padded);
   }
   const numbers = rows.flat();
   if (numbers.length === 0 || numbers.length % 4 !== 0) {
     throw new Error(
-      `Expected one component per line (b, c, r, i or b, c, r, i, r1, i1), or groups of 4 numbers; got ${numbers.length}.`,
+      `Expected one component per line (b, c, r, i, then r1, i1, … for multiplicity up to ${MAX_MULTIPLICITY}), ` +
+        `or groups of 4 numbers; got ${numbers.length}.`,
     );
   }
-  return Array.from({ length: numbers.length / 4 }, (_, u) => [...numbers.slice(u * 4, u * 4 + 4), 0, 0]).flat();
+  return Array.from({ length: numbers.length / 4 }, (_, u) => padded(numbers.slice(u * 4, u * 4 + 4))).flat();
 }

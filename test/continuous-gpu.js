@@ -1,5 +1,7 @@
 import { radiusTables } from '../src/radius-tables.js';
-import { presetParams, separableChannels } from '../src/problem.js';
+import { PARAMS_PER_COMPONENT, presetParams, separableChannels } from '../src/problem.js';
+
+const pad = (c) => [...c, ...Array(PARAMS_PER_COMPONENT - c.length).fill(0)];
 
 export async function continuousGPU(renderer, check, read) {
   for (const interpolate of [true, false]) {
@@ -10,7 +12,11 @@ export async function continuousGPU(renderer, check, read) {
   const radii = new Float32Array(width * height).fill(9);
   renderer.setImage(source, width, height);
   renderer.setRadiusMap(radii);
-  for (const [name, params] of [['preset1', presetParams(1)], ['preset6', presetParams(6)], ['merged', [3, 0, 1, 0, 1, 0]]]) {
+  for (const [name, params] of [
+    ['preset1', presetParams(1)], ['preset6', presetParams(6)], ['merged', pad([3, 0, 1, 0, 1, 0])],
+    ['multiplicity 4', pad([4, 3, 0.5, 0.1, 0.3, -0.2, 0.1, 0.05, 0.02, -0.01])],
+    ['multiplicity 10', pad([5, 3, ...Array.from({ length: 20 }, (_, j) => (j % 2 ? 0.5 : 1) * (-0.4) ** (j >> 1))])],
+  ]) {
     renderer.setKernel(params, 9, 0.2);
     for (const interpolate of [false, true]) for (const precision of ['f32', 'f16']) for (const r of [0, 0.43, 1.2, 8.05]) {
       radii.fill(r);

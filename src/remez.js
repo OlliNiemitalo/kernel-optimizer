@@ -4,10 +4,10 @@
 // single-point exchange (Stiefel) algorithm, i.e. the dual simplex method on m + 1 reference rows.
 // The weight may depend on the sign of the error (W⁺ when t_j > a_j·z, else W⁻).
 //
-// The kernel is linear in its weights (r, i, r₁, i₁) and nonlinear in decays and frequencies:
+// The kernel is linear in its weights (r_k, i_k) and nonlinear in decays and frequencies:
 // optimalWeights() solves the weights exactly by exchange; remezSteps() refines everything.
 
-import { PARAMS_PER_COMPONENT, maxError, multiplicities } from "./problem.js";
+import { PARAMS_PER_COMPONENT, maxError, multiplicities, profileAt } from "./problem.js";
 
 // Householder QR of a p×m row-major matrix (p ≥ m). Returns explicit Q (p×p) and R (m×m).
 function qr(A, p, m) {
@@ -200,7 +200,7 @@ export function chebyshev(rows, target, wPlus, wMinus, { reference = null, maxIt
   return result;
 }
 
-// Parameter index layout: linear weights (r, i and, for merged pairs, r₁, i₁) and rates (b, c).
+// Parameter index layout: linear weights (r_k, i_k for k below the multiplicity) and rates (b, c).
 function layout(params) {
   return layoutFor(multiplicities(params));
 }
@@ -210,8 +210,7 @@ function layoutFor(mult) {
   const rates = [];
   mult.forEach((mu, u) => {
     const k = u * PARAMS_PER_COMPONENT;
-    linear.push(k + 2, k + 3);
-    if (mu === 2) linear.push(k + 4, k + 5);
+    for (let j = 2; j < 2 + 2 * mu; j++) linear.push(k + j);
     rates.push(k, k + 1);
   });
   return { linear, rates };
@@ -221,24 +220,26 @@ function layoutFor(mult) {
 function columns(params, s, indices) {
   const n = s.length;
   const cols = new Map(indices.map((j) => [j, new Float64Array(n)]));
-  for (let u = 0; u < params.length / PARAMS_PER_COMPONENT; u++) {
-    const k = u * PARAMS_PER_COMPONENT;
-    const [b, c, r, i, r1, i1] = params.slice(k, k + 6);
-    const need = [0, 1, 2, 3, 4, 5].map((o) => cols.get(k + o));
+  for (let k = 0; k < params.length; k += PARAMS_PER_COMPONENT) {
+    const need = Array.from({ length: PARAMS_PER_COMPONENT }, (_, o) => cols.get(k + o));
     if (!need.some(Boolean)) continue;
+    const b = params[k], c = params[k + 1];
     for (let t = 0; t < n; t++) {
       const st = s[t];
       const E = Math.exp(-b * st);
       const C = Math.cos(c * st) * E;
       const S = Math.sin(c * st) * E;
-      const re = r + r1 * st;
-      const im = i + i1 * st;
+      let re = 0, im = 0;
+      for (let j = k + PARAMS_PER_COMPONENT - 2; j > k; j -= 2) {
+        re = re * st + params[j];
+        im = im * st + params[j + 1];
+      }
       if (need[0]) need[0][t] = -st * (C * re + S * im);
       if (need[1]) need[1][t] = st * (C * im - S * re);
-      if (need[2]) need[2][t] = C;
-      if (need[3]) need[3][t] = S;
-      if (need[4]) need[4][t] = st * C;
-      if (need[5]) need[5][t] = st * S;
+      for (let o = 2, power = 1; o < PARAMS_PER_COMPONENT; o += 2, power *= st) {
+        if (need[o]) need[o][t] = power * C;
+        if (need[o + 1]) need[o + 1][t] = power * S;
+      }
     }
   }
   return indices.map((j) => cols.get(j));
@@ -264,7 +265,7 @@ function errorWeights(grid) {
   };
 }
 
-// Minimax-optimal linear weights (r, i, r₁, i₁) for the given decays and frequencies.
+// Minimax-optimal linear weights (r_k, i_k) for the given decays and frequencies.
 export function optimalWeights(params, grid) {
   const sol = new WeightSolver(grid, multiplicities(params)).solve(params);
   return { params: sol.params, error: sol.error, level: sol.level, exchanges: sol.exchanges };
@@ -298,12 +299,9 @@ export class WeightSolver {
         const i = t * m + col;
         flat[i] = Math.cos(c * st) * E;
         flat[i + 1] = Math.sin(c * st) * E;
-        if (mu === 2) {
-          flat[i + 2] = st * flat[i];
-          flat[i + 3] = st * flat[i + 1];
-        }
+        for (let q = 2; q < 2 * mu; q++) flat[i + q] = st * flat[i + q - 2];
       }
-      col += mu === 2 ? 4 : 2;
+      col += 2 * mu;
     });
     for (let t = 0; t < n; t++) for (let k = 0; k < m; k++) scale[k] = Math.max(scale[k], Math.abs(flat[t * m + k]));
     for (let k = 0; k < m; k++) scale[k] ||= 1;
@@ -328,27 +326,24 @@ export function solveCandidate(solver, { params, reference }) {
   }
 }
 
-// Profile on the grid, summed in the same order as problem.js profile().
+// Profile on the grid, computed as problem.js profile() does.
 function gridProfile(params, s) {
-  const K = new Float64Array(s.length);
-  for (let k = 0; k < params.length; k += PARAMS_PER_COMPONENT) {
-    const [b, c, r, i, r1, i1] = params.slice(k, k + 6);
-    for (let t = 0; t < s.length; t++) {
-      const st = s[t];
-      K[t] += (Math.cos(c * st) * (r + r1 * st) + Math.sin(c * st) * (i + i1 * st)) * Math.exp(-b * st);
-    }
-  }
-  return K;
+  return Float64Array.from(s, (st) => profileAt(params, st));
 }
 
-// For each parameter: which of (λ, B, A) it moves, and the complex direction. Order b, c, r, i, r₁, i₁.
-const DIRECTIONS = [[0, -1, 0], [0, 0, 1], [1, 1, 0], [1, 0, -1], [2, 1, 0], [2, 0, -1]];
+// For each parameter offset: which of (λ, a₀, a₁, …) it moves (kind 0 = λ, 1 + q = a_q), and the
+// complex direction. Offsets: b, c, r₀, i₀, r₁, i₁, …
+function direction(o) {
+  if (o < 2) return o === 0 ? [0, -1, 0] : [0, 0, 1];
+  const kind = 1 + ((o - 2) >> 1);
+  return o % 2 === 0 ? [kind, 1, 0] : [kind, 0, -1];
+}
 
 function derivativeSpec(live) {
   const comps = new Map();
   live.forEach((j, a) => {
     const u = Math.floor(j / PARAMS_PER_COMPONENT);
-    const [kind, cr, ci] = DIRECTIONS[j % PARAMS_PER_COMPONENT];
+    const [kind, cr, ci] = direction(j % PARAMS_PER_COMPONENT);
     if (!comps.has(u)) comps.set(u, []);
     comps.get(u).push({ a, kind, cr, ci });
   });
@@ -356,21 +351,29 @@ function derivativeSpec(live) {
 }
 
 // K(s), ∂K/∂s, ∂²K/∂s² and, if full, over live parameters ∂K/∂p, ∂²K/∂p∂s, ∂²K/∂p∂q.
-// Component: Re F, F = (B + A s) e^{λ s}, λ = −b + ic, B = r − i·i, A = r₁ − i·i₁. F is linear in
-// B and A, so the nonzero second parameter derivatives are F_λλ = s² P e, F_Bλ = s e, F_Aλ = s² e.
+// Component: Re F, F = P(s) e^{λ s}, λ = −b + ic, P(s) = Σ a_q s^q, a_q = r_q − i·i_q. Then
+// F_s = (P' + λP) e, F_ss = (P'' + 2λP' + λ²P) e, F_λ = s P e, F_{a_q} = s^q e, and F is linear in
+// the a_q, so the nonzero second parameter derivatives are F_λλ = s² P e and F_{a_q λ} = s^{q+1} e.
 function pointDerivatives(params, spec, s, full = true) {
   const { m, comps } = spec;
   let K = 0, Ks = 0, Kss = 0;
   const Kp = full && new Float64Array(m), Kps = full && new Float64Array(m), Kpp = full && new Float64Array(m * m);
   for (let k = 0, u = 0; k < params.length; k += PARAMS_PER_COMPONENT, u++) {
-    const [b, c, r, i, r1, i1] = params.slice(k, k + 6);
-    const lr = -b, li = c, Ar = r1, Ai = -i1;
+    const b = params[k], c = params[k + 1];
+    const lr = -b, li = c;
     const E = Math.exp(-b * s), er = Math.cos(c * s) * E, ei = Math.sin(c * s) * E;
-    const Pr = r + Ar * s, Pi = -i + Ai * s;
+    // P, P' (D) and P'' (D2) by Horner.
+    let Pr = 0, Pi = 0, Dr = 0, Di = 0, D2r = 0, D2i = 0;
+    for (let j = k + PARAMS_PER_COMPONENT - 2; j > k; j -= 2) {
+      D2r = D2r * s + 2 * Dr; D2i = D2i * s + 2 * Di;
+      Dr = Dr * s + Pr; Di = Di * s + Pi;
+      Pr = Pr * s + params[j]; Pi = Pi * s - params[j + 1];
+    }
     const LPr = lr * Pr - li * Pi, LPi = lr * Pi + li * Pr;
+    const LDr = lr * Dr - li * Di, LDi = lr * Di + li * Dr;
     const PEr = Pr * er - Pi * ei, PEi = Pr * ei + Pi * er;
-    const Qr = Ar + LPr, Qi = Ai + LPi; // A + λP
-    const Tr = 2 * (lr * Ar - li * Ai) + lr * LPr - li * LPi, Ti = 2 * (lr * Ai + li * Ar) + lr * LPi + li * LPr;
+    const Qr = Dr + LPr, Qi = Di + LPi; // P' + λP
+    const Tr = D2r + 2 * LDr + lr * LPr - li * LPi, Ti = D2i + 2 * LDi + lr * LPi + li * LPr;
     K += PEr;
     Ks += Qr * er - Qi * ei;
     Kss += Tr * er - Ti * ei;
@@ -378,15 +381,22 @@ function pointDerivatives(params, spec, s, full = true) {
     if (!dirs) continue;
     const lEr = lr * er - li * ei, lEi = lr * ei + li * er;
     const Ur = Pr + s * Qr, Ui = Pi + s * Qi;
-    const F = [[s * PEr, s * PEi], [er, ei], [s * er, s * ei]];
-    const G = [[Ur * er - Ui * ei, Ur * ei + Ui * er], [lEr, lEi], [er + s * lEr, ei + s * lEi]];
-    const LL = [s * s * PEr, s * s * PEi], BL = [s * er, s * ei], AL = [s * s * er, s * s * ei];
-    const second = [[LL, BL, AL], [BL, null, null], [AL, null, null]];
+    const F = (kind) => (kind === 0 ? [s * PEr, s * PEi] : [s ** (kind - 1) * er, s ** (kind - 1) * ei]);
+    const G = (kind) => {
+      if (kind === 0) return [Ur * er - Ui * ei, Ur * ei + Ui * er];
+      const q = kind - 1, dq = q ? q * s ** (q - 1) : 0, sq = s ** q;
+      return [dq * er + sq * lEr, dq * ei + sq * lEi];
+    };
+    const second = (d, f) =>
+      d === 0 && f === 0 ? [s * s * PEr, s * s * PEi]
+      : d === 0 || f === 0 ? [s ** (d + f) * er, s ** (d + f) * ei]
+      : null;
     for (const d of dirs) {
-      Kp[d.a] = d.cr * F[d.kind][0] - d.ci * F[d.kind][1];
-      Kps[d.a] = d.cr * G[d.kind][0] - d.ci * G[d.kind][1];
+      const Fd = F(d.kind), Gd = G(d.kind);
+      Kp[d.a] = d.cr * Fd[0] - d.ci * Fd[1];
+      Kps[d.a] = d.cr * Gd[0] - d.ci * Gd[1];
       for (const f of dirs) {
-        const X = second[d.kind][f.kind];
+        const X = second(d.kind, f.kind);
         if (!X) continue;
         const pr = d.cr * f.cr - d.ci * f.ci, pi = d.cr * f.ci + d.ci * f.cr;
         Kpp[d.a * m + f.a] = pr * X[0] - pi * X[1];

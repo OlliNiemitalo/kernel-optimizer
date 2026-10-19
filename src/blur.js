@@ -1,9 +1,9 @@
 // Separable circular blur with phased Gaussian components, as plain WebGPU compute shaders.
 //
 // The kernel is a sum of separable complex channels n with 1-D kernels h_n (horizontal) and
-// v_n (vertical), each of the form (k0 + k2 (t/R)²) exp((-b + i c) (t/R)²), t = -K..K taps,
-// R = disc radius in pixels. The 2-D kernel is Σ_n Re[h_n(x) v_n(y)]; a single component is
-// one channel, a merged pair (repeated rate) two (see separableChannels).
+// v_n (vertical), each of the form (k0 + k2 (t/R)² + k4 (t/R)⁴ + …) exp((-b + i c) (t/R)²), t = -K..K taps,
+// R = disc radius in pixels. The 2-D kernel is Σ_n Re[h_n(x) v_n(y)]; a component of multiplicity
+// m (m repeated rates) is m channels (see separableChannels).
 //
 // Memory: channels are processed one at a time, so only ONE channel's complex intermediate
 // exists, independent of the channel count:
@@ -32,7 +32,7 @@
 // outputs along the pass, every input sample and tap is read once per thread (the ROWS taps in
 // flight slide through registers), so loads per output drop by ~ROWS.
 
-import { separableChannels } from "./problem.js";
+import { channelSide, separableChannels } from "./problem.js";
 import { radiusTables, RADIUS_LINEAR_LIMIT, RADIUS_LINEAR_DENSITY, RADIUS_LEVELS_PER_OCTAVE } from "./radius-tables.js";
 
 export const MAX_CHANNELS = 16;
@@ -1128,23 +1128,16 @@ export function tapTables(channels, radii, transition) {
   const tables = radii.map((R, level) => {
     const K = halves[level];
     const byDir = [0, 1].map((dir) =>
-      channels.map(({ decay, phase, h0, h2, v0, v2 }, ch) => {
+      channels.map(({ h, v }, ch) => {
         const taps = new Float64Array(2 * (2 * K + 1));
         if (R === null) {
           taps[0] = ch === 0 ? 1 : 0;
           return taps;
         }
-        const [[k0r, k0i], [k2r, k2i]] = dir === 0 ? [h0, h2] : [v0, v2];
         for (let t = -K; t <= K; t++) {
-          // (k0 + k2 s) e^{(-b + i c) s} at s = (t / R)²
-          const s = (t / R) ** 2;
-          const e = Math.exp(-decay * s);
-          const er = e * Math.cos(phase * s);
-          const ei = e * Math.sin(phase * s);
-          const wr = k0r + k2r * s;
-          const wi = k0i + k2i * s;
-          taps[2 * (t + K)] = wr * er - wi * ei;
-          taps[2 * (t + K) + 1] = wr * ei + wi * er;
+          const [re, im] = channelSide(dir === 0 ? h : v, (t / R) ** 2);
+          taps[2 * (t + K)] = re;
+          taps[2 * (t + K) + 1] = im;
         }
         return taps;
       }),
@@ -1365,7 +1358,7 @@ export class BlurRenderer {
   }
 
   setKernel(params, radius, transition) {
-    const channels = separableChannels(params);
+    const channels = separableChannels(params, 1 + transition);
     if (channels.length > MAX_CHANNELS) throw new Error(`At most ${MAX_CHANNELS} separable channels.`);
     this.kernelSpec = { channels, radius, transition };
     this.tablesDirty = true;

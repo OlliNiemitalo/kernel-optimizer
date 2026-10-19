@@ -37,11 +37,12 @@ export async function captureBaseline() {
 export async function run(samples = 7, interpolate = false, scene = 'shapes') {
   const saved = JSON.parse(sessionStorage.getItem('blur-baseline-b6c1470') ?? 'null');
   if (!saved) throw new Error('Capture the baseline source in this tab before running the benchmark.');
-  const kernelURL = URL.createObjectURL(new Blob([saved.kernel], { type: 'text/javascript' }));
+  const problemURL = JSON.stringify(new URL('/src/problem.js', location.href).href);
+  const kernelURL = URL.createObjectURL(new Blob([saved.kernel.replace("'./problem.js'", problemURL)], { type: 'text/javascript' }));
   const tableURL = saved.tables ? URL.createObjectURL(new Blob([
     saved.tables.replace("'./continuous-kernel.js'", JSON.stringify(kernelURL)),
   ], { type: 'text/javascript' })) : null;
-  const source = saved.blur.replace('"./problem.js"', JSON.stringify(new URL('/src/problem.js', location.href).href))
+  const source = saved.blur.replace('"./problem.js"', problemURL)
     .replace('"./continuous-kernel.js"', JSON.stringify(kernelURL))
     .replace('"./radius-tables.js"', JSON.stringify(tableURL));
   const baselineURL = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));

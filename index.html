@@ -15,8 +15,10 @@
       <h1>Circular blur kernel optimizer</h1>
       <p>
         Disc kernels as sums of phased Gaussians <code>(cos(c r²)·r<sub>w</sub> + sin(c r²)·i<sub>w</sub>)·e<sup>−b r²</sup></code>
-        and, optionally, merged pairs (repeated rates) with an extra r² term,
-        each separable into horizontal and vertical complex 1-D passes. Global search by differential evolution over
+        and, optionally, components with a repeated rate (multiplicity <i>m</i> up to 10) and extra r², r⁴, … terms.
+        For rendering, the components are transformed together into separable channels, each a horizontal and a
+        vertical complex 1-D pass, by a fixed linear map (reported with the kernel) chosen so that the passes stay about
+        as small as the kernel and 16-bit intermediates suffice. Global search by differential evolution over
         decays and frequencies, with exact minimax weights solved by Remez exchange on CPU workers (or over all parameters
         on the GPU with <a href="https://github.com/hamk-uas/jax-js-nonconsuming">jax-js-nonconsuming</a>), then local
         Remez refinement or gradient fine-tuning; the blur demo is plain WebGPU shaders. After
@@ -25,7 +27,7 @@
       <nav class="links" aria-label="Documentation">
         <a data-readme="" href="https://github.com/OlliNiemitalo/kernel-optimizer">Source and README on GitHub</a>
         <a data-readme="#how-it-works" href="https://github.com/OlliNiemitalo/kernel-optimizer#how-it-works">How it works</a>
-        <a data-readme="#2-kernel-model" href="https://github.com/OlliNiemitalo/kernel-optimizer#2-kernel-model">Merged pairs</a>
+        <a data-readme="#2-kernel-model" href="https://github.com/OlliNiemitalo/kernel-optimizer#2-kernel-model">Repeated rates</a>
         <a data-readme="#3-from-components-to-separable-channels" href="https://github.com/OlliNiemitalo/kernel-optimizer#3-from-components-to-separable-channels">Separable channels</a>
         <a data-readme="#4-discrete-implementation-webgpu" href="https://github.com/OlliNiemitalo/kernel-optimizer#4-discrete-implementation-webgpu">WebGPU implementation</a>
         <a data-readme="#spatially-varying-radius" href="https://github.com/OlliNiemitalo/kernel-optimizer#spatially-varying-radius">Depth of field, z-buffer and occlusion</a>
@@ -173,8 +175,9 @@
               <label>Multiplicities <input id="multiplicity" type="text" value="1, 1, 1" spellcheck="false" /></label>
               <details class="help">
                 <summary>About multiplicities</summary>
-                <p class="note">Per component: 1 = single, 2 = merged pair, i.e. two coinciding rates in closed form,
-                  <code>(B + A r²)·e<sup>λr²</sup></code>, costing two complex channels per pass. Example: 2, 2, 1.
+                <p class="note">Per component, 1 to 10: <i>m</i> coinciding rates in closed form,
+                  <code>(a<sub>0</sub> + a<sub>1</sub> r² + … + a<sub><i>m</i>−1</sub> r<sup>2(<i>m</i>−1)</sup>)·e<sup>λr²</sup></code>,
+                  costing <i>m</i> complex channels per pass (1 = single, 2 = merged pair). Example: 2, 2, 1.
                   <a data-readme="#2-kernel-model" href="https://github.com/OlliNiemitalo/kernel-optimizer#2-kernel-model">More in the README</a>.</p>
               </details>
             </fieldset>
@@ -262,7 +265,32 @@
               <button id="copy">Copy</button>
               <button id="applyPasted">Use pasted parameters…</button>
             </div>
-            <textarea id="pasted" rows="3" placeholder="One component per line: b, c, r, i (single) or b, c, r, i, r1, i1 (merged pair)" spellcheck="false" hidden></textarea>
+            <textarea id="pasted" rows="3" placeholder="One component per line: b, c, r, i (single), then r1, i1, r2, i2, … for multiplicity 2 to 10" spellcheck="false" hidden></textarea>
+            <h3>How the kernel is formed</h3>
+            <p class="note">Each component is separable on its own, but optimized components often have large weights,
+              and their imaginary parts cancel: the kernel is only the real part of the sum. Passes that large would lose
+              the kernel in 16-bit intermediates. So the blur instead uses channels from a joint eigendecomposition of the
+              real kernel, whose passes are no larger than the kernel needs, at the same channel count.
+              Each image below is normalized to its own peak (shown below it), in the colors of the 2-D kernel
+              above, over the support |x|, |y| ≤ 1 + transition.</p>
+            <div class="decomposition">
+              <figure>
+                <figcaption>Components</figcaption>
+                <p class="note">Each component's own separable form: one complex channel √a<sub>0</sub> e<sup>λx²</sup> ×
+                  √a<sub>0</sub> e<sup>λy²</sup> for a single component (the article's), or <i>m</i> channels x<sup>2j</sup> e<sup>λx²</sup> ×
+                  Q<sub>j</sub>(y²) e<sup>λy²</sup> for multiplicity <i>m</i>, summed into the component u, and the components into the
+                  kernel K. Rows are real terms h(x) v(y) as in Channels; their sizes show any cancellation between components.</p>
+                <canvas id="componentsFigure" aria-label="Components summed into the kernel"></canvas>
+              </figure>
+              <figure>
+                <figcaption>Channels</figcaption>
+                <p class="note">The blur's separable passes, transformed from the components as a whole. Each row is a
+                  horizontal 1-D kernel h(x) times a vertical one v(y); pairs of these real terms are the complex channels
+                  Re[h(x) v(y)] = h<sub>re</sub>v<sub>re</sub> − h<sub>im</sub>v<sub>im</sub>, summed into K as the shader accumulates them.
+                  Compare their peaks with those of the components' own forms.</p>
+                <canvas id="channelsFigure" aria-label="Separable channels summed into the kernel"></canvas>
+              </figure>
+            </div>
           </div>
         </div>
       </section>

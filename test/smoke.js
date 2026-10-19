@@ -11,8 +11,8 @@ import { ProjectedEvolution } from "../src/projected-de.js";
 import { testViewControls } from './view-controls.js';
 import { populationPreview } from '../src/plots.js';
 import {
-  bounds, defaultProblem, maxError, multiplicities, nonnegativePresetParams, parseParams, presetParams, profile, sampleGrid,
-  separableChannels, sortByFrequency,
+  MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, defaultProblem, formatParams, maxError, multiplicities, nonnegativePresetParams,
+  parseParams, presetParams, profile, sampleGrid, separableChannels, sortByFrequency, withStride, channelSide, componentChannels,
 } from "../src/problem.js";
 
 const devices = await init();
@@ -25,6 +25,9 @@ function check(name, value, tolerance) {
 }
 
 const problemFor = (multiplicity) => ({ ...defaultProblem(), components: multiplicity.length, multiplicity });
+// Largest |weight| of the powers of s that a structure leaves unused (pinned to zero).
+const unusedWeights = (params, multiplicity) => Math.max(0, ...multiplicity.flatMap((m, u) =>
+  Array.from(params.slice(u * PARAMS_PER_COMPONENT + 2 + 2 * m, (u + 1) * PARAMS_PER_COMPONENT), Math.abs)));
 
 testViewControls();
 console.log('PASS view-dependent control availability and diagnostic selection');
@@ -43,33 +46,36 @@ for (const size of [0, 8, 24, 32, 512]) {
 }
 
 // Test whole-population local jitter, including centers outside the global initialization box.
+const D1 = PARAMS_PER_COMPONENT;
+const pad = (c) => [...c, ...Array(D1 - c.length).fill(0)];
+const binomial = (n, k) => Array.from({ length: k }, (_, j) => (n - j) / (j + 1)).reduce((a, b) => a * b, 1);
 for (const multiplicity of [[1], [2]]) {
   const problem = { ...problemFor(multiplicity), frequencyBands: false, passSamples: 32, stopSamples: 32 };
   const limits = bounds(problem);
-  const center = [3, 2, 12, -8, multiplicity[0] === 2 ? 1 : 0, 0];
-  const options = { bounds: limits, populationSize: 32, dimensions: 6, seed: 123, center };
+  const center = pad([3, 2, 12, -8, multiplicity[0] === 2 ? 1 : 0, 0]);
+  const options = { bounds: limits, populationSize: 32, dimensions: D1, seed: 123, center };
   const population = initialPopulation(options);
   assert.deepEqual(population, initialPopulation(options));
   assert.notDeepEqual(population, initialPopulation({ ...options, seed: 124 }));
-  assert.deepEqual(Array.from(population.slice(0, 6)), center);
+  assert.deepEqual(Array.from(population.slice(0, D1)), center);
   const withoutCenter = initialPopulation({ ...options, includeCenter: false });
-  assert.notDeepEqual(Array.from(withoutCenter.slice(0, 6)), center);
+  assert.notDeepEqual(Array.from(withoutCenter.slice(0, D1)), center);
   for (let k = 1; k < 32; k++) {
-    assert.ok(population.slice(k * 6, (k + 1) * 6).some((v, j) => v !== center[j]));
-    for (let j = 0; j < 6; j++) {
-      const v = population[k * 6 + j];
+    assert.ok(population.slice(k * D1, (k + 1) * D1).some((v, j) => v !== center[j]));
+    for (let j = 0; j < D1; j++) {
+      const v = population[k * D1 + j];
       const radius = Math.min(0.05 * (limits.initHi[j] - limits.initLo[j]),
         center[j] - limits.foldLo[j], limits.foldHi[j] - center[j]);
       assert.ok(Math.abs(v - center[j]) <= radius + 1e-6);
       assert.ok(v >= limits.foldLo[j] && v <= limits.foldHi[j]);
     }
   }
-  const edge = initialPopulation({ ...options, center: [3, 0, 12, -8, 0, 0] });
-  assert.equal(edge[7], 0);
-  assert.throws(() => initialPopulation({ ...options, center: [NaN, 2, 12, -8, 0, 0] }));
-  assert.throws(() => initialPopulation({ ...options, center: [0, 2, 12, -8, 0, 0] }));
+  const edge = initialPopulation({ ...options, center: pad([3, 0, 12, -8]) });
+  assert.equal(edge[D1 + 1], 0);
+  assert.throws(() => initialPopulation({ ...options, center: pad([NaN, 2, 12, -8]) }));
+  assert.throws(() => initialPopulation({ ...options, center: pad([0, 2, 12, -8]) }));
   assert.throws(() => initialPopulation({ ...options, center: [1] }));
-  if (multiplicity[0] === 1) assert.throws(() => initialPopulation({ ...options, center: [3, 2, 12, -8, 1, 0] }));
+  if (multiplicity[0] === 1) assert.throws(() => initialPopulation({ ...options, center: pad([3, 2, 12, -8, 1, 0]) }));
   const de = new DifferentialEvolution({ components: 1, grid: sampleGrid(problem), bounds: limits,
     populationSize: 32, F: 0.5, CR: 0.9, seed: 123, populationCenter: center });
   try {
@@ -114,7 +120,10 @@ console.log('PASS centered population, optional exact seed, objective re-scoring
 {
   let dcError = 0, channelError = 0, floatChannelError = 0, quadratureError = 0, integratedError = 0, continuity = 0;
   const sets = [1, 2, 3, 4, 5, 6].map(presetParams);
-  sets.push([3, 0, 1, 0, 1, 0]); // merged polynomial channel: no division by a small channel sum
+  sets.push(pad([3, 0, 1, 0, 1, 0])); // merged polynomial channel: no division by a small channel sum
+  sets.push(pad([3, 2, 0.5, 0.1, 0, 0, 0.4, -0.2])); // multiplicity 3 with a zero middle coefficient
+  sets.push(pad([4, 3, 0.5, 0.1, 0.3, -0.2, 0.1, 0.05, 0.02, -0.01])); // multiplicity 4
+  sets.push(pad([5, 3, ...Array.from({ length: 20 }, (_, j) => (j % 2 ? 0.5 : 1) * (-0.4) ** (j >> 1))])); // multiplicity 10
   for (const params of sets) {
     const channels = separableChannels(params);
     const tables = radiusTables(channels, 0.2, 128);
@@ -199,7 +208,8 @@ console.log('PASS centered population, optional exact seed, objective re-scoring
 {
   let worst = 0, identity = 0, symmetry = 0, jump = 0;
   const sets = [1, 2, 3, 4, 5, 6].map(n => presetParams(n));
-  sets.push([3, 0, 1, 0, 1, 0]); // polynomial/merged channel, including a zero constant coefficient
+  sets.push(pad([3, 0, 1, 0, 1, 0])); // polynomial/merged channel, including a zero constant coefficient
+  sets.push(pad([4, 3, 0.5, 0.1, 0.3, -0.2, 0.1, 0.05, 0.02, -0.01])); // multiplicity 4
   for (const params of sets) {
     const channels = separableChannels(params);
     const c = continuousKernel(channels, 0.2, 128);
@@ -271,7 +281,7 @@ console.log('PASS centered population, optional exact seed, objective re-scoring
 // A merged pair is the limit of two coinciding rates: (B + A s) e^{λs} = lim Re[B e^{λs} + (A/δ)(e^{(λ+δ)s} − e^{λs})].
 {
   const [b, c, r, i, r1, i1] = [2.1, 6.3, 0.7, -1.4, 3.2, 0.9];
-  const merged = [b, c, r, i, r1, i1];
+  const merged = pad([b, c, r, i, r1, i1]);
   const d = 1e-5;
   let worst = 0;
   for (const x of [0, 0.3, 0.9, 1.4, 2]) {
@@ -285,31 +295,95 @@ console.log('PASS centered population, optional exact seed, objective re-scoring
   check("merged pair equals the coinciding-rate limit", worst, 1e-3);
 }
 
-// Separable channels reproduce the 2-D kernel exactly: Re Σ h(x) v(y) = profile(√(x² + y²)).
+// Multiplicity 3 is the limit of three coinciding rates: a₂ s² e^{λs} is the limit of the second
+// difference a₂ (e^{(λ+2δ)s} − 2e^{(λ+δ)s} + e^{λs}) / δ² as δ → 0.
 {
-  const params = [...presetParams(2), 3.1, 9.4, -0.8, 2.2, 1.7, -0.6];
-  const channels = separableChannels(params);
-  const evalK = ({ decay, phase }, [k0r, k0i], [k2r, k2i], t) => {
-    const s = t * t;
-    const e = Math.exp(-decay * s);
-    const [er, ei] = [e * Math.cos(phase * s), e * Math.sin(phase * s)];
-    const [wr, wi] = [k0r + k2r * s, k0i + k2i * s];
-    return [wr * er - wi * ei, wr * ei + wi * er];
-  };
+  const [b, c, r2, i2] = [2.1, 6.3, 0.8, -0.5];
+  const third = pad([b, c, 0, 0, 0, 0, r2, i2]);
+  const d = 1e-3;
   let worst = 0;
-  for (const [x, y] of [[0, 0], [0.4, -0.7], [1.1, 0.2], [-0.9, 1.3]]) {
-    let sum = 0;
+  for (const x of [0, 0.3, 0.9, 1.4, 2]) {
+    const s = x * x;
+    const term = (bb) => r2 * Math.exp(-bb * s) * Math.cos(c * s) + i2 * Math.exp(-bb * s) * Math.sin(c * s);
+    const limit = (term(b - 2 * d) - 2 * term(b - d) + term(b)) / (d * d);
+    worst = Math.max(worst, Math.abs(limit - profile(third, x)));
+  }
+  check("multiplicity 3 equals the three-coinciding-rate limit", worst, 1e-2);
+}
+
+// Separable channels reproduce the 2-D kernel: Re Σ h(x) v(y) = profile(√(x² + y²)), with at most one
+// channel per rate (Σ multiplicities), and passes no larger than the kernel needs: Σ |h(x)||v(y)| stays
+// near the kernel's own size, so 16-bit intermediates suffice (it was 5e5 for the kernel below with
+// per-component channels, whose imaginary parts cancel).
+const tenth = [3.1, 9.4, ...Array.from({ length: 20 }, (_, j) => (j % 2 ? 0.5 : 1) * (-0.4) ** (j >> 1))]; // multiplicity 10
+const cancelling = pad([8.4203041123, 3.4990373776, 0.9999364359, 510669.4731300275, -1786843.1223582949, -206901.7006530254,
+  723995.9491122069, -2716101.0511414590, 2211660.7321699737, 1066493.4857216207, -777665.6897187945, 918308.1036556172,
+  -131344.8901858401, -227503.8952191320]); // multiplicity 6 from Remez, ripple ±0.000064 at transition 1
+for (const params of [
+  ...[[3.1, 9.4, -0.8, 2.2, 1.7, -0.6], [3.1, 9.4, -0.8, 2.2, 1.7, -0.6, 0.9, 0.4], [3.1, 9.4, -0.8, 2.2, 1.7, -0.6, 0, 0, -0.3, 0.2], tenth]
+    .map((extra) => [...presetParams(2), ...pad(extra)]),
+  presetParams(6), cancelling,
+]) {
+  const channels = separableChannels(params);
+  let worst = 0, size = 0;
+  const xs = Array.from({ length: 41 }, (_, i) => -1.2 + i * 0.06);
+  for (const x of xs) for (const y of xs) {
+    let sum = 0, mag = 0;
     for (const ch of channels) {
-      const [hr, hi] = evalK(ch, ch.h0, ch.h2, x);
-      const [vr, vi] = evalK(ch, ch.v0, ch.v2, y);
+      const [hr, hi] = channelSide(ch.h, x * x);
+      const [vr, vi] = channelSide(ch.v, y * y);
       sum += hr * vr - hi * vi;
+      mag += Math.hypot(hr, hi) * Math.hypot(vr, vi);
     }
     worst = Math.max(worst, Math.abs(sum - profile(params, Math.hypot(x, y))));
+    size = Math.max(size, mag);
   }
-  check(`separable channels (${channels.length} for multiplicities ${multiplicities(params)})`, worst, 1e-12);
-  const reparsed = parseParams("0.886528, 5.268909, 0.411259, -0.548794\n3.1, 9.4, -0.8, 2.2, 1.7, -0.6");
-  check("parse one component per line", Math.abs(profile(reparsed, 0.7) - profile([...params.slice(0, 6), ...params.slice(12)], 0.7)), 1e-12);
+  const mult = multiplicities(params);
+  check(`separable channels (${channels.length} for multiplicities ${mult})`, worst, 1e-10);
+  let own = 0;
+  for (const x of xs) for (const y of xs) {
+    let sum = 0;
+    for (const ch of componentChannels(params)) {
+      const [hr, hi] = channelSide(ch.h, x * x), [vr, vi] = channelSide(ch.v, y * y);
+      sum += hr * vr - hi * vi;
+    }
+    own = Math.max(own, Math.abs(sum - profile(params, Math.hypot(x, y))));
+  }
+  check(`  components' own separable forms (multiplicities ${mult}), relative to the weights`, own / Math.max(...params.map(Math.abs)), 1e-12);
+  check(`  pass magnitude Σ|h||v| (multiplicities ${mult})`, size, 3);
+  assert.ok(channels.length <= mult.reduce((a, m) => a + m, 0));
+  // The exported transformation: Re(Hᵀ V) is the kernel's coefficient matrix in the basis
+  // x^2k {cos, sin}(c x²) e^{-b x²}: Re a, −Re a on the diagonal blocks and i-weights off them.
+  const row = (side) => side.flatMap(({ cos, sin }) => cos.flatMap((z, k) => [z, sin[k]]));
+  const H = channels.map((ch) => row(ch.h)), V = channels.map((ch) => row(ch.v));
+  const cols = mult.flatMap((m, u) => Array.from({ length: m }, (_, k) => [[u, 0, k], [u, 1, k]]).flat());
+  let matrixError = 0, scale = 0;
+  cols.forEach(([u, p, k], i) => cols.forEach(([w, q, l], j) => {
+    let re = 0;
+    channels.forEach((_, n) => (re += H[n][i][0] * V[n][j][0] - H[n][i][1] * V[n][j][1]));
+    let expected = 0;
+    if (u === w && k + l < mult[u]) {
+      const o = u * D1 + 2 + 2 * (k + l), c = binomial(k + l, k);
+      expected = p === q ? (p ? -1 : 1) * params[o] * c : params[o + 1] * c;
+    }
+    matrixError = Math.max(matrixError, Math.abs(re - expected));
+    scale = Math.max(scale, Math.abs(expected));
+  }));
+  // At multiplicity 10 the basis is nearly dependent, so only the functions, not the matrix, match.
+  if (Math.max(...mult) <= 6) check(`  Re(Hᵀ V) equals the component weight matrix, relative (multiplicities ${mult})`, matrixError / scale, 1e-8);
 }
+for (const extra of [[3.1, 9.4, -0.8, 2.2, 1.7, -0.6], [3.1, 9.4, -0.8, 2.2, 1.7, -0.6, 0, 0, -0.3, 0.2], tenth]) {
+  const params = [...presetParams(2), ...pad(extra)];
+  const m = (extra.length - 2) / 2;
+  const reparsed = parseParams("0.886528, 5.268909, 0.411259, -0.548794\n" + extra.join(", "));
+  check(`parse one component per line (multiplicity ${m})`,
+    Math.abs(profile(reparsed, 0.7) - profile([...params.slice(0, D1), ...params.slice(2 * D1)], 0.7)), 1e-12);
+  const text = formatParams(params, defaultProblem(), 0.1);
+  check(`parse the whole Current kernel text (multiplicity ${m})`, Math.max(...parseParams(text).map((v, j) => Math.abs(v - params[j]))), 1e-9);
+}
+assert.deepEqual(withStride([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0], 6), [...pad([1, 2, 3, 4, 5, 6]), ...pad([7, 8, 9, 10])]);
+assert.throws(() => withStride(Array(2 + 2 * (MAX_MULTIPLICITY + 1)).fill(1), 2 + 2 * (MAX_MULTIPLICITY + 1)));
+console.log("PASS view-state kernel layouts");
 
 // jax-js batch cost agrees with the double-precision JS cost.
 {
@@ -345,8 +419,8 @@ console.log('PASS centered population, optional exact seed, objective re-scoring
   de.dispose();
 }
 
-// DE with merged pairs: single components keep zero x² weights, costs match JS.
-for (const multiplicity of [[1, 1], [2, 1]]) {
+// DE with higher multiplicities: unused weights stay zero, costs match JS.
+for (const multiplicity of [[1, 1], [2, 1], [3], [10]]) {
   const problem = problemFor(multiplicity);
   const grid = sampleGrid(problem);
   const de = new DifferentialEvolution({
@@ -356,8 +430,7 @@ for (const multiplicity of [[1, 1], [2, 1]]) {
   const snap = await de.snapshot();
   console.log(`DE multiplicities ${multiplicity}: generation ${de.generation}, best ±${snap.bestCost.toFixed(6)}`);
   check(`  JS cost of DE best (${multiplicity})`, Math.abs(snap.bestCost - maxError(snap.best, grid)), 2e-5);
-  const pinned = multiplicity.flatMap((m, u) => (m === 1 ? [snap.best[u * 6 + 4], snap.best[u * 6 + 5]] : []));
-  check(`  single components' x² weights stay zero (${multiplicity})`, Math.max(0, ...pinned.map(Math.abs)), 0);
+  check(`  unused weights stay zero (${multiplicity})`, unusedWeights(snap.best, multiplicity), 0);
   de.dispose();
 }
 
@@ -377,7 +450,7 @@ for (const multiplicity of [[1, 1], [2, 1]]) {
   tuner.dispose();
   console.log(`fine-tune: ±${startErr.toFixed(6)} → ±${err.toFixed(6)} (article preset ±${maxError(presetParams(3), dense).toFixed(6)})`);
   check("fine-tune improves", err < startErr ? 0 : 1, 0);
-  check("fine-tune keeps x² weights of single components zero", Math.max(...[4, 5, 10, 11, 16, 17].map((j) => Math.abs(params[j]))), 0);
+  check("fine-tune keeps unused weights zero", unusedWeights(params, [1, 1, 1]), 0);
 }
 
 // Linear exchange: best line for x² on [0, 1] is x − 1/8; with sign-dependent weights the
@@ -417,11 +490,12 @@ for (const multiplicity of [[1, 1], [2, 1]]) {
   console.log(`exchange weights for preset 5 rates: ±${preset.toFixed(6)} → ±${weights.error.toFixed(6)}`);
   check("exchange weights beat preset weights", weights.error < preset ? 0 : 1, 0);
   check("exchange level equals grid max error", Math.abs(weights.error - weights.level), 1e-12);
-  check("exchange weights keep rates", Math.max(...[0, 1, 6, 7, 24, 25].map((j) => Math.abs(weights.params[j] - presetParams(5)[j]))), 0);
+  const rateIndices = [0, 1, D1, D1 + 1, 4 * D1, 4 * D1 + 1];
+  check("exchange weights keep rates", Math.max(...rateIndices.map((j) => Math.abs(weights.params[j] - presetParams(5)[j]))), 0);
   const polished = remezPolish(presetParams(5), dense);
   console.log(`Remez preset 5: ±${polished.error.toFixed(6)} in ${polished.history.length - 1} iterations`);
   check("Remez refines preset 5 below ±0.0036", polished.error, 0.0036);
-  check("Remez keeps x² weights of single components zero", Math.max(...[4, 5, 10, 11, 16, 17, 22, 23, 28, 29].map((j) => Math.abs(polished.params[j]))), 0);
+  check("Remez keeps unused weights zero", unusedWeights(polished.params, [1, 1, 1, 1, 1]), 0);
 
   const three = sampleGrid(problemFor([1, 1, 1]), 1000, 1000);
   const start = presetParams(3).map((v, j) => v * (1 + 0.01 * Math.sin(j * 1.7)));
@@ -435,6 +509,15 @@ for (const multiplicity of [[1, 1], [2, 1]]) {
   const rm = remezPolish(merged, m2);
   console.log(`Remez merged [2, 1]: ±${maxError(merged, m2).toFixed(6)} → ±${rm.error.toFixed(6)}`);
   check("Remez improves a merged pair and keeps its structure", rm.error < maxError(merged, m2) && multiplicities(rm.params).join() === "2,1" ? 0 : 1, 0);
+
+  // Multiplicity 3 + 1: the second-order steps use P'' and the s² weights.
+  const triple = [...pad([1.96, 1.56, 0.51, 4.56, 0.05, -0.05, 0.01, 0.01]), ...pad(presetParams(1).slice(0, 4))];
+  const m3 = sampleGrid(problemFor([3, 1]), 1000, 1000);
+  const start3 = optimalWeights(triple, m3);
+  const r3m = remezPolish(start3.params, m3);
+  console.log(`Remez [3, 1]: exchange ±${start3.error.toFixed(6)} → ±${r3m.error.toFixed(6)}`);
+  check("Remez improves multiplicity 3 and keeps its structure",
+    r3m.error < start3.error && multiplicities(r3m.params).join() === "3,1" && unusedWeights(r3m.params, [3, 1]) === 0 ? 0 : 1, 0);
 
   const nn = sampleGrid({ ...problemFor([1, 1]), negativeWeight: 100 }, 1000, 1000);
   const rn = remezPolish(nonnegativePresetParams(2), nn);
@@ -453,9 +536,9 @@ for (const multiplicity of [[1, 1], [2, 1]]) {
   let snap = await de.snapshot();
   console.log(`projected DE 2 components: generation ${de.generation}, best ±${snap.bestCost.toFixed(6)}`);
   check("projected DE reaches the 2-component optimum (±0.0760)", snap.bestCost, 0.0760);
-  check("projected DE member costs match JS (float32 export)", memberErrors(snap, grid, 12), 1e-4);
+  check("projected DE member costs match JS (float32 export)", memberErrors(snap, grid, 2 * D1), 1e-4);
   check("projected DE best cost is exact", Math.abs(snap.bestCost - maxError(snap.best, grid)), 1e-12);
-  check("projected DE keeps x² weights of single components zero", Math.max(...[4, 5, 10, 11].map((j) => Math.abs(snap.best[j]))), 0);
+  check("projected DE keeps unused weights zero", unusedWeights(snap.best, [1, 1]), 0);
 
   const nnGrid = { ...grid, negativeWeight: 30 };
   de.updateProblem(nnGrid, bounds({ ...problem, negativeWeight: 30 }));
@@ -477,5 +560,22 @@ for (const multiplicity of [[1, 1], [2, 1]]) {
   merged.step(30);
   snap = await merged.snapshot();
   console.log(`projected DE merged [2, 1]: best ±${snap.bestCost.toFixed(6)}`);
-  check("projected DE solves merged-pair x² weights", multiplicities(snap.best).join() === "2,1" && Math.abs(snap.best[10]) + Math.abs(snap.best[11]) === 0 ? 0 : 1, 0);
+  check("projected DE solves merged-pair x² weights", multiplicities(snap.best).join() === "2,1" && unusedWeights(snap.best, [2, 1]) === 0 ? 0 : 1, 0);
+
+  const triple = new ProjectedEvolution({ components: 2, multiplicity: [3, 1], grid, bounds: bounds(problemFor([3, 1])), populationSize: 32, F: 0.76, CR: 0.999, seed: 5 });
+  triple.step(30);
+  snap = await triple.snapshot();
+  console.log(`projected DE [3, 1]: best ±${snap.bestCost.toFixed(6)}`);
+  check("projected DE solves multiplicity-3 weights", multiplicities(snap.best).join() === "3,1" && unusedWeights(snap.best, [3, 1]) === 0 ? 0 : 1, 0);
+  check("projected DE multiplicity-3 best cost is exact", Math.abs(snap.bestCost - maxError(snap.best, grid)), 1e-12);
+
+  const tenfold = new ProjectedEvolution({ components: 1, multiplicity: [10], grid, bounds: bounds(problemFor([10])), populationSize: 16, F: 0.76, CR: 0.999, seed: 5 });
+  tenfold.step(20);
+  snap = await tenfold.snapshot();
+  console.log(`projected DE [10]: best ±${snap.bestCost.toFixed(6)}`);
+  // Powers up to s⁹ condition the exchange less well than lower multiplicities.
+  check("projected DE multiplicity-10 best cost is exact", Math.abs(snap.bestCost - maxError(snap.best, grid)), 1e-10);
+  const r10 = remezPolish(snap.best, sampleGrid(problemFor([10]), 1000, 1000), { iterations: 10 });
+  console.log(`Remez [10]: ±${r10.error.toFixed(6)}`);
+  check("Remez keeps multiplicity 10", multiplicities(r10.params).join() === "10" ? 0 : 1, 0);
 }

@@ -371,6 +371,27 @@ textarea {
   image-rendering: pixelated;
 }
 
+.decomposition {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  align-items: flex-start;
+  overflow-x: auto;
+}
+
+.decomposition figure {
+  margin: 0;
+  max-width: 100%;
+}
+
+.decomposition figure .note {
+  max-width: 40em;
+}
+
+.decomposition figcaption {
+  font-weight: 600;
+}
+
 @media (max-width: 1100px) {
   .demo,
   .optimizer,

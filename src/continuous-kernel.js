@@ -1,3 +1,5 @@
+import { channelSide } from './problem.js';
+
 // A single, even complex profile per channel/direction, sampled at 256 points per disc radius.
 // Radius changes rescale its coordinate, not a discrete choice between kernels. All interpolants
 // below are also used by the WGSL sampler; keep the CPU reference for numerical regression tests.
@@ -15,16 +17,10 @@ export function kernelProfile(channels, transition) {
   // tap when ceil(radius * support) changes. Extra padding makes the endpoint lookup safe.
   const stride = last + 3;
   const support = (last + 1) / density;
-  const profiles = [0, 1].map(dir => channels.map(({ decay, phase, h0, h2, v0, v2 }) => {
-    const [k0, k2] = dir ? [v0, v2] : [h0, h2];
+  const profiles = [0, 1].map(dir => channels.map(({ h, v }) => {
     const p = new Float64Array(stride * 2);
     for (let t = 0; t <= last; t++) {
-      const s = (t / density) ** 2;
-      const re = Math.exp(-decay * s) * Math.cos(phase * s);
-      const im = Math.exp(-decay * s) * Math.sin(phase * s);
-      const wr = k0[0] + k2[0] * s, wi = k0[1] + k2[1] * s;
-      p[2 * t] = wr * re - wi * im;
-      p[2 * t + 1] = wr * im + wi * re;
+      [p[2 * t], p[2 * t + 1]] = channelSide(dir ? v : h, (t / density) ** 2);
     }
     return p;
   }));

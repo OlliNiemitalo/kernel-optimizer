@@ -86,10 +86,10 @@ import { DifferentialEvolution } from "./de.js";
 import { ProjectedEvolution, workerSolvers } from "./projected-de.js";
 import { FineTuner } from "./finetune.js";
 import { remezSteps } from "./remez.js";
-import { drawConvergence, drawDisc, drawError, drawProfile, populationPreview } from "./plots.js";
+import { drawConvergence, drawDecomposition, drawDisc, drawError, drawProfile, populationPreview } from "./plots.js";
 import {
-  PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, maxError, multiplicities, parseParams,
-  presetParams, nonnegativePresetParams, PRESETS, sampleGrid, sortByFrequency,
+  MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, maxError, multiplicities,
+  parseParams, presetParams, nonnegativePresetParams, PRESETS, sampleGrid, sortByFrequency, withStride,
 } from "./problem.js";
 import { loadImage, proceduralScene } from "./scene.js";
 
@@ -125,9 +125,9 @@ const state = {
   focus: 0, // focus slider position; its square is 1 / distance
 };
 
-// Multiplicity per component (1 = single, 2 = merged pair), padded or truncated to the component count.
+// Multiplicity per component (1 = single, m = m coinciding rates), padded or truncated to the component count.
 function readMultiplicity(components) {
-  const given = ($("multiplicity").value.match(/\d+/g) ?? []).map((v) => (Number(v) === 2 ? 2 : 1));
+  const given = ($("multiplicity").value.match(/\d+/g) ?? []).map((v) => Math.min(MAX_MULTIPLICITY, Math.max(1, Number(v))));
   return Array.from({ length: components }, (_, u) => given[u] ?? 1);
 }
 
@@ -177,7 +177,7 @@ function describeRanges(problem) {
   const m = channelCount(problem.multiplicity);
   $("ranges").textContent =
     `${m} complex channels per pass. Initial ranges: decay b ∈ [${b.initLo[0]}, ${b.initHi[0]}], frequency c ∈ ${bands}, ` +
-    `weights r, i (and r₁, i₁ of merged pairs) ∈ ±${b.initHi[2].toPrecision(3)} ` +
+    `weights r, i (and r₁, i₁, … of higher multiplicities) ∈ ±${b.initHi[2].toPrecision(3)} ` +
     `(grow 2.5× per channel, as in the article's solutions).`;
   // Larger sets have larger, more strongly cancelling weights, so take smaller relative steps.
   if ($("ftLr").dataset.auto) $("ftLr").value = Math.min(1e-3, 1e-3 / Math.pow(3, m - 2)).toPrecision(2);
@@ -220,6 +220,12 @@ function drawAll() {
   drawError($("error"), { best, transition: problem.transition, ripple, xmax });
   drawConvergence($("convergence"), state.history);
   drawDisc($("disc"), best, xmax);
+  const key = best && `${best.join()}|${problem.transition}`;
+  if (key !== state.decompositionKey) {
+    state.decompositionKey = key;
+    drawDecomposition($("componentsFigure"), best, problem.transition, "components");
+    drawDecomposition($("channelsFigure"), best, problem.transition, "channels");
+  }
 }
 
 // ---- differential evolution ---------------------------------------------------------------
@@ -678,6 +684,7 @@ function viewState() {
     playing: state.playing,
     controls,
     kernel: state.current?.params,
+    kernelStride: PARAMS_PER_COMPONENT,
     size: state.blur && [state.blur.width, state.blur.height],
     gpu: state.blur?.adapterInfo,
     stats: $("blurStats").textContent,
@@ -703,11 +710,13 @@ async function applyViewState(view) {
     else $(id).value = value;
     $(id).dispatchEvent(new Event("input"));
   }
-  if (Array.isArray(view.kernel) && view.kernel.length % PARAMS_PER_COMPONENT === 0) {
+  if (Array.isArray(view.kernel)) {
+    // Older view states have 6 numbers per component.
+    const kernel = withStride(view.kernel.map(Number), Number(view.kernelStride) || 6);
     setRunning(false);
-    $("components").value = view.kernel.length / PARAMS_PER_COMPONENT;
-    setMultiplicity(multiplicities(view.kernel));
-    setCurrent(view.kernel, "view state");
+    $("components").value = kernel.length / PARAMS_PER_COMPONENT;
+    setMultiplicity(multiplicities(kernel));
+    setCurrent(kernel, "view state");
     discardDE({ include: state.current.params });
   }
   setPlaying(!!view.playing);

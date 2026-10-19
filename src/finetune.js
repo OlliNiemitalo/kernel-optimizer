@@ -15,7 +15,7 @@ export class FineTuner {
     this.grid = grid;
     const D = params.length;
     const mult = multiplicities(params);
-    const live = (j) => j % PARAMS_PER_COMPONENT < 4 || mult[Math.floor(j / PARAMS_PER_COMPONENT)] === 2;
+    const live = (j) => j % PARAMS_PER_COMPONENT < 2 + 2 * mult[Math.floor(j / PARAMS_PER_COMPONENT)];
     const scale = Float32Array.from(params, (v, j) => (live(j) ? Math.max(Math.abs(v), 0.05) : 0));
     const minTheta = Float32Array.from({ length: D }, (_, j) =>
       j % PARAMS_PER_COMPONENT === 0 ? 0.05 / scale[j] : -1e30,
@@ -29,7 +29,7 @@ export class FineTuner {
 
     const negativeWeight = grid.negativeWeight ?? 1;
     const loss = (theta, beta, s2, target, scaleArr) => {
-      const prof = profileBatch(theta.mul(scaleArr), s2, components).reshape([-1]);
+      const prof = profileBatch(theta.mul(scaleArr), s2, components, Math.max(...mult)).reshape([-1]);
       const e = prof.sub(target);
       let a = np.sqrt(e.mul(e).add(1e-12));
       if (negativeWeight !== 1) a = np.where(np.less(prof, 0), a.mul(negativeWeight), a);
