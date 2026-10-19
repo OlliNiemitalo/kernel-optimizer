@@ -339,7 +339,9 @@ for (const params of [
     size = Math.max(size, mag);
   }
   const mult = multiplicities(params);
-  check(`separable channels (${channels.length} for multiplicities ${mult})`, worst, 1e-10);
+  // Rounding grows with cancelling weights (2e6 in `cancelling`), and differs between Node versions.
+  const cancellation = Math.max(1, Math.max(...params.map(Math.abs)) / 1e4);
+  check(`separable channels (${channels.length} for multiplicities ${mult})`, worst, 1e-10 * cancellation);
   let own = 0;
   for (const x of xs) for (const y of xs) {
     let sum = 0;
@@ -370,7 +372,7 @@ for (const params of [
     scale = Math.max(scale, Math.abs(expected));
   }));
   // At multiplicity 10 the basis is nearly dependent, so only the functions, not the matrix, match.
-  if (Math.max(...mult) <= 6) check(`  Re(Hᵀ V) equals the component weight matrix, relative (multiplicities ${mult})`, matrixError / scale, 1e-8);
+  if (Math.max(...mult) <= 6) check(`  Re(Hᵀ V) equals the component weight matrix, relative (multiplicities ${mult})`, matrixError / scale, 1e-8 * cancellation);
 }
 for (const extra of [[3.1, 9.4, -0.8, 2.2, 1.7, -0.6], [3.1, 9.4, -0.8, 2.2, 1.7, -0.6, 0, 0, -0.3, 0.2], tenth]) {
   const params = [...presetParams(2), ...pad(extra)];
