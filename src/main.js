@@ -4,6 +4,7 @@ import { viewControls } from "./view-controls.js";
 import { World } from "./world.js";
 import { Shapes } from "./shapes.js";
 import { VideoSource } from "./video.js";
+import { loadVideo, playVideo } from "./video-playback.js";
 
 // RGB-D video samples. Video Depth Anything's comparison clips are fetched from its project page
 // (served with CORS): color in origin/, inferno-coded relative depth in ours/. Its long-video
@@ -483,7 +484,11 @@ function setPlaying(playing) {
   $("playPause").setAttribute("aria-label", $("playPause").title);
   if (state.source === "video") {
     for (const element of videoElements()) {
-      if (playing) element.play().catch(() => {});
+      if (playing) playVideo(element, (error) => {
+        if (!videoElements().includes(element)) return;
+        setPlaying(false);
+        reportSceneError(`Video playback failed: ${error.message} (${error.name}). Source: ${element.currentSrc || element.src}`);
+      });
       else element.pause();
     }
   }
@@ -513,7 +518,8 @@ function fitFullscreen() {
     canvas.style.width = canvas.style.height = "";
     $("fullscreen").title = "Full screen";
   } else {
-    const scale = Math.min((innerWidth - 24) / canvas.width, (innerHeight - 36 - $("player").offsetHeight) / canvas.height);
+    const availableHeight = innerHeight - 42 - $("player").offsetHeight - $("sceneStatus").offsetHeight;
+    const scale = Math.min((innerWidth - 24) / canvas.width, Math.max(1, availableHeight) / canvas.height);
     canvas.style.width = `${canvas.width * scale}px`;
     canvas.style.height = `${canvas.height * scale}px`;
     $("fullscreen").title = "Exit full screen";
@@ -834,24 +840,36 @@ async function renderBlur() {
       `) · ${gpu}`;
   } catch (e) {
     copyCapture?.reject(e);
-    console.error(e);
-    $("blurStats").textContent = `Blur failed: ${e.message}`;
+    state.video?.source.destroy();
+    if (state.playing) setPlaying(false);
+    reportSceneError(`Blur failed: ${e.message}`);
   } finally {
     blurRendering = false;
     if (animating()) requestBlur();
   }
 }
 
+function sceneStatus(message = "", error = false) {
+  $("sceneStatus").textContent = message;
+  $("sceneStatus").hidden = !message;
+  $("sceneStatus").toggleAttribute("data-error", error);
+  if (document.fullscreenElement === $("viewport")) fitFullscreen();
+}
+
+function reportSceneError(message) {
+  console.error(message);
+  sceneStatus(message, true);
+}
+
 function stopVideo() {
   state.scene = (state.scene ?? 0) + 1; // invalidates video loads in progress
+  state.videoLoad?.abort();
+  state.videoLoad = null;
+  sceneStatus();
   if (!state.video) return;
-  for (const element of videoElements()) {
-    element.pause();
-    element.removeAttribute("src");
-    element.load();
-  }
   state.video.source.destroy();
   state.video = null;
+  if (state.source === "video") state.source = null;
   $("videoCredit").hidden = true;
 }
 
@@ -883,49 +901,74 @@ function useShapes() {
   requestBlur(true);
 }
 
-async function loadVideo(url) {
-  const element = document.createElement("video");
-  Object.assign(element, { crossOrigin: "anonymous", muted: true, loop: true, playsInline: true, preload: "auto", src: url });
-  await new Promise((resolve, reject) => {
-    element.onloadeddata = () => (element.videoWidth ? resolve() : reject(new Error(`The video ${url} has no picture.`)));
-    element.onerror = () => reject(new Error(`Could not load the video ${url}.`));
-  });
-  element.addEventListener("seeked", () => requestBlur());
-  element.addEventListener("ended", () => {
-    if (state.video?.element === element) setPlaying(false);
-  });
-  return element;
-}
-
 // An RGB-D video sample (see VIDEO_SAMPLES and video.js): stacked color over depth, or a color
 // video with a separate depth video.
-async function useVideo(sample) {
+async function useVideo(sample, { fallback = false } = {}) {
   stopVideo();
   const scene = state.scene;
-  $("blurStats").textContent = `Loading ${sample.label}…`;
-  const [element, depth, depthNext] = await Promise.all([
-    loadVideo(sample.color),
-    sample.depth ? loadVideo(sample.depth) : null,
-    sample.depthFps ? loadVideo(sample.depth) : null,
-  ]);
-  if (scene !== state.scene) {
-    for (const e of [element, depth, depthNext]) e?.removeAttribute("src");
-    return;
-  }
-  const source = new VideoSource(state.blur.device, element, depth, {
-    depthNext, depthFps: sample.depthFps, layout: sample.layout, fps: sample.fps ?? 30, onFrame: () => requestBlur(),
+  const controller = new AbortController();
+  state.videoLoad = controller;
+  sceneStatus(`Loading ${sample.label}…`);
+  let source;
+  const failed = (error) => {
+    if (scene !== state.scene || controller.signal.aborted) return;
+    if (source && state.video?.source === source) state.source = null;
+    setPlaying(false);
+    source?.destroy();
+    controller.abort();
+    reportSceneError(`Video "${sample.label}" failed: ${error.message}`);
+  };
+  const load = (url, color = false) => loadVideo(url, {
+    signal: controller.signal,
+    onError: failed,
+    onSeek: () => requestBlur(),
+    onEnded: color ? () => setPlaying(false) : undefined,
   });
-  state.video = { element, depth, depthNext, source, name: sample.label, fps: sample.fps ?? 30, depthFps: sample.depthFps };
-  applyVideoPlayback();
-  $("videoCredit").innerHTML = sample.credit ?? "";
-  $("videoCredit").hidden = !sample.credit;
-  state.blur.setAnimated(source, source.width, source.height);
-  state.source = "video";
-  state.sceneTime = 0;
-  $("blurMode").value = "depth";
-  if (sample.focus !== undefined) setFocus(sample.focus);
-  setPlaying(state.playing);
-  requestBlur(true);
+  try {
+    const [element, depth, depthNext] = await Promise.all([
+      load(sample.color, true),
+      sample.depth ? load(sample.depth) : null,
+      sample.depthFps ? load(sample.depth) : null,
+    ]);
+    if (scene !== state.scene) return;
+    const device = state.blur.device;
+    device.pushErrorScope("validation");
+    let validationError;
+    try {
+      source = new VideoSource(device, element, depth, {
+        depthNext, depthFps: sample.depthFps, layout: sample.layout, fps: sample.fps ?? 30,
+        onFrame: () => requestBlur(), onError: failed,
+      });
+    } finally {
+      validationError = await device.popErrorScope();
+    }
+    if (validationError) throw new Error(`WebGPU video setup: ${validationError.message}`);
+    if (scene !== state.scene || controller.signal.aborted) {
+      source.destroy();
+      return;
+    }
+    state.video = { element, depth, depthNext, source, name: sample.label, fps: sample.fps ?? 30, depthFps: sample.depthFps };
+    applyVideoPlayback();
+    $("videoCredit").innerHTML = sample.credit ?? "";
+    $("videoCredit").hidden = !sample.credit;
+    state.blur.setAnimated(source, source.width, source.height);
+    state.source = "video";
+    state.sceneTime = 0;
+    $("blurMode").value = "depth";
+    if (sample.focus !== undefined) setFocus(sample.focus);
+    sceneStatus();
+    setPlaying(state.playing);
+    requestBlur(true);
+  } catch (error) {
+    if (scene !== state.scene) return;
+    source?.destroy();
+    controller.abort();
+    stopVideo();
+    const showWorld = fallback && !state.source;
+    if (showWorld) useWorld();
+    reportSceneError(`Video "${sample.label}" failed: ${error.message}` +
+      (showWorld ? "\nShowing the 3D world instead. Try another video from the scene selector." : ""));
+  }
 }
 
 const videoElements = () => [state.video?.element, state.video?.depth, state.video?.depthNext].filter(Boolean);
@@ -951,8 +994,18 @@ async function initBlur() {
     $("blurStats").textContent = `WebGPU blur demo unavailable: ${e.message}`;
     return;
   }
-  // The default video is loaded from another site; without it, start with the 3D world.
-  await useVideo(VIDEO_SAMPLES[0]).catch(() => state.source || useWorld());
+  state.blur.device.addEventListener("uncapturederror", (event) => {
+    event.preventDefault();
+    state.video?.source.destroy();
+    if (state.playing) setPlaying(false);
+    reportSceneError(`WebGPU failed: ${event.error.message}`);
+  });
+  state.blur.device.lost.then((info) => {
+    state.video?.source.destroy();
+    if (state.playing) setPlaying(false);
+    reportSceneError(`WebGPU device lost (${info.reason}): ${info.message}. Reload the page to retry.`);
+  });
+  await useVideo(VIDEO_SAMPLES[0], { fallback: true });
 }
 
 // ---- wiring ---------------------------------------------------------------------------------
@@ -1146,7 +1199,7 @@ function wire() {
         await useImage(await loadImage(file));
       }
     } catch (e) {
-      $("blurStats").textContent = e.message;
+      reportSceneError(e.message);
     }
   });
   $("sceneButton").onclick = () => {
@@ -1173,7 +1226,7 @@ function wire() {
   const loadSample = () => {
     state.imageFile = null;
     $("imageFile").value = "";
-    if (state.blur) useVideo(VIDEO_SAMPLES[num("videoSample")]).catch((e) => ($("blurStats").textContent = e.message));
+    if (state.blur) useVideo(VIDEO_SAMPLES[num("videoSample")]);
   };
   $("videoButton").onclick = loadSample;
   $("videoSample").addEventListener("change", loadSample);

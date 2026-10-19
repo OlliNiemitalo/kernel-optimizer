@@ -244,6 +244,15 @@ details.help {
   margin: 6px 0 0;
 }
 
+#sceneStatus {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+#sceneStatus[data-error] {
+  color: #ffaaaa;
+}
+
 textarea {
   width: 100%;
   box-sizing: border-box;
@@ -327,8 +336,15 @@ textarea {
   box-sizing: border-box;
 }
 
-.viewport:fullscreen > :not(#blurCanvas, #player) {
+.viewport:fullscreen > :not(#blurCanvas, #player, #sceneStatus) {
   display: none;
+}
+
+.viewport:fullscreen #sceneStatus {
+  width: 100%;
+  max-height: 25vh;
+  overflow-y: auto;
+  flex-shrink: 0;
 }
 
 .viewport:fullscreen #player {

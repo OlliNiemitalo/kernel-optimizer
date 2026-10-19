@@ -36,10 +36,20 @@ npm run dev       # development server at http://localhost:5173/
 npm run build     # static site in dist/
 npm run preview   # serve dist/
 npm run smoke     # Node test of the math, optimizer and fine-tuner (Wasm backend)
+npm run test:video # Video load/error/cancellation and playback-policy regression tests
 ```
 
 The blur demo requires a browser and graphics device with WebGPU enabled.
 Without WebGPU, the optimizer still runs on WebAssembly.
+
+Video loading, playback, decoding, and WebGPU errors are shown persistently below the player,
+including in full screen; rendering statistics do not replace them. Media failures include the
+failing URL, browser media error code/message, and decoder readiness so they can be reported
+from a phone without developer tools. A failed default video falls back to the 3D world with
+an explicit explanation. Selecting another scene clears the message; stalled initial loads
+time out after 30 seconds. Codec/profile/level support and simultaneous decoder capacity vary
+by device: the default clip uses three video elements (color and two depth frames), while the
+last, TUM sample uses only one. Remote samples also require network access and CORS.
 
 URL options: `?calibrate` enables jax-js's GPU microbenchmark at startup. By default it is skipped,
 because it allocates about 128 MB and can stall the page for several seconds. It is not required
@@ -76,7 +86,7 @@ The button is disabled when the API is unavailable; a denied write offers Save P
 2. In **Settings → Pages**, set **Source** to **GitHub Actions**.
 
 Every push to `main` then runs [`.github/workflows/pages.yml`](.github/workflows/pages.yml): it
-installs dependencies, runs the smoke test, builds, and deploys `dist/`. The page links to sections
+installs dependencies, runs the smoke and video regression tests, builds, and deploys `dist/`. The page links to sections
 of this README on [GitHub](https://github.com/OlliNiemitalo/kernel-optimizer); in a fork, the build
 points those links at the fork instead.
 

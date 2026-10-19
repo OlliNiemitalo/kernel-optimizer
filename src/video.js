@@ -180,7 +180,7 @@ export class VideoSource {
   // fps: the color frame rate; onFrame: called when a pair has converted a newly presented frame.
   constructor(device, color, depth = null, {
     layout = depth ? "pair" : "stacked", invDepthScale = layout === "stacked" ? 2 : 1, maxWidth = 960,
-    depthNext = null, depthFps = 0, fps = 30, onFrame = null,
+    depthNext = null, depthFps = 0, fps = 30, onFrame = null, onError = null,
   } = {}) {
     this.device = device;
     this.color = color;
@@ -189,6 +189,8 @@ export class VideoSource {
     this.depthFps = depthFps || fps;
     this.fps = fps;
     this.onFrame = onFrame;
+    this.onError = onError;
+    this.frameCallbacks = new Map();
     this.layout = ["stacked", "pair", "side"].indexOf(layout);
     this.invDepthScale = invDepthScale;
     const fullWidth = layout === "side" ? Math.floor(color.videoWidth / 2) : color.videoWidth;
@@ -206,7 +208,14 @@ export class VideoSource {
     infernoTable ??= infernoInverse();
     this.inferno = device.createBuffer({ size: infernoTable.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.inferno, 0, infernoTable);
-    if (this.layout === 1) this.holdFrames();
+    if (this.layout === 1) {
+      try {
+        this.holdFrames();
+      } catch (error) {
+        this.destroy();
+        throw error;
+      }
+    }
   }
 
   // Converts every frame the pair's videos present, keyed by frame number.
@@ -233,11 +242,17 @@ export class VideoSource {
       this.ingest(element, kind, Math.round(element.currentTime * fps));
       const presented = (now, meta) => {
         if (this.destroyed) return;
-        this.ingest(element, kind, Math.round(meta.mediaTime * fps));
-        this.onFrame?.();
-        element.requestVideoFrameCallback(presented);
+        try {
+          this.ingest(element, kind, Math.round(meta.mediaTime * fps));
+          this.onFrame?.();
+          this.frameCallbacks.set(element, element.requestVideoFrameCallback(presented));
+        } catch (error) {
+          this.destroy();
+          if (this.onError) this.onError(error);
+          else throw error;
+        }
       };
-      element.requestVideoFrameCallback(presented);
+      this.frameCallbacks.set(element, element.requestVideoFrameCallback(presented));
     }
   }
 
@@ -294,8 +309,12 @@ export class VideoSource {
   }
 
   destroy() {
+    if (this.destroyed) return;
     this.destroyed = true;
+    for (const [element, id] of this.frameCallbacks) element.cancelVideoFrameCallback(id);
+    this.frameCallbacks.clear();
     for (const f of this.frames ? [...this.frames.color, ...this.frames.depth] : []) f.buffer.destroy();
+    for (const buffer of [this.uniform, this.noCoc, this.inferno, this.size]) buffer?.destroy();
   }
 
   encode(encoder, { color, coc, width, height, aperture, invFocus = 0, timestampWrites }) {
