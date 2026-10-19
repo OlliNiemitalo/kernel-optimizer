@@ -1,5 +1,6 @@
 /*! coi-serviceworker v0.1.7 - Guido Zuidhof and contributors, licensed under MIT */
-// Modified for kernel-optimizer: cross-origin requests are not proxied (see the fetch handler).
+// Modified for kernel-optimizer: cross-origin and media requests are not proxied, and failed
+// fetches (such as aborted ones) give a network error instead of an invalid response.
 let coepCredentialless = false;
 if (typeof window === 'undefined') {
     self.addEventListener("install", () => self.skipWaiting());
@@ -32,6 +33,10 @@ if (typeof window === 'undefined') {
         if (new URL(r.url).origin !== self.location.origin) {
             return;
         }
+        // Same-origin media needs no headers; video elements abort their range requests often.
+        if (r.destination === "video" || r.destination === "audio" || r.headers.has("range")) {
+            return;
+        }
 
         const request = (coepCredentialless && r.mode === "no-cors")
             ? new Request(r, {
@@ -60,7 +65,7 @@ if (typeof window === 'undefined') {
                         headers: newHeaders,
                     });
                 })
-                .catch((e) => console.error(e))
+                .catch(() => Response.error())
         );
     });
 
