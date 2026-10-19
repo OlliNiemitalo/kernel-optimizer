@@ -239,7 +239,6 @@ export class VideoSource {
       [this.depthNext, "depth", this.depthFps],
     ]) {
       if (!element) continue;
-      this.ingest(element, kind, Math.round(element.currentTime * fps));
       const presented = (now, meta) => {
         if (this.destroyed) return;
         try {
@@ -253,7 +252,14 @@ export class VideoSource {
         }
       };
       this.frameCallbacks.set(element, element.requestVideoFrameCallback(presented));
+      // loadeddata may precede presentation on Android. A same-time seek also presents a
+      // first frame when switching videos while paused, without starting playback.
+      if (element.paused) element.currentTime = element.currentTime;
     }
+  }
+
+  get ready() {
+    return !this.destroyed && (!this.frames || (this.frames.color.length > 0 && this.frames.depth.length > 0));
   }
 
   ingest(element, kind, key) {
@@ -268,6 +274,15 @@ export class VideoSource {
       : { buffer: this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE }) };
     frame.key = key;
     list.push(frame);
+    let resource;
+    try {
+      resource = this.device.importExternalTexture({ source: element });
+    } catch (error) {
+      throw new Error(`Importing presented ${kind} frame ${key} failed (${error.name}): ${error.message}. ` +
+        `Source: ${element.currentSrc || element.src}. Picture: ${element.videoWidth}x${element.videoHeight}; ` +
+        `readyState: ${element.readyState}; paused: ${element.paused}; seeking: ${element.seeking}; time: ${element.currentTime}.`,
+      { cause: error });
+    }
     const pipeline = this.ingestPipelines[kind];
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginComputePass();
@@ -276,7 +291,7 @@ export class VideoSource {
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.size } },
-        { binding: 1, resource: this.device.importExternalTexture({ source: element }) },
+        { binding: 1, resource },
         ...(kind === "color"
           ? [{ binding: 2, resource: this.sampler }, { binding: 4, resource: { buffer: frame.buffer } }]
           : [{ binding: 3, resource: { buffer: this.inferno } }, { binding: 5, resource: { buffer: frame.buffer } }]),
@@ -291,6 +306,7 @@ export class VideoSource {
   // following depth frame; the newest of each if the videos have drifted too far apart.
   heldFrames() {
     const { color, depth } = this.frames;
+    if (!color.length || !depth.length) return null;
     const find = (key) => depth.find((f) => f.key === key);
     for (let i = color.length - 1; i >= 0; i--) {
       const t = (color[i].key / this.fps) * this.depthFps;
@@ -318,7 +334,7 @@ export class VideoSource {
   }
 
   encode(encoder, { color, coc, width, height, aperture, invFocus = 0, timestampWrites }) {
-    if (this.destroyed) return;
+    if (!this.ready) return;
     const held = this.frames && this.heldFrames();
     const u = new ArrayBuffer(32);
     new Uint32Array(u, 0, 2).set([width, height]);

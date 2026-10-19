@@ -50,6 +50,9 @@ an explicit explanation. Selecting another scene clears the message; stalled ini
 time out after 30 seconds. Codec/profile/level support and simultaneous decoder capacity vary
 by device: the default clip uses three video elements (color and two depth frames), while the
 last, TUM sample uses only one. Remote samples also require network access and CORS.
+Paired video frames are imported only from `requestVideoFrameCallback`, after presentation,
+not immediately after `loadeddata`. Rendering waits until both color and depth caches have a
+presented frame. A same-time seek requests the initial presentation even when playback is paused.
 
 URL options: `?calibrate` enables jax-js's GPU microbenchmark at startup. By default it is skipped,
 because it allocates about 128 MB and can stall the page for several seconds. It is not required

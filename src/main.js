@@ -771,7 +771,8 @@ async function renderBlur() {
     requestBlur();
     return;
   }
-  if (!state.blur || !state.current || !state.source || (state.source === "video" && !state.video)) return; // or loading
+  if (!state.blur || !state.current || !state.source ||
+      (state.source === "video" && !state.video?.source.ready)) return;
   blurRendering = true;
   const copyCapture = state.copyCapture;
   state.copyCapture = null;

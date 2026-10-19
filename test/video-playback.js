@@ -171,3 +171,90 @@ test("frame callback failures reach the UI handler and cancel all frame callback
   assert.equal(errors.length, 1);
   source.destroy();
 });
+
+test("paired videos import only presented frames and wait for both caches before rendering", (t) => {
+  const previousUsage = globalThis.GPUBufferUsage;
+  globalThis.GPUBufferUsage = { UNIFORM: 1, COPY_DST: 2 };
+  t.after(() => {
+    if (previousUsage === undefined) delete globalThis.GPUBufferUsage;
+    else globalThis.GPUBufferUsage = previousUsage;
+  });
+  const imported = [];
+  const source = Object.assign(Object.create(VideoSource.prototype), {
+    device: {
+      createShaderModule: () => ({}),
+      createComputePipeline: () => ({}),
+      createBuffer: () => ({ destroy() {} }),
+      queue: { writeBuffer() {} },
+    },
+    color: {
+      paused: true,
+      time: 0,
+      seeks: 0,
+      get currentTime() { return this.time; },
+      set currentTime(value) { this.time = value; this.seeks++; },
+      requestVideoFrameCallback(callback) { this.callback = callback; return 1; },
+      cancelVideoFrameCallback() {},
+    },
+    depth: {
+      paused: false,
+      currentTime: 0,
+      requestVideoFrameCallback(callback) { this.callback = callback; return 2; },
+      cancelVideoFrameCallback() {},
+    },
+    fps: 24,
+    depthFps: 15,
+    width: 640,
+    height: 360,
+    frameCallbacks: new Map(),
+    ingest(element, kind, key) {
+      imported.push({ element, kind, key });
+      this.frames[kind].push({ key, buffer: { destroy() {} } });
+    },
+  });
+  source.holdFrames();
+  assert.deepEqual(imported, [], "loadeddata is not a presented-frame notification");
+  assert.equal(source.color.seeks, 1, "paused videos request a same-time seek for initial presentation");
+  assert.equal(source.ready, false);
+  assert.equal(source.heldFrames(), null);
+  source.encode(null, {});
+  source.color.callback(0, { mediaTime: 0.5 });
+  assert.equal(source.ready, false);
+  assert.equal(source.heldFrames(), null);
+  source.encode(null, {});
+  source.depth.callback(0, { mediaTime: 0.5 });
+  assert.equal(source.ready, true);
+  assert.deepEqual(imported.map(({ kind, key }) => [kind, key]), [["color", 12], ["depth", 8]]);
+  assert.equal(source.heldFrames().color.key, 12);
+  source.destroy();
+  assert.equal(source.ready, false);
+});
+
+test("external import errors identify the source, presented frame, and playback state", () => {
+  const cause = new DOMException("Failed to execute 'importExternalTexture' on 'GPUDevice'.", "OperationError");
+  const source = Object.assign(Object.create(VideoSource.prototype), {
+    width: 640,
+    height: 360,
+    frames: { color: [], depth: [{ key: 0, buffer: { destroy() {} } }] },
+    device: {
+      createBuffer: () => ({ destroy() {} }),
+      importExternalTexture() { throw cause; },
+    },
+  });
+  const video = { currentSrc: "https://example.com/color.mp4", videoWidth: 640, videoHeight: 360,
+    readyState: 2, paused: false, seeking: true, currentTime: 0.5 };
+  const previousUsage = globalThis.GPUBufferUsage;
+  globalThis.GPUBufferUsage = { STORAGE: 1 };
+  try {
+    assert.throws(() => source.ingest(video, "color", 12), (error) => {
+      assert.equal(error.cause, cause);
+      assert.match(error.message, /presented color frame 12.*OperationError/);
+      assert.match(error.message, /https:\/\/example\.com\/color\.mp4/);
+      assert.match(error.message, /640x360; readyState: 2; paused: false; seeking: true; time: 0.5/);
+      return true;
+    });
+  } finally {
+    if (previousUsage === undefined) delete globalThis.GPUBufferUsage;
+    else globalThis.GPUBufferUsage = previousUsage;
+  }
+});
