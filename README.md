@@ -815,7 +815,7 @@ does not build on Windows.
 
 ## License
 
-MIT for this project ([LICENSE](LICENSE)). The vendored jax-js-nonconsuming sources are MIT
+CC0 (public domain) for this project ([LICENSE](LICENSE)). The vendored jax-js-nonconsuming sources are MIT
 licensed; see [vendor/jax-js-nonconsuming/LICENSE](vendor/jax-js-nonconsuming/LICENSE).
 `public/coi-serviceworker.js` is by Guido Zuidhof and contributors, MIT licensed (see its header).
 `public/tum-sitting-rgbd.mp4` is derived from the TUM RGB-D benchmark sequence fr3/sitting_static
