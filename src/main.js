@@ -19,7 +19,7 @@ const TUM_CREDIT =
   '<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>; depth holes filled, converted to inverse depth, re-encoded.';
 const WOMAN_CREDIT =
   'Video: Yaroslav Shuraev, <a href="https://www.pexels.com/video/woman-standing-in-the-middle-of-green-grass-4511004/">' +
-  "Woman standing in the middle of green grass</a> (Pexels license), first 13 s at 1920×1080. Depth: " +
+  "Woman standing in the middle of green grass</a> (Pexels license), first 13 s of the 1920×1080 original, rendered at 960×540. Depth: " +
   '<a href="https://videodepthanything.github.io/">Video Depth Anything</a> (S. Chen et al., CVPR 2025) at 15 fps, ' +
   "interpolated to 24 fps in the shader; estimated and relative.";
 const VIDEO_SAMPLES = [
@@ -44,6 +44,8 @@ const VIDEO_SAMPLES = [
     const name = file.replace(/\.mp4$/, "").replace(/(-u?hd_\d+_\d+_\d+fps)?(_rgb|_input)?$/, "");
     return {
       label: `Video Depth Anything: ${description ? `${name}, ${description}` : name}`,
+      group: "Video Depth Anything clips, by file name",
+      name: description ? `${name}, ${description}` : name,
       color: VDA + "origin/" + file,
       depth: VDA + "ours/" + (depth ?? file),
       fps: Number(/(\d+)fps/.exec(file)?.[1]) || 30,
@@ -57,6 +59,8 @@ const VIDEO_SAMPLES = [
     ["Single-TakeFPVOff-road-1080-cut_depth_x3.mp4", "off-road FPV, 3× speed", 30],
   ].map(([file, name, fps]) => ({
     label: `Video Depth Anything long videos: ${name}`,
+    group: "Video Depth Anything long videos",
+    name: name[0].toUpperCase() + name.slice(1),
     color: VDA_LONG + file,
     depth: null,
     layout: "side",
@@ -65,9 +69,11 @@ const VIDEO_SAMPLES = [
     credit: VDA_CREDIT,
   })));
 // Default: the original footage of Video Depth Anything's 4511004 clip (which is 1280×720 at 15 fps),
-// with its depth video also loaded one depth frame ahead, for interpolation.
+// with its depth interpolated between depth frames.
 VIDEO_SAMPLES.unshift({
   label: "Pexels: woman in a field, 1080p 24 fps (Video Depth Anything depth, interpolated)",
+  group: "Featured",
+  name: "Woman in a field (estimated depth)",
   color: `${import.meta.env.BASE_URL}woman-4511004-1080p.mp4`,
   depth: `${import.meta.env.BASE_URL}woman-4511004-vda-depth.mp4`,
   depthFps: 15,
@@ -77,6 +83,8 @@ VIDEO_SAMPLES.unshift({
 });
 VIDEO_SAMPLES.push({
   label: "TUM RGB-D: two people talking (measured depth)",
+  group: "TUM RGB-D",
+  name: "Two people talking (measured depth)",
   color: `${import.meta.env.BASE_URL}tum-sitting-rgbd.mp4`,
   depth: null,
   fps: 30,
@@ -177,7 +185,7 @@ function describeRanges(problem) {
     : `${b.initLo[1].toFixed(2)}–${b.initHi[1].toFixed(2)}`;
   const m = channelCount(problem.multiplicity);
   $("ranges").textContent =
-    `${m} complex channels per pass. Initial ranges: decay b ∈ [${b.initLo[0]}, ${b.initHi[0]}], frequency c ∈ ${bands}, ` +
+    `${m} channels. Initial ranges: decay b ∈ [${b.initLo[0]}, ${b.initHi[0]}], frequency c ∈ ${bands}, ` +
     `weights r, i (and r₁, i₁, … of higher multiplicities) ∈ ±${b.initHi[2].toPrecision(3)} ` +
     `(grow 2.5× per channel, as in the article's solutions).`;
   // Larger sets have larger, more strongly cancelling weights, so take smaller relative steps.
@@ -315,7 +323,7 @@ async function observe(startTime, generationsRun, { rescored = false } = {}) {
   const rate = generationsRun > 0 ? (generationsRun * de.P) / ((now - startTime) / 1000) : 0;
   setStatus(
     `Optimizer on ${de.solvers ? `CPU (${de.solvers.threads} workers)` : state.backend} · generation ${de.generation} · ` +
-      (rate ? `${Math.round(rate).toLocaleString()} evaluations/s · ` : "") +
+      (rate ? `${Math.round(rate).toLocaleString()} candidate kernels scored/s · ` : "") +
       `population best ±${snap.bestCost.toFixed(6)}, mean ${snap.meanCost.toFixed(5)}` +
       (keep && refined.rival > refined.denseError ? ` · Showing the ${refined.source} kernel until the population beats its dense-grid ripple ±${refined.denseError.toFixed(6)} (population best there ±${refined.rival.toFixed(6)})` : "") +
       (rescored ? " · Same population re-scored; convergence history restarted for the new objective." : ""),
@@ -451,7 +459,10 @@ async function remezRefine() {
 
 let blurPending = false;
 let blurKernelDirty = true;
-let blurRendering = false;
+// The next frame is encoded while the GPU still renders the previous one.
+const MAX_FRAMES_IN_FLIGHT = 2;
+let framesInFlight = 0;
+let blurDeferred = false;
 let lastBlurTime = 0;
 
 const FRAME = 1 / 30; // seconds per step
@@ -533,6 +544,7 @@ function showFocus() {
   const inv = state.focus ** 2;
   setProp($("focus"), "value", String(state.focus));
   setProp($("focusOut"), "textContent", inv > 0 ? `${(1 / inv).toPrecision(2)} m` : "∞");
+  setProp($("focus"), "ariaValueText", $("focusOut").textContent);
 }
 
 function setFocus(value) {
@@ -694,6 +706,8 @@ function viewState() {
     size: state.blur && [state.blur.width, state.blur.height],
     gpu: state.blur?.adapterInfo,
     stats: $("blurStats").textContent,
+    gpuMs: state.lastRender?.gpuMs,
+    memoryBytes: state.lastRender?.memory,
     userAgent: navigator.userAgent,
   };
 }
@@ -744,16 +758,74 @@ function updateVaryingControls() {
     occlusion: $("occlusion").checked, showLayers: $("showLayers").value,
   });
   for (const [id, disabled] of Object.entries(controls.disabled)) setProp($(id), "disabled", disabled);
-  setProp($("playerBlur"), "checked", $("blurOn").checked);
-  setProp($("playerBlur"), "disabled", $("blurOn").disabled);
+  const depthOfField = controls.depthAvailable && $("blurMode").value === "depth";
+  setProp($("radiusLabel"), "textContent", depthOfField ? "Aperture" : "Disc radius");
+  setProp($("radiusControl"), "title", depthOfField
+    ? "Size of the lens opening: the blur radius of a point 2 m away when focused at infinity"
+    : "Radius of the blur disc");
   const clipboardSupported = !!navigator.clipboard?.write && typeof ClipboardItem !== "undefined";
   setProp($("copyImage"), "disabled", !state.blur || !state.source || !clipboardSupported || !!state.copyBusy);
   setProp($("copyImage"), "title", clipboardSupported
     ? "Copy a freshly rendered PNG of the current view to the clipboard"
     : "Image clipboard is unavailable in this browser or context; use Save PNG");
   setProp($("blurMode").querySelector('option[value="depth"]'), "disabled", !controls.depthAvailable);
-  for (const option of $("showLayers").options) setProp(option, "disabled", !controls.layerViews.includes(option.value));
+  for (const option of $("showLayers").options) {
+    // Safari ignores hidden options, so they are also disabled.
+    setProp(option, "disabled", !controls.layerViews.includes(option.value));
+    setProp(option, "hidden", option.disabled);
+  }
   setProp($("showLayers"), "value", controls.view);
+}
+
+const ms = (t) => `${t.toFixed(1)} ms`;
+const mib = (b) => `${(b / 2 ** 20).toFixed(1)} MiB`;
+
+// Data flow of the last rendered frame: per stage, the buffers read and written, with GPU time and memory.
+function showGpuBreakdown() {
+  const r = state.lastRender;
+  if (!r || !state.blur) return;
+  state.breakdownTime = performance.now();
+  const g = r.gpuMs ?? {};
+  const m = r.memory;
+  const blurred = $("blurOn").checked;
+  const varying = blurred && r.varying;
+  const layered = blurred && m.layers > 0;
+  const video = state.source === "video";
+  // Each buffer's size is shown once, where it first appears.
+  const shown = new Set();
+  const chip = ([name, bytes]) => {
+    const size = bytes && !shown.has(name) ? ` <b>${mib(bytes)}</b>` : "";
+    shown.add(name);
+    return `<span class="buffer">${name}${size}</span>`;
+  };
+  const b = {
+    video: ["held video frames", m.videoFrames], source: ["source image", m.source],
+    radius: ["radius map", m.radiusMap], maps: ["working maps", m.levelMaps],
+    tables: ["kernel tables", m.tables], mid: ["intermediate, one channel", m.intermediate],
+    acc: ["accumulator", m.accumulator], layers: ["layers", m.layers], screen: ["screen", 0],
+  };
+  const stage = (name, time, what, reads, writes) => `<div class="stage">
+    <div class="io">${reads.filter(Boolean).map(chip).join("")}</div>
+    <div class="pass"><b>${name}</b>${time === undefined ? "" : ` <span class="time">${ms(time)}</span>`}<br>${what}</div>
+    <div class="io">${writes.filter(Boolean).map(chip).join("")}</div></div>`;
+  const channels = `${state.blur.channels} channel${state.blur.channels === 1 ? "" : "s"}${layered ? " × 2 layers" : ""}`;
+  const html = [
+    state.blur.animated && stage("Scene", g.scene, video ? "converts the video frame" : "renders the 3D scene",
+      [video && m.videoFrames && b.video], [b.source, varying && b.radius]),
+    varying && stage("Prepare", g.prepare, "blur levels, reach per 16-pixel tile, vertical radius", [b.radius, b.source], [b.maps]),
+    layered && stage("Layers", g.layers, "depth split, masks, radius smoothing; compositing", [b.maps, b.acc], [b.maps, b.layers]),
+    blurred && `<div class="loop"><div class="loop-label">for each of ${channels}</div>
+      ${stage("Horizontal pass", g.horizontal, "filters each row with the channel's complex h", [b.source, b.tables, varying && b.maps], [b.mid])}
+      ${stage("Vertical pass", g.vertical, "filters each column with the channel's complex v, computing only the real part, and adds it", [b.mid, b.tables, varying && b.maps], [b.acc])}
+    </div>`,
+    layered && stage("Fill", g.fill, "fills the far layer behind near objects", [b.acc], [b.layers]),
+    stage("Display", undefined, blurred ? "divides by the summed kernel weight, applies exposure" : "applies exposure",
+      [blurred ? (layered ? b.layers : b.acc) : b.source], [b.screen]),
+  ].filter(Boolean).join("");
+  const total = Object.values(m).reduce((a, x) => a + x, 0);
+  const time = r.gpuMs ? `${ms(Object.values(g).reduce((a, x) => a + x, 0))} GPU time` : `${ms(r.ms)} per frame (no GPU timestamps)`;
+  $("gpuDiagram").innerHTML = `${html}<p class="note">Total: ${time}, ${mib(total)} GPU memory.` +
+    " Times are summed over channels and layers; arrows show which buffers each stage reads and writes; each buffer's size is shown where it first appears.</p>";
 }
 
 function requestBlur(kernelChanged = false) {
@@ -767,13 +839,13 @@ function requestBlur(kernelChanged = false) {
 
 async function renderBlur() {
   blurPending = false;
-  if (blurRendering) {
-    requestBlur();
+  if (framesInFlight >= MAX_FRAMES_IN_FLIGHT) {
+    blurDeferred = true;
     return;
   }
   if (!state.blur || !state.current || !state.source ||
       (state.source === "video" && !state.video?.source.ready)) return;
-  blurRendering = true;
+  framesInFlight++;
   const copyCapture = state.copyCapture;
   state.copyCapture = null;
   try {
@@ -800,7 +872,7 @@ async function renderBlur() {
     const saveCapture = state.captureNext;
     state.captureNext = false;
     const capture = saveCapture || !!copyCapture;
-    const r = await state.blur.render({
+    const rendering = state.blur.render({
       exposure: Math.pow(2, num("exposure")),
       precision: $("precision").value,
       interpolate: $("radiusInterpolation").checked,
@@ -813,40 +885,37 @@ async function renderBlur() {
       showLayers: Number($("showLayers").value),
       capture,
     });
+    // Submitted: the next frame can be encoded while the GPU renders this one.
+    lastBlurTime = now;
+    if (animating()) requestBlur();
+    const r = await rendering;
     const prefix = { world: "street", video: "video", shapes: "tetras" }[state.source];
     if (r.png && saveCapture) download(r.png, prefix ? `${prefix}-t${state.sceneTime.toFixed(4)}s.png` : "blur.png");
     if (copyCapture) {
       if (!r.png) throw new Error("The renderer did not produce an image.");
       copyCapture.resolve(await (await fetch(r.png)).blob());
     }
-    lastBlurTime = now;
     state.frames = (state.frames ?? 0) + 1;
     showFocus();
-    const gpu = r.gpuMs
-      ? "GPU time: " + Object.entries(r.gpuMs).map(([k, ms]) => `${k} ${ms.toFixed(2)} ms`).join(" + ")
-      : `${r.ms.toFixed(1)} ms round trip`;
-    const mib = (b) => (b / 2 ** 20).toFixed(1);
-    const m = r.memory;
-    const total = Object.values(m).reduce((a, b) => a + b, 0);
-    $("blurStats").textContent =
+    state.lastRender = r;
+    const total = Object.values(r.memory).reduce((a, b) => a + b, 0);
+    setProp($("blurStats"), "textContent",
       ($("blurOn").checked ? "" : "Blur off · ") +
-      `${state.blur.width}×${state.blur.height} px · ${state.blur.channels} separable channels × ` +
-      (r.varying ? `up to ${r.taps} taps (${$("radiusInterpolation").checked ? "interpolated radii" : "nearest radius"})` : `${r.taps} taps`) + ` per pass · ` +
-      `GPU memory ${mib(total)} MiB (intermediate ${mib(m.intermediate)}, accumulator ${mib(m.accumulator)}, ` +
-      `source ${mib(m.source)}` +
-      (m.radiusMap ? `, radius ${mib(m.radiusMap)}, working maps ${mib(m.levelMaps)}` : "") +
-      `, kernel tables ${mib(m.tables)}` +
-      (m.layers ? `, layers ${mib(m.layers)}` : "") +
-      (m.videoFrames ? `, video frames ${mib(m.videoFrames)}` : "") +
-      `) · ${gpu}`;
+      `${state.blur.width}×${state.blur.height} px · ${state.blur.channels} channels, ` +
+      `${r.varying ? "up to " : ""}${r.taps} taps per pass · ${mib(total)} GPU memory · ` +
+      (r.gpuMs ? `${ms(Object.values(r.gpuMs).reduce((a, b) => a + b, 0))} GPU time` : `${ms(r.ms)} per frame`));
+    if ($("gpuPanel").open && performance.now() - (state.breakdownTime ?? 0) > 250) showGpuBreakdown();
   } catch (e) {
     copyCapture?.reject(e);
     state.video?.source.destroy();
     if (state.playing) setPlaying(false);
     reportSceneError(`Blur failed: ${e.message}`);
   } finally {
-    blurRendering = false;
-    if (animating()) requestBlur();
+    framesInFlight--;
+    if (blurDeferred || animating()) {
+      blurDeferred = false;
+      requestBlur();
+    }
   }
 }
 
@@ -926,10 +995,9 @@ async function useVideo(sample, { fallback = false } = {}) {
     onEnded: color ? () => setPlaying(false) : undefined,
   });
   try {
-    const [element, depth, depthNext] = await Promise.all([
+    const [element, depth] = await Promise.all([
       load(sample.color, true),
       sample.depth ? load(sample.depth) : null,
-      sample.depthFps ? load(sample.depth) : null,
     ]);
     if (scene !== state.scene) return;
     const device = state.blur.device;
@@ -937,7 +1005,7 @@ async function useVideo(sample, { fallback = false } = {}) {
     let validationError;
     try {
       source = new VideoSource(device, element, depth, {
-        depthNext, depthFps: sample.depthFps, layout: sample.layout, fps: sample.fps ?? 30,
+        depthFps: sample.depthFps, layout: sample.layout, fps: sample.fps ?? 30,
         onFrame: () => requestBlur(), onError: failed,
       });
     } finally {
@@ -948,7 +1016,8 @@ async function useVideo(sample, { fallback = false } = {}) {
       source.destroy();
       return;
     }
-    state.video = { element, depth, depthNext, source, name: sample.label, fps: sample.fps ?? 30, depthFps: sample.depthFps };
+    state.video = { element, depth, source, name: sample.label, fps: sample.fps ?? 30, depthFps: sample.depthFps };
+    syncDepthVideo(true);
     applyVideoPlayback();
     $("videoCredit").innerHTML = sample.credit ?? "";
     $("videoCredit").hidden = !sample.credit;
@@ -972,20 +1041,34 @@ async function useVideo(sample, { fallback = false } = {}) {
   }
 }
 
-const videoElements = () => [state.video?.element, state.video?.depth, state.video?.depthNext].filter(Boolean);
+const videoElements = () => [state.video?.element, state.video?.depth].filter(Boolean);
 
 // The depth video follows the color video; while playing they drift apart by up to a frame or so,
-// which VideoSource hides by matching held frames.
-// A second depth element (for interpolation) runs one depth frame ahead. force: seek exactly.
+// which VideoSource hides by matching held frames. For interpolation, the depth video runs one
+// depth frame ahead, and VideoSource still holds the frame before. force: seek exactly; with
+// interpolation, first to the color time, and one depth frame ahead once that frame is presented.
+let depthSeek = { pending: false };
 function syncDepthVideo(force = false) {
-  const { element, depth, depthNext, fps, depthFps } = state.video;
-  const tolerance = (element.paused ? 0.25 : 3) / fps;
-  for (const [e, offset] of [[depth, 0], [depthNext, 1 / depthFps]]) {
-    if (!e) continue;
-    const end = e.duration || Infinity;
-    const target = element.loop ? (element.currentTime + offset) % end : Math.min(element.currentTime + offset, end);
-    if (force || Math.abs(e.currentTime - target) > tolerance) e.currentTime = target;
+  const { element, depth, fps, depthFps } = state.video;
+  if (!depth) return;
+  const ahead = depthFps ? 1 / depthFps : 0;
+  const end = depth.duration || Infinity;
+  const at = (offset) => element.loop ? (element.currentTime + offset) % end : Math.min(element.currentTime + offset, end);
+  if (force && ahead) {
+    const seek = depthSeek = { pending: true };
+    depth.currentTime = at(0);
+    // After the other frame callbacks, so VideoSource has imported the presented frame.
+    depth.requestVideoFrameCallback(() => setTimeout(() => {
+      if (seek !== depthSeek || state.video?.depth !== depth) return;
+      seek.pending = false;
+      depth.currentTime = at(ahead);
+    }));
+    return;
   }
+  if (depthSeek.pending) return;
+  const target = at(ahead);
+  const tolerance = (element.paused ? 0.25 : 3) / fps;
+  if (force || Math.abs(depth.currentTime - target) > tolerance) depth.currentTime = target;
 }
 
 async function initBlur() {
@@ -1171,13 +1254,10 @@ function wire() {
       requestBlur();
     });
   }
-  $("playerBlur").addEventListener("input", () => {
-    $("blurOn").checked = $("playerBlur").checked;
-    $("blurOn").dispatchEvent(new Event("input"));
-  });
   for (const id of ["precision"]) $(id).addEventListener("change", () => requestBlur());
   for (const id of ["precision", "shaderKind"]) $(id).addEventListener("change", showShader);
   $("radiusInterpolation").addEventListener("input", showShader);
+  $("gpuPanel").addEventListener("toggle", () => $("gpuPanel").open && showGpuBreakdown());
   $("copyShader").onclick = () => navigator.clipboard.writeText($("shaderCode").value);
   $("downloadShader").onclick = () => {
     const link = document.createElement("a");
@@ -1220,7 +1300,7 @@ function wire() {
   };
   const groups = {};
   for (const [k, sample] of VIDEO_SAMPLES.entries()) {
-    const [, group, name] = sample.label.match(/^(.*?): (.*)$/);
+    const { group, name } = sample;
     if (!groups[group]) $("videoSample").append((groups[group] = Object.assign(document.createElement("optgroup"), { label: group })));
     groups[group].append(new Option(name, k));
   }

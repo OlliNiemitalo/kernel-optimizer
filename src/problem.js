@@ -449,10 +449,10 @@ export function formatParams(params, problem, error) {
   const higher = mult.filter((m) => m > 1).length;
   const lines = [
     `Number of components: ${n} (${higher} with repeated rates, multiplicities ${mult.join(", ")}; ` +
-      `${channelCount(mult)} complex channels per pass), transition bandwidth: ${problem.transition}, ` +
+      `${channelCount(mult)} channels), transition bandwidth: ${problem.transition}, ` +
       `ripple: ±${error.toFixed(6)}`,
     "",
-    "// 1-D profile components (article format; multiplicity m adds terms up to (x*x)^(m-1)):",
+    "// Profile k(x) as a sum of components (article format; multiplicity m adds terms up to (x*x)^(m-1)):",
   ];
   for (let u = 0; u < n; u++) {
     const k = u * PARAMS_PER_COMPONENT;

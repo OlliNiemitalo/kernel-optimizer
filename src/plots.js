@@ -114,8 +114,8 @@ export function drawProfile(canvas, { best, label, population = [], transition, 
   const lo = Math.min(-0.15, ...all) * (componentYs.length ? 1.05 : 1);
   const hi = Math.max(1.15, ...all) * (componentYs.length ? 1.05 : 1);
   const { X, Y, m } = frame(ctx, w, h, [0, xmax], [lo, hi], {
-    title: `Radial cross-section K(r)${label ? ` — ${label}` : ""}`,
-    xlabel: "r (disc radius = 1)",
+    title: `Profile k(x)${label ? ` — ${label}` : ""}`,
+    xlabel: "x (disc radius = 1)",
   });
   ctx.save();
   clipToPlot(ctx, w, h, m);
@@ -146,7 +146,7 @@ export function drawError(canvas, { best, transition, ripple, xmax }) {
     es.push(profile(best, x) - (x <= 1 ? 1 : 0));
   }
   const lim = Math.max(ripple * 1.3, 1e-6);
-  const { X, Y, m } = frame(ctx, w, h, [0, xmax], [-lim, lim], { title: "Error K(r) − target", xlabel: "r" });
+  const { X, Y, m } = frame(ctx, w, h, [0, xmax], [-lim, lim], { title: "Error k(x) − target", xlabel: "x" });
   ctx.save();
   clipToPlot(ctx, w, h, m);
   line(ctx, X, Y, [0, xmax], [ripple, ripple], "#f9c74f", 1, 0.7);

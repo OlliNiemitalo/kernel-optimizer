@@ -1203,7 +1203,8 @@ export class BlurRenderer {
       const count = MAX_QUERIES;
       this.querySet = device.createQuerySet({ type: "timestamp", count });
       this.queryResolve = device.createBuffer({ size: count * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-      this.queryRead = device.createBuffer({ size: count * 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      this.queryReads = []; // free readback buffers; frames in flight hold their own
+      this.queryReadCount = 0;
     }
     this.context = canvas.getContext("webgpu");
     this.format = navigator.gpu.getPreferredCanvasFormat();
@@ -1442,7 +1443,9 @@ export class BlurRenderer {
     };
   }
 
-  // Runs the passes and draws; resolves with timings once the GPU has finished. `time` and
+  // Runs the passes and draws; resolves with timings once the GPU has finished. The work is
+  // submitted synchronously, before the first await, so callers may encode the next frame early.
+  // `time` and
   // `invFocus` (1 / focus distance in 1/m) drive the animated source. `capture` returns the frame as a
   // PNG data URL. Varying radius: `sizeBlur` is the brightness exponent of the blur-size smoothing
   // (null = off); `occlusion` is the depth-of-field occlusion threshold in octaves (0 = off).
@@ -1516,7 +1519,9 @@ export class BlurRenderer {
     });
     const t0 = performance.now();
     const encoder = device.createCommandEncoder();
-    const timed = this.querySet && this.queryRead.mapState === "unmapped";
+    const queryRead = this.querySet && (this.queryReads.pop() ?? (this.queryReadCount < 3 ? (this.queryReadCount++,
+      device.createBuffer({ size: MAX_QUERIES * 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST })) : null));
+    const timed = !!queryRead;
     const labels = [];
     const timestampWrites = (label) => {
       if (!timed) return undefined;
@@ -1606,7 +1611,7 @@ export class BlurRenderer {
     const queries = 2 * labels.length;
     if (timed) {
       encoder.resolveQuerySet(this.querySet, 0, queries, this.queryResolve, 0);
-      encoder.copyBufferToBuffer(this.queryResolve, 0, this.queryRead, 0, queries * 8);
+      encoder.copyBufferToBuffer(this.queryResolve, 0, queryRead, 0, queries * 8);
     }
     device.queue.submit([encoder.finish()]);
     // Must be read in the same task: the canvas texture is discarded once presented.
@@ -1614,9 +1619,10 @@ export class BlurRenderer {
     await device.queue.onSubmittedWorkDone();
     const result = { ms: performance.now() - t0, taps: this.taps, levels: this.levels, varying, packed, memory: this.memory(packed), png };
     if (timed) {
-      await this.queryRead.mapAsync(GPUMapMode.READ, 0, queries * 8);
-      const ns = new BigUint64Array(this.queryRead.getMappedRange(0, queries * 8).slice(0));
-      this.queryRead.unmap();
+      await queryRead.mapAsync(GPUMapMode.READ, 0, queries * 8);
+      const ns = new BigUint64Array(queryRead.getMappedRange(0, queries * 8).slice(0));
+      queryRead.unmap();
+      this.queryReads.push(queryRead);
       result.gpuMs = {};
       labels.forEach((label, k) => {
         result.gpuMs[label] = (result.gpuMs[label] ?? 0) + Number(ns[2 * k + 1] - ns[2 * k]) / 1e6;

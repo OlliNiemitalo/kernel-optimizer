@@ -61,15 +61,15 @@ for the optimizer.
 **Control availability.** Blur-specific controls are disabled when blur is off. The player bar under
 the picture (go to start, previous frame, play/pause, next frame, time, speed) is available only for
 videos and the animated world; the seek bar, duration and loop only for videos, and full screen for
-every scene (also by double-clicking the picture, again to exit). The bar repeats the Blur on/off switch, so it is available in full screen. The space bar plays and pauses, unless a control that uses it has focus.
-Focus, layers, blur-size blending and occlusion require depth mode with a depth source (world,
-video or Tetras). Brightness weight additionally requires blur-size blending, and the occlusion
-threshold requires occlusion. Radius interpolation is available only for varying blur.
-Tilt-shift has one radius per row, so blur-size blending and brightness weighting have no effect and are
-disabled. The general **View** selector is in **Varying blur**: with blur enabled it offers the composite
+every scene (also by double-clicking the picture, again to exit). The Blur on/off switch is in the bar, so it is available in full screen. The space bar plays and pauses, unless a control that uses it has focus.
+Focus, layers, row averaging of the vertical radius and occlusion require depth mode with a depth source (world,
+video or Tetras). Highlight priority additionally requires row averaging, and the occlusion
+threshold requires occlusion. Smooth radius steps are available only for varying blur.
+Tilt-shift has one radius per row, so row averaging and highlight priority have no effect and are
+disabled. The general **View** selector is in **Varying blur**: with blur enabled it offers the final image
 and, for one layer, summed kernel weight; near/far diagnostics are available only with depth
-layers enabled. Disabled settings are retained, while an unavailable diagnostic resets to the
-composite. **Depth map** is available for all depth sources in depth-of-field mode, with or without
+layers enabled. Unavailable views are hidden. Disabled settings are retained, while an unavailable diagnostic resets to the
+final image. **Depth map** is available for all depth sources in depth-of-field mode, with or without
 layers. It shows the decoded inverse depth used for focus picking and blur-radius generation,
 not the layer-smoothed radius. Brighter means nearer;
 inverse depth $d$ maps to display gray $d/(1+d)$ (black at infinity, half gray at $d=1$).
@@ -337,8 +337,9 @@ relative inverse depth $v \in [0, 1]$ in one of three layouts:
   few frames of the color while playing, and on the same frame when paused or stepping.
 - **Pair with temporal interpolation** (the default woman-in-field video): the color is the
   original footage, 1920×1080 at 24 fps, while Video Depth Anything's depth for it is 1280×720 at
-  15 fps. The depth video plays in two elements, one depth frame apart, both feeding the depth
-  cache. A color frame at time $t$ is rendered once depth frames $k = \lfloor 15t \rfloor$ and
+  15 fps. The depth video plays one depth frame ahead of the color, so the cache holds the
+  depth frames on both sides of it. After a seek, the depth video first presents the frame at
+  the color time, then moves one depth frame ahead. A color frame at time $t$ is rendered once depth frames $k = \lfloor 15t \rfloor$ and
   $k+1$ are cached, blending their decoded depths with weight $15t - k$. Both files are vendored
   unmodified apart from trimming the color to the 13 s that the depth covers. Its focus starts at
   2.4 relative units, on the woman.
@@ -350,7 +351,7 @@ Inverse depth suits 8-bit video, since the blur radius is linear in it: one gray
 fraction of $R$. Videos wider than 960 pixels are downscaled when read.
 Varying radii use
 **precomputed radius-node tap tables**: nodes at 1/64 pixel spacing through 4 pixels, then
-64 per octave. **Interpolate blur radii** in the Varying blur controls is off by default:
+64 per octave. **Smooth radius steps** in the Varying blur controls is off by default:
 the faster nearest-node shader fetches one tap, using that node's
 support. Enable it for continuous radius changes: the per-pixel node index and fraction are
 prepared once; the inner loops read two complex taps at integer offsets and blend them, without
@@ -383,7 +384,7 @@ sharper pixels: those pixels neither look far enough nor use the highlight's ker
   The default $b=1$ is a useful highlight-priority heuristic: it helps bright highlights
   retain their shape when radii mix horizontally, but is neither kernel normalization nor exact
   variable-radius convolution. At $b=0$ only luminance weighting disappears; membership and disc
-  overlap still apply. Larger exponents favor highlights more. Turning off **Blur the blur size**
+  overlap still apply. Larger exponents (**Highlight priority**) favor highlights more. Turning off **Average vertical radius along rows**
   uses each pixel's own radius instead. For tilt-shift, all sources in a row already share one
   radius, so neither this averaging nor the exponent changes it; the separable passes reproduce
   that row-constant source-radius kernel, subject to the chosen tap lookup and precision.
@@ -449,7 +450,7 @@ reconstruct surfaces hidden in the input.
   layer's sources), it is completed by pull-push (a pyramid of coverage-weighted averages built by
   halving, then filled from coarse to fine with bilinear upsampling). The near layer, its color
   normalized by its coverage $w$, then goes over it with opacity
-  $\alpha = \min(\max(\operatorname{close}(w), m f),\ 3w)$: the coverage after a 3 px
+  $\alpha = \min(\max(\mathrm{close}(w), m f),\ 3w)$: the coverage after a 3 px
   morphological closing, which fills narrow dips from mixed disc sizes but keeps the smooth ramp
   around a silhouette, and, on the layer's own pixels (membership $m$), the fraction $f$ of the
   layer's pixels within the pixel's own blur radius (a square window), which makes the layer
@@ -485,8 +486,8 @@ regression checks that an erroneous 8 px radius inside a 16 px foreground return
 to within $10^{-4}$ px of its neighbors, while a truly focused thin feature remains focused.
 These are fixture-specific checks, not universal error bounds.
 
-The **View** selector in **Varying blur** shows the composite, the depth map, the near layer's opacity (tinted,
-or as gray at half scale), the near layer alone, the hole-filled far layer alone, or, with one
+The **View** selector in **Varying blur** shows the final image, the depth map, the near layer's opacity (tinted,
+or as gray with mid-gray opaque), the near layer alone, the hole-filled far layer alone, or, with one
 layer, the summed kernel weight per pixel.
 
 **Pixel integration and mixing radii.** Point-sampled small kernels do not preserve their complex
@@ -558,7 +559,7 @@ terms get amplified.
   preset), the f32 path has $2.5 \times 10^{-6}$ relative error, and the packed 16-bit
   intermediate had about $9 \times 10^{-3}$ with per-component channels. With the rendering channels
   (section 3), 16-bit intermediates are the default. Even for a strongly cancelling kernel, they
-  render within 1/255 of f32. Choose f32 under **Intermediate storage** for reference renders.
+  render within 1/255 of f32. Choose 32-bit under **Intermediate precision** for reference renders.
 - **Don't trust GPU `sin`/`cos` for kernel coefficients.** On the tested GPU they had about
   $6 \times 10^{-5}$ absolute error. That is negligible alone, but multiplied by weights near 100
   it exceeds a ripple of $\pm 0.004$. This app computes tap tables on the CPU, and the optimizer
@@ -572,7 +573,7 @@ in the plots. The pass band is sampled uniformly on $[0, 1]$. Following the arti
 samples are $x_t = 1 + \tau - \ln\frac{N - t}{N}$ for $t = 0 \dots N-1$: dense near the edge,
 sparse far out.
 
-**Negative values.** Negative kernel values look like cheap sharpening. The "Negative gain" $w$
+**Negative values.** Negative kernel values look like cheap sharpening. The negative-value penalty $w$
 (a problem parameter) multiplies the error wherever the kernel is negative:
 $\max_j |K(x_j) - \mathrm{target}_j| \cdot (w \text{ if } K(x_j) < 0 \text{ else } 1)$, in the
 differential evolution, the fine-tuning loss, and the displayed ripple alike. The presets include
@@ -589,7 +590,7 @@ symmetrically near search bounds; pinned parameters remain fixed. It uses the di
 for reproducibility and resumes only if optimization was already running. A kernel outside the
 current search bounds or with incompatible pinned parameters is rejected rather than silently
 changed; check the frequency-band and component settings. **New population** instead samples
-the global initialization ranges. **Include current kernel in a new population**, grouped with
+the global initialization ranges. **Include the current kernel as a member**, grouped with
 these two buttons, retains the exact current kernel as member zero in either mode when checked;
 when unchecked, every member is sampled. The local neighborhood limits initialization only;
 subsequent DE generations still use the full search bounds.
@@ -680,19 +681,19 @@ K(x) = \sum_k w_k \varphi_k(s; \theta), \qquad \varphi \in \{s^q e^{-bs}\cos cs,
 $$
 
 *1. Optimal weights for fixed rates* are a discrete linear Chebyshev problem,
-$\min_w \max_j W_j |t_j - \Phi_j w|$, with the negative gain as a sign-dependent weight
+$\min_w \max_j W_j |t_j - \Phi_j w|$, with the negative-value penalty as a sign-dependent weight
 ($W_j = w_-$ where $e_j = t_j - K_j > 0$ in the stop band, i.e. where $K < 0$; else 1). Its LP dual is
 
 $$
-\delta = \max_\lambda \sum_j \lambda_j t_j \quad \text{s.t.} \quad \sum_j \lambda_j \Phi_j = 0,\quad \sum_j |\lambda_j| / W_j(\operatorname{sign}\lambda_j) = 1,
+\delta = \max_\lambda \sum_j \lambda_j t_j \quad \text{s.t.} \quad \sum_j \lambda_j \Phi_j = 0,\quad \sum_j |\lambda_j| / W_j(\mathrm{sign}\lambda_j) = 1,
 $$
 
 and a basic solution has $m + 1$ nonzero $\lambda_j$ ($m$ weights): the *reference* $R$. On $R$, $\lambda$
 is the left null vector $v$ of $\Phi_R$ (from a QR factorization), oriented so that $\sum v t \ge 0$;
 the level is $\delta = \sum_R v_k t_k / \sum_R |v_k| / W_k$, the levelled errors are
-$e_k = \delta \operatorname{sign}(v_k) / W_k$, and the weights solve $\Phi_R w = t_R - e_R$. If some grid
+$e_k = \delta \mathrm{sign}(v_k) / W_k$, and the weights solve $\Phi_R w = t_R - e_R$. If some grid
 point $j^*$ has weighted error above $\delta$, it enters: with $\Phi_R^\mathsf{T} \nu = -\Phi_{j^*}$ and
-$s^* = \operatorname{sign} e_{j^*}$, the dual vectors $s^*(\nu, 1) + \alpha v$ on $R \cup \{j^*\}$ keep the
+$s^* = \mathrm{sign} e_{j^*}$, the dual vectors $s^*(\nu, 1) + \alpha v$ on $R \cup \{j^*\}$ keep the
 constraints, and lowering $\alpha$ until a reference multiplier reaches zero picks the leaving
 point. The new level is
 $\delta' = \delta + (|e_{j^*}| - \delta / W_{j^*}) / \sum |\lambda'| / W > \delta$, so the level rises

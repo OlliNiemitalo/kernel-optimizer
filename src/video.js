@@ -6,8 +6,8 @@
 //   Anything's long-video results).
 // Depth is relative inverse depth v in [0, 1], used as 1/z = invDepthScale · v per meter: 2 for
 // the stacked layout (v = 1 at 0.5 m), 1 for relative depth from an estimator (v = 1 at 1 m).
-// A pair can have a second element of the same depth video one depth frame ahead; the shader then
-// interpolates depth in time to the color frame, for depth at a lower frame rate than the color.
+// For depth at a lower frame rate than the color, the depth video runs one depth frame ahead, and
+// the shader interpolates depth in time between the held frame before and the presented one.
 // The elements of a pair play independently and drift apart by a frame or more, so each presented
 // frame is converted into a small cache, and the color frame is rendered with its own depth frames.
 // Writes linear color and the signed circle of
@@ -176,16 +176,15 @@ const HELD_FRAMES = { color: 6, depth: 8 };
 
 export class VideoSource {
   // color: an HTMLVideoElement; depth: an inferno-coded depth video in sync with it, or null for
-  // the stacked or side layout. depthNext: the same depth video one frame ahead (at depthFps), or null.
+  // the stacked or side layout. depthFps: the depth frame rate, if lower than the color's.
   // fps: the color frame rate; onFrame: called when a pair has converted a newly presented frame.
   constructor(device, color, depth = null, {
     layout = depth ? "pair" : "stacked", invDepthScale = layout === "stacked" ? 2 : 1, maxWidth = 960,
-    depthNext = null, depthFps = 0, fps = 30, onFrame = null, onError = null,
+    depthFps = 0, fps = 30, onFrame = null, onError = null,
   } = {}) {
     this.device = device;
     this.color = color;
     this.depth = depth;
-    this.depthNext = depthNext;
     this.depthFps = depthFps || fps;
     this.fps = fps;
     this.onFrame = onFrame;
@@ -236,7 +235,6 @@ export class VideoSource {
     for (const [element, kind, fps] of [
       [this.color, "color", this.fps],
       [this.depth, "depth", this.depthFps],
-      [this.depthNext, "depth", this.depthFps],
     ]) {
       if (!element) continue;
       const presented = (now, meta) => {
