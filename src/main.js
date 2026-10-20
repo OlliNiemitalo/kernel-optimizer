@@ -1,5 +1,5 @@
 import { _setCalibrationState, defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
-import { BlurRenderer, shaderSource, tiltShiftRadiusMap } from "./blur.js";
+import { BlurRenderer, defaultGroup, groupOptions, shaderSource, tiltShiftRadiusMap } from "./blur.js";
 import { viewControls } from "./view-controls.js";
 import { World } from "./world.js";
 import { Shapes } from "./shapes.js";
@@ -98,7 +98,7 @@ import { remezSteps } from "./remez.js";
 import { drawConvergence, drawDecomposition, drawDisc, drawError, drawProfile, populationPreview } from "./plots.js";
 import {
   MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, maxError, multiplicities,
-  parseParams, presetParams, nonnegativePresetParams, PRESETS, sampleGrid, sortByFrequency, withStride,
+  parseParams, presetParams, nonnegativePresetParams, PRESETS, sampleGrid, separableChannels, sortByFrequency, withStride,
 } from "./problem.js";
 import { loadImage, proceduralScene } from "./scene.js";
 
@@ -185,9 +185,9 @@ function describeRanges(problem) {
     : `${b.initLo[1].toFixed(2)}–${b.initHi[1].toFixed(2)}`;
   const m = channelCount(problem.multiplicity);
   $("ranges").textContent =
-    `${m} channels. Initial ranges: decay b ∈ [${b.initLo[0]}, ${b.initHi[0]}], frequency c ∈ ${bands}, ` +
+    `${2 * m} rendering terms. Initial ranges: decay b ∈ [${b.initLo[0]}, ${b.initHi[0]}], frequency c ∈ ${bands}, ` +
     `weights r, i (and r₁, i₁, … of higher multiplicities) ∈ ±${b.initHi[2].toPrecision(3)} ` +
-    `(grow 2.5× per channel, as in the article's solutions).`;
+    `(grow 2.5× per pair of terms, as in the article's solutions).`;
   // Larger sets have larger, more strongly cancelling weights, so take smaller relative steps.
   if ($("ftLr").dataset.auto) $("ftLr").value = Math.min(1e-3, 1e-3 / Math.pow(3, m - 2)).toPrecision(2);
 }
@@ -229,12 +229,27 @@ function drawAll() {
   drawError($("error"), { best, transition: problem.transition, ripple, xmax });
   drawConvergence($("convergence"), state.history);
   drawDisc($("disc"), best, xmax);
-  const key = best && `${best.join()}|${problem.transition}`;
+  const key = best && `${best.join()}|${problem.transition}|${$("groupTerms").value}`;
   if (key !== state.decompositionKey) {
     state.decompositionKey = key;
     drawDecomposition($("componentsFigure"), best, problem.transition, "components");
-    drawDecomposition($("channelsFigure"), best, problem.transition, "channels");
+    drawDecomposition($("channelsFigure"), best, problem.transition, "channels",
+      best ? { groupTerms: termGroups(best, problem.transition) } : {});
   }
+}
+
+// Offers the equal splits of a kernel's real rendering terms into pass groups, keeps the selected
+// split when still offered, and returns the terms per group.
+function termGroups(params, transition) {
+  const terms = separableChannels(params, 1 + transition, { pairs: false }).length;
+  const options = groupOptions(terms);
+  const select = $("groupTerms");
+  const current = Number(select.value);
+  if ([...select.options].map((o) => Number(o.value)).join() !== options.join()) {
+    select.replaceChildren(...options.map((g) => new Option(`${g} (${terms / g} group${terms === g ? "" : "s"})`, g)));
+  }
+  select.value = options.includes(current) ? current : defaultGroup(terms);
+  return Number(select.value);
 }
 
 // ---- differential evolution ---------------------------------------------------------------
@@ -685,7 +700,7 @@ function download(url, name) {
 
 const VIEW_CONTROLS = [
   "blurOn", "radius", "blurMode", "focus", "layers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels",
-  "exposure", "precision", "transition", "radiusInterpolation", "showLayers", "playbackRate", "loop",
+  "exposure", "precision", "transition", "radiusInterpolation", "groupTerms", "showLayers", "playbackRate", "loop",
 ];
 
 // Everything needed to re-render the displayed frame, plus context for bug reports.
@@ -801,22 +816,24 @@ function showGpuBreakdown() {
   const b = {
     video: ["held video frames", m.videoFrames], source: ["source image", m.source],
     radius: ["radius map", m.radiusMap], maps: ["working maps", m.levelMaps],
-    tables: ["kernel tables", m.tables], mid: ["intermediate, one channel", m.intermediate],
+    tables: ["kernel tables", m.tables], mid: [`intermediate, ${state.blur.groupTerms ?? 2} terms`, m.intermediate],
     acc: ["accumulator", m.accumulator], layers: ["layers", m.layers], screen: ["screen", 0],
   };
   const stage = (name, time, what, reads, writes) => `<div class="stage">
     <div class="io">${reads.filter(Boolean).map(chip).join("")}</div>
     <div class="pass"><b>${name}</b>${time === undefined ? "" : ` <span class="time">${ms(time)}</span>`}<br>${what}</div>
     <div class="io">${writes.filter(Boolean).map(chip).join("")}</div></div>`;
-  const channels = `${state.blur.channels} channel${state.blur.channels === 1 ? "" : "s"}${layered ? " × 2 layers" : ""}`;
+  const G = state.blur.groupTerms ?? 2;
+  const groups = state.blur.channels;
+  const loop = `for each of ${groups} group${groups === 1 ? "" : "s"} of ${G} terms${layered ? ", per layer" : ""}`;
   const html = [
     state.blur.animated && stage("Scene", g.scene, video ? "converts the video frame" : "renders the 3D scene",
       [video && m.videoFrames && b.video], [b.source, varying && b.radius]),
     varying && stage("Prepare", g.prepare, "blur levels, reach per 16-pixel tile, vertical radius", [b.radius, b.source], [b.maps]),
     layered && stage("Layers", g.layers, "depth split, masks, radius smoothing; compositing", [b.maps, b.acc], [b.maps, b.layers]),
-    blurred && `<div class="loop"><div class="loop-label">for each of ${channels}</div>
-      ${stage("Horizontal pass", g.horizontal, "filters each row with the channel's complex h", [b.source, b.tables, varying && b.maps], [b.mid])}
-      ${stage("Vertical pass", g.vertical, "filters each column with the channel's complex v, computing only the real part, and adds it", [b.mid, b.tables, varying && b.maps], [b.acc])}
+    blurred && `<div class="loop"><div class="loop-label">${loop}</div>
+      ${stage("Horizontal pass", g.horizontal, varying ? "filters each row with the group's terms" : "filters each row with the pair's terms, as the real and imaginary parts of one complex filter", [b.source, b.tables, varying && b.maps], [b.mid])}
+      ${stage("Vertical pass", g.vertical, "filters each column with the group's terms and adds their sum", [b.mid, b.tables, varying && b.maps], [b.acc])}
     </div>`,
     layered && stage("Fill", g.fill, "fills the far layer behind near objects", [b.acc], [b.layers]),
     stage("Display", undefined, blurred ? "divides by the summed kernel weight, applies exposure" : "applies exposure",
@@ -825,7 +842,7 @@ function showGpuBreakdown() {
   const total = Object.values(m).reduce((a, x) => a + x, 0);
   const time = r.gpuMs ? `${ms(Object.values(g).reduce((a, x) => a + x, 0))} GPU time` : `${ms(r.ms)} per frame (no GPU timestamps)`;
   $("gpuDiagram").innerHTML = `${html}<p class="note">Total: ${time}, ${mib(total)} GPU memory.` +
-    " Times are summed over channels and layers; arrows show which buffers each stage reads and writes; each buffer's size is shown where it first appears.</p>";
+    " Times are summed over passes and layers; arrows show which buffers each stage reads and writes; each buffer's size is shown where it first appears.</p>";
 }
 
 function requestBlur(kernelChanged = false) {
@@ -851,7 +868,9 @@ async function renderBlur() {
   try {
     const radius = num("radius");
     if (blurKernelDirty) {
-      state.blur.setKernel(state.current.params, radius, readProblem().transition);
+      const transition = readProblem().transition;
+      state.blur.setKernel(state.current.params, radius, transition);
+      termGroups(state.current.params, transition);
       const { width, height } = state.blur;
       const mode = $("blurMode").value;
       const depth = mode === "depth" && hasDepth();
@@ -876,6 +895,7 @@ async function renderBlur() {
       exposure: Math.pow(2, num("exposure")),
       precision: $("precision").value,
       interpolate: $("radiusInterpolation").checked,
+      groupTerms: Number($("groupTerms").value),
       showSource: !$("blurOn").checked,
       time: state.sceneTime,
       invFocus: state.focus ** 2,
@@ -899,10 +919,11 @@ async function renderBlur() {
     showFocus();
     state.lastRender = r;
     const total = Object.values(r.memory).reduce((a, b) => a + b, 0);
+    const groups = state.blur.channels;
     setProp($("blurStats"), "textContent",
       ($("blurOn").checked ? "" : "Blur off · ") +
-      `${state.blur.width}×${state.blur.height} px · ${state.blur.channels} channels, ` +
-      `${r.varying ? "up to " : ""}${r.taps} taps per pass · ${mib(total)} GPU memory · ` +
+      `${state.blur.width}×${state.blur.height} px · ${state.blur.termCount} terms in ${groups} group${groups === 1 ? "" : "s"} ` +
+      `(${groups} horizontal + ${groups} vertical passes), ${r.varying ? "up to " : ""}${r.taps} taps each · ${mib(total)} GPU memory · ` +
       (r.gpuMs ? `${ms(Object.values(r.gpuMs).reduce((a, b) => a + b, 0))} GPU time` : `${ms(r.ms)} per frame`));
     if ($("gpuPanel").open && performance.now() - (state.breakdownTime ?? 0) > 250) showGpuBreakdown();
   } catch (e) {
@@ -1257,6 +1278,10 @@ function wire() {
   for (const id of ["precision"]) $(id).addEventListener("change", () => requestBlur());
   for (const id of ["precision", "shaderKind"]) $(id).addEventListener("change", showShader);
   $("radiusInterpolation").addEventListener("input", showShader);
+  $("groupTerms").addEventListener("change", () => {
+    drawAll();
+    requestBlur();
+  });
   $("gpuPanel").addEventListener("toggle", () => $("gpuPanel").open && showGpuBreakdown());
   $("copyShader").onclick = () => navigator.clipboard.writeText($("shaderCode").value);
   $("downloadShader").onclick = () => {

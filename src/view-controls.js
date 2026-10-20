@@ -20,7 +20,7 @@ export function viewControls({ ready, source, blur, mode, layers, sizeBlur, occl
     disabled: {
       blurOn: !ready, blurMode: !filtering, radius: !filtering || depthView, focus: !depth || depthView,
       // Keep uniform kernel-weight diagnostics reachable inside this fieldset.
-      varyingControls: !filtering, radiusInterpolation: !varying || depthView,
+      varyingControls: !filtering, radiusInterpolation: !varying || depthView, groupTerms: !varying || depthView,
       layers: !depth || depthView, showLayers: !filtering,
       // Tilt-shift radii are constant along each row, so their horizontal average is unchanged.
       sizeBlur: !depth || depthView, sizeBrightness: !depth || !sizeBlur || depthView,

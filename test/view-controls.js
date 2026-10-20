@@ -15,6 +15,7 @@ export function testViewControls() {
         assert.equal(!c.disabled.layers, depth);
         assert.equal(!c.disabled.sizeBrightness, depth);
         assert.equal(!c.disabled.radiusInterpolation, blur && (depth || mode === 'tiltShift'));
+        assert.equal(!c.disabled.groupTerms, blur && (depth || mode === 'tiltShift'));
         assert.equal(!c.disabled.playPause, ['video', 'world'].includes(source));
         assert.equal(!c.disabled.playbackRate, ['video', 'world'].includes(source));
         assert.equal(!c.disabled.seek, source === 'video');

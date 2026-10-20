@@ -1,15 +1,14 @@
 // Separable circular blur with phased Gaussian components, as plain WebGPU compute shaders.
 //
-// The kernel is a sum of separable complex channels n with 1-D kernels h_n (horizontal) and
-// v_n (vertical), each of the form (k0 + k2 (t/R)² + k4 (t/R)⁴ + …) exp((-b + i c) (t/R)²), t = -K..K taps,
-// R = disc radius in pixels. The 2-D kernel is Σ_n Re[h_n(x) v_n(y)]; a component of multiplicity
-// m (m repeated rates) is m channels (see separableChannels).
+// The kernel is a sum of real separable terms e_j g_j(x) g_j(y) (see separableChannels), packed in
+// pairs into complex channels n with 1-D filters h_n (horizontal) and v_n (vertical): the real and
+// imaginary lanes carry one term each, and Re[h_n(x) v_n(y)] is the pair's sum.
 //
-// Memory: channels are processed one at a time, so only ONE channel's complex intermediate
-// exists, independent of the channel count:
-//   for each channel n:  mid  = I *_x h_n                 (complex; lanes r, g, b, w)
-//                        acc += Re[mid *_y v_n]            (real; acc = 0 before channel 0)
-//   display:             out  = acc.rgb / acc.w
+// Memory: channels are processed in groups of G, so only G channels' complex intermediates
+// exist, independent of the channel count (G = 1 for a uniform radius; a setting otherwise):
+//   for each group:  for each channel n in it:  mid_n = I *_x h_n   (complex; lanes r, g, b, w)
+//                    acc += Σ_n Re[mid_n *_y v_n]                    (real; acc = 0 before group 0)
+//   display:         out  = acc.rgb / acc.w
 // Lane w filters a constant 1 alongside the color, so acc.w is the sum of the 2-D kernel
 // weights that actually reached the pixel. Dividing by it normalizes brightness exactly for a
 // uniform radius (also at clamped edges) and stays brightness-preserving when the radius varies.
@@ -57,6 +56,23 @@ const BLOCKS = INSIDE_BASE + 2;
 const MAPS = 5; // byte maps: level, vertical level, smoothed level, scratch, near layer mask
 const TILE_ARRAYS = 4 + HIST + 2 + MAX_LAYERS + 2; // max K, max vertical K, reach x, reach y, histogram, split, max K per layer, raw split
 const MAX_QUERIES = 2 * (13 + MAX_LAYERS * (10 + 2 * MAX_CHANNELS) + 2 * FILL_LEVELS);
+const PARAMS_BYTES = 80;
+
+// Real terms per pass group that split termCount into equal groups (at most MAX_CHANNELS of them).
+export function groupOptions(termCount) {
+  const options = [];
+  for (let g = 1; g <= termCount; g++) if (termCount % g === 0 && termCount / g <= MAX_CHANNELS) options.push(g);
+  return options;
+}
+
+// Horizontal outputs per thread for G terms: about 64 accumulator floats (32 when interpolating).
+const horizontalOutputsFor = (G, interpolate) => Math.max(1, Math.min(ROWS, Math.floor((interpolate ? 8 : 16) / G)));
+
+// Default terms per pass group: two groups where possible, else the largest smaller group.
+export function defaultGroup(termCount) {
+  const options = groupOptions(termCount);
+  return options.filter((g) => g <= termCount / 2).at(-1) ?? termCount;
+}
 
 const J = Array.from({ length: ROWS }, (_, j) => j);
 const W = Array.from({ length: 2 * SMOOTH + 1 }, (_, i) => i);
@@ -76,46 +92,42 @@ for (let p = 1; p < SORT; p <<= 1) {
 const each = (f) => J.map(f).join("\n    ");
 const HORIZONTAL_OUTPUTS = 4;
 
-function computeShader(packed, interpolate = false, horizontalOutputs = HORIZONTAL_OUTPUTS) {
+function computeShader(packed, interpolate = false, horizontalOutputs = HORIZONTAL_OUTPUTS, groupTerms = 2) {
   const HJ = Array.from({ length: horizontalOutputs }, (_, j) => j);
   const eachV = (f) => HJ.map(f).join("\n    ");
-  // One channel's complex intermediate per pixel, lanes (r, g, b, w):
-  //   f32:    two vec4f (re, im)                      32 bytes per pixel
-  //   packed: vec4u, lane = pack2x16float(re, im)     16 bytes per pixel
-  const midDecl = packed ? "array<vec4u>" : "array<vec4f>";
+  const G = groupTerms;
+  const K = Array.from({ length: G }, (_, k) => k);
+  const eachK = (f) => K.map(f).join("\n    ");
+  // Intermediate entries of 4 lanes (r, g, b, w): 16 bytes as f32 (vec4f), 8 packed (vec2u of
+  // pack2x16float). Uniform radius: a complex pair as 2 entries per pixel; varying: G real terms.
+  const midDecl = packed ? "array<vec2u>" : "array<vec4f>";
   const midAccess = packed
     ? /* wgsl */ `
-fn storeMid(p: u32, re: vec4f, im: vec4f) {
-  mid[p] = vec4u(pack2x16float(vec2f(re.x, im.x)), pack2x16float(vec2f(re.y, im.y)),
-                 pack2x16float(vec2f(re.z, im.z)), pack2x16float(vec2f(re.w, im.w)));
+fn storeTerm(i: u32, v: vec4f) {
+  mid[i] = vec2u(pack2x16float(v.xy), pack2x16float(v.zw));
 }
-fn loadMid(p: u32) -> Complex4 {
-  let q = mid[p];
-  let a = unpack2x16float(q.x);
-  let b = unpack2x16float(q.y);
-  let c = unpack2x16float(q.z);
-  let d = unpack2x16float(q.w);
-  return Complex4(vec4f(a.x, b.x, c.x, d.x), vec4f(a.y, b.y, c.y, d.y));
+fn loadTerm(i: u32) -> vec4f {
+  let q = mid[i];
+  return vec4f(unpack2x16float(q.x), unpack2x16float(q.y));
 }
 fn storeScratch(p: u32, k: u32, v: f32) {
-  mid[p][k] = bitcast<u32>(v);
+  mid[2u * p + (k >> 1u)][k & 1u] = bitcast<u32>(v);
 }
 fn loadScratch(p: u32, k: u32) -> f32 {
-  return bitcast<f32>(mid[p][k]);
+  return bitcast<f32>(mid[2u * p + (k >> 1u)][k & 1u]);
 }`
     : /* wgsl */ `
-fn storeMid(p: u32, re: vec4f, im: vec4f) {
-  mid[2u * p] = re;
-  mid[2u * p + 1u] = im;
+fn storeTerm(i: u32, v: vec4f) {
+  mid[i] = v;
 }
-fn loadMid(p: u32) -> Complex4 {
-  return Complex4(mid[2u * p], mid[2u * p + 1u]);
+fn loadTerm(i: u32) -> vec4f {
+  return mid[i];
 }
 fn storeScratch(p: u32, k: u32, v: f32) {
-  mid[2u * p][k] = v;
+  mid[p][k] = v;
 }
 fn loadScratch(p: u32, k: u32) -> f32 {
-  return mid[2u * p][k];
+  return mid[p][k];
 }`;
   return /* wgsl */ `
 const ROWS = ${ROWS};
@@ -162,7 +174,7 @@ struct Complex4 { re: vec4f, im: vec4f }
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> src: array<vec4f>;          // linear RGB
-@group(0) @binding(2) var<storage, read> kern: array<vec2f>;         // K per level in .x, then [level][h|v][channel][stride]
+@group(0) @binding(2) var<storage, read> kern: array<vec2f>;         // uniform: K per level in .x, then [level][h|v][channel][stride]; varying: header
 @group(0) @binding(3) var<storage, read> radius: array<f32>;         // signed per-pixel radius (varying)
 @group(0) @binding(4) var<storage, read_write> mid: ${midDecl};
 @group(0) @binding(5) var<storage, read_write> acc: array<vec4f>;    // rgb + kernel weight sum
@@ -170,6 +182,22 @@ struct Complex4 { re: vec4f, im: vec4f }
 @group(0) @binding(7) var<storage, read_write> tiles: array<atomic<u32>>; // max K, max vertical K, reach x, reach y, histograms, splits
 @group(0) @binding(8) var<storage, read_write> layer: array<vec4f>;  // nearer layers composited (rgb, transmittance), then the fill pyramid
 ${midAccess}
+
+const G = ${G}u; // varying radius: real terms filtered by one horizontal and one vertical pass
+
+// The kern buffer as f32 (varying signs and taps); a ninth binding would exceed the portable limit.
+fn kernf(i: u32) -> f32 {
+  return kern[i >> 1u][i & 1u];
+}
+
+// Uniform radius: a pair of terms as one complex entry pair.
+fn storeMid(p: u32, re: vec4f, im: vec4f) {
+  storeTerm(2u * p, re);
+  storeTerm(2u * p + 1u, im);
+}
+fn loadMid(p: u32) -> Complex4 {
+  return Complex4(loadTerm(2u * p), loadTerm(2u * p + 1u));
+}
 
 // Index of tap -K of a table (K = halfTaps): dir 0 = horizontal, 1 = vertical.
 fn tableStart(level: u32, dir: u32) -> u32 {
@@ -190,17 +218,23 @@ fn tableCoordinate(key: f32) -> vec2f {
   return vec2f(i, q - i);` : `return vec2f(floor(q + 0.5), 0.0);`}
 }
 
-fn radiusBase(q: vec2f, dir: u32) -> u32 {
+// f32 index of tap 0, term 0 of the current group (P.channel) at a radius node; taps are
+// [group][node][tap][term of the group], G per tap.
+fn radiusBase(q: vec2f) -> u32 {
   let stride = u32(kern[HALVES + 1u].x);
-  return u32(kern[HALVES + 3u].y) + ((dir * P.channels + P.channel) * u32(kern[HALVES + 1u].y) + u32(q.x)) * stride;
+  return u32(kern[HALVES + 3u].y) + (P.channel * u32(kern[HALVES + 1u].y) + u32(q.x)) * stride * G;
 }
 // Nearest keys are already clamped and rounded by the prepass.
 fn cachedCoordinate(key: f32) -> vec2f {
   return ${interpolate ? "tableCoordinate(key)" : "vec2f(key, 0.0)"};
 }
-fn radiusTap(base: u32, fraction: f32, t: i32) -> vec2f {
-  let i = base + u32(abs(t));
-  return ${interpolate ? "mix(kern[i], kern[i + u32(kern[HALVES + 1u].x)], fraction)" : "kern[i]"};
+fn radiusTap(base: u32, fraction: f32, t: i32, k: u32) -> f32 {
+  let i = base + u32(abs(t)) * G + k;
+  return ${interpolate ? "mix(kernf(i), kernf(i + u32(kern[HALVES + 1u].x) * G), fraction)" : "kernf(i)"};
+}
+// The vertical filter of a term is its horizontal one times the sign of its eigenvalue.
+fn termSign(k: u32) -> f32 {
+  return kernf(u32(kern[HALVES + 2u].y) + P.channel * G + k);
 }
 
 fn radiusHalf(r: f32) -> i32 {
@@ -929,20 +963,23 @@ fn horizontalVarying(@builtin(global_invocation_id) id: vec3u) {
   let last = i32(P.width) - 1;
   let row = id.y * P.width;
   if (reached == 0u) {
-    ${eachV((j) => `if (x0 + ${j} <= last) { storeMid(row + u32(x0 + ${j}), vec4f(0.0), vec4f(0.0)); }`)}
+    ${eachV((j) => `if (x0 + ${j} <= last) { ${K.map((k) => `storeTerm((row + u32(x0 + ${j})) * G + ${k}u, vec4f(0.0));`).join(" ")} }`)}
     return;
   }
   let r = i32(reached) - 1;
-  ${eachV((j) => `let px${j} = u32(min(x0 + ${j}, last)); let d${j} = signedLevel(sourceLevelByte(px${j}, id.y)); let k${j} = radiusHalf(sourceRadius(px${j}, id.y)); let o${j} = occlusionLimit(d${j}, px${j}, id.y); var re${j} = vec4f(0.0); var im${j} = vec4f(0.0);`)}
+  ${eachV((j) => `let px${j} = u32(min(x0 + ${j}, last)); let d${j} = signedLevel(sourceLevelByte(px${j}, id.y)); let k${j} = radiusHalf(sourceRadius(px${j}, id.y)); let o${j} = occlusionLimit(d${j}, px${j}, id.y);`)}
+  ${eachV((j) => K.map((k) => `var a${j}_${k} = vec4f(0.0);`).join(" "))}
   for (var u = x0 - r; u < x0 + ${horizontalOutputs} + r; u++) {
     let x = u32(clamp(u, 0, last));
     let ls = signedLevel(sourceLevelByte(x, id.y));
     let sn = cachedCoordinate(loadRadius(1u, x, id.y));
-    let base = radiusBase(sn, 0u);
+    let base = radiusBase(sn);
     let p = vec4f(src[row + x].rgb, 1.0) * sourceWeight(x, id.y);
-    ${eachV((j) => `{ let h = select(radiusTap(base, sn.y, u - x0 - ${j}), vec2f(0.0), hidden(ls, o${j}, u - x0 - ${j}, k${j})); re${j} += p * h.x; im${j} += p * h.y; }`)}
+    ${eachV((j) => `if (!hidden(ls, o${j}, u - x0 - ${j}, k${j})) { ${K.map((k) => `a${j}_${k} += p * radiusTap(base, sn.y, u - x0 - ${j}, ${k}u);`).join(" ")} }`)}
   }
-  ${eachV((j) => `if (x0 + ${j} <= last) { storeMid(row + u32(x0 + ${j}), re${j}, im${j}); }`)}
+  // The vertical pass shares these taps; each term's vertical sign is applied here instead.
+  ${eachK((k) => `let s${k} = termSign(${k}u);`)}
+  ${eachV((j) => `if (x0 + ${j} <= last) { ${K.map((k) => `storeTerm((row + u32(x0 + ${j})) * G + ${k}u, a${j}_${k} * s${k});`).join(" ")} }`)}
 }
 
 @compute @workgroup_size(64, 1)
@@ -961,9 +998,10 @@ fn verticalVarying(@builtin(global_invocation_id) id: vec3u) {
     let y = u32(clamp(u, 0, last));
     let ls = signedLevel(sourceLevelByte(id.x, y));
     let vn = cachedCoordinate(loadRadius(3u, id.x, y));
-    let base = radiusBase(vn, 1u);
-    let m = loadMid(y * P.width + id.x);
-    ${each((j) => `{ let h = select(radiusTap(base, vn.y, u - y0 - ${j}), vec2f(0.0), hidden(ls, o${j}, u - y0 - ${j}, k${j})); a${j} += m.re * h.x - m.im * h.y; }`)}
+    let base = radiusBase(vn);
+    let i = (y * P.width + id.x) * G;
+    ${eachK((k) => `let m${k} = loadTerm(i + ${k}u);`)}
+    ${each((j) => `if (!hidden(ls, o${j}, u - y0 - ${j}, k${j})) { a${j} += ${K.map((k) => `m${k} * radiusTap(base, vn.y, u - y0 - ${j}, ${k}u)`).join(" + ")}; }`)}
   }
   ${each((j) => `if (y0 + ${j} <= last) { accumulate(u32(y0 + ${j}) * P.width + id.x, a${j}); }`)}
 }
@@ -1037,21 +1075,22 @@ export function shaderSource(kind, packed, interpolate = false) {
 // without layers).
 ${displayShader}`;
   }
-  return `// Separable circular blur from complex Gaussian channels: compute passes,
+  return `// Separable circular blur from real separable kernel terms: compute passes,
 // ${packed ? "packed 16-bit float" : "f32"} intermediate.
 //
 // Per frame (Params block n at a 256-byte dynamic uniform offset; all blocks equal except channel
-// and first):
+// and first). The kernel is a sum of T real terms s_j h_j(x) h_j(y), passed smallest first:
 //   varying radius only, with block 0: clear tiles to 0, then one compute pass each, in order:
 //     levels          ceil(rowWords / 64) x height workgroups
 //     reachX          ceil(tilesX tilesY / 64) workgroups
 //     verticalLevels  ceil(rowWords / 64) x height workgroups
 //     reachY          ceil(tilesX tilesY / 64) workgroups
-//   for each separable channel n = 0 .. channels - 1:
-//     uniform radius:  horizontal  ceil(ceil(width / ${ROWS}) / 64) x height workgroups
-//                      vertical    ceil(width / 64) x ceil(height / ${ROWS}) workgroups
-//     varying radius:  horizontalVarying ceil(ceil(width / ${HORIZONTAL_OUTPUTS}) / 64) x height workgroups;
-//                      verticalVarying uses the same counts as vertical
+//   uniform radius, terms in pairs as one complex channel n = 0 .. channels - 1, block n:
+//                    horizontal  ceil(ceil(width / ${ROWS}) / 64) x height workgroups
+//                    vertical    ceil(width / 64) x ceil(height / ${ROWS}) workgroups
+//   varying radius, terms in groups of G = 2 (the app compiles other G), group n = 0 .. T / G - 1, block n:
+//                    horizontalVarying ceil(ceil(width / ${HORIZONTAL_OUTPUTS}) / 64) x height workgroups
+//                    verticalVarying   the same counts as vertical
 // then draw with the display shader (acc.rgb / acc.w).
 //
 // Depth layers (z-buffer radius, layerCount 2; Params block (layer, channel) at index
@@ -1068,7 +1107,7 @@ ${displayShader}`;
 //     composite (ceil(width height / 64) workgroups each);
 // then draw with layered = 1: layer.rgb.
 //
-// Params (80 bytes): width u32 @0, height u32 @4, halfTaps i32 @8 (largest K), channel u32 @12,
+// Params (${PARAMS_BYTES} bytes): width u32 @0, height u32 @4, halfTaps i32 @8 (largest K), channel u32 @12,
 // channels u32 @16, stride u32 @20, levels u32 @24, first u32 @28 (1 for channel 0, else 0),
 // radiusMin f32 @32, levelsPerOctave f32 @36, rowWords u32 @40 (= ceil(width / 4)),
 // tilesX u32 @44, tilesY u32 @48 (= ceil(size / ${TILE})), occlusion i32 @52 (threshold in levels for a
@@ -1077,7 +1116,8 @@ ${displayShader}`;
 //
 // Buffers (one entry per pixel, row-major): src vec4f linear RGB (alpha unused by the blur; the demo
 // keeps 1 / depth there for focus picking); acc vec4f;
-// mid ${packed ? "16" : "32"} bytes; radius f32, signed: negative in front of the focus (varying only).
+// mid: ${packed ? "vec2u (4 packed halfs)" : "vec4f"} entries, uniform: 2 per pixel (a complex pair), varying: G per pixel
+// (${packed ? "at least 2" : "at least 1"}, layer scratch); radius f32, signed: negative in front of the focus (varying only).
 // Varying only (else any 4-byte buffers): lv u32[${MAPS} height rowWords + 4 width height]:
 // packed byte maps (level, vertical level, smoothed level, scratch, near mask), then four bitcast
 // f32 planes (smoothed signed radius, radius smoothing scratch/source table key, vertical radius,
@@ -1085,20 +1125,23 @@ ${displayShader}`;
 // tiles u32[${TILE_ARRAYS} tilesX tilesY + 1]; last word is the near-occupancy flag, set by
 // closeMask phase 3. Clear it with the tile arrays each frame. Layers only (else any 16-byte buffer):
 // layer vec4f[2 width height + pyramid levels 1 .. top].
-// kern: vec2f. Uniform path retains tapTables(): ${HALVES} header entries, one cross weight,
-// then [direction][channel][stride] taps with PAD zeros and center at PAD + halfTaps.
-// Varying path (built by buildContinuousTable and radiusTables):
+// kern (binding 2, vec2f; varying signs and taps are read as f32 by index). Uniform path: tapTables():
+// ${HALVES} header entries, one cross weight, then [direction][channel][stride] complex taps with PAD
+// zeros and center at PAD + halfTaps.
+// Varying path (built by buildContinuousTable and radiusTables), header in vec2f entries:
 //   entry ${HALVES - 1} = unused (zero).
 //   entry ${HALVES} = unused, normalized reference support
 //   entry ${HALVES + 1} = even tap stride, radius node count N
-//   entry ${HALVES + 2} = node support offset, unused
-//   entry ${HALVES + 3} = unused, tap offset (all offsets in vec2f entries).
-// Supports: N entries in .x. No mixed DC matrix: every node has the same per-channel complex sums.
+//   entry ${HALVES + 2} = node support offset (vec2f entries), term sign offset (f32 index)
+//   entry ${HALVES + 3} = unused, tap offset (f32 index).
+// Supports: N entries in .x. No mixed DC matrix: every node has the same per-term sums.
 // Key = r*${RADIUS_LINEAR_DENSITY} below ${RADIUS_LINEAR_LIMIT}px, ${RADIUS_LINEAR_LIMIT * RADIUS_LINEAR_DENSITY}+${RADIUS_LEVELS_PER_OCTAVE}*log2(r/${RADIUS_LINEAR_LIMIT}) above.
 // Nearest mode rounds this key, fetches one node, and uses that node's support.
 // The application specializes non-layered shaders by substituting 0u for P.layered. This export
 // retains the generic layered shader and four-output horizontal blocking; use its dispatch above.
-// Taps: [direction][channel][node][stride], complex vec2f, even (nonnegative offsets only),
+// Taps: [group][node][tap][term of the group], f32, horizontal only: a term's vertical taps are its
+// horizontal ones times its sign, which horizontalVarying applies to its output. Even (nonnegative
+// offsets only),
 // integrated over [t-0.5,t+0.5] in pixel space, zero-padded. Gather support includes a half-pixel
 // footprint beyond the scaled reference support, and the union of adjacent nodes when blending.
 // Node zero is identity; all positive radii use pixel integrals, including subpixel radii.
@@ -1226,7 +1269,7 @@ export class BlurRenderer {
     const storage = (type) => ({ visibility: GPUShaderStage.COMPUTE, buffer: { type } });
     this.computeLayout = device.createBindGroupLayout({
       entries: [
-        { visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: 80 } },
+        { visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: PARAMS_BYTES } },
         storage("read-only-storage"),
         storage("read-only-storage"),
         storage("read-only-storage"),
@@ -1241,12 +1284,12 @@ export class BlurRenderer {
     this.animated = null;
   }
 
-  computePipelines(packed, interpolate = false, layered = false, horizontalOutputs = HORIZONTAL_OUTPUTS) {
-    const key = `${packed ? "packed" : "f32"}-${interpolate ? "linear" : "nearest"}-${layered ? "layers" : "single"}-${horizontalOutputs}`;
+  computePipelines(packed, interpolate = false, layered = false, horizontalOutputs = HORIZONTAL_OUTPUTS, groupTerms = 2) {
+    const key = `${packed ? "packed" : "f32"}-${interpolate ? "linear" : "nearest"}-${layered ? "layers" : "single"}-${horizontalOutputs}-${groupTerms}`;
     if (!this.pipelines[key]) {
       // Without layers, eliminate membership reads/branches and smoothed-map selection from
       // the inner loops. The generic shader remains available for the layered pipeline/export.
-      const code = computeShader(packed, interpolate, horizontalOutputs);
+      const code = computeShader(packed, interpolate, horizontalOutputs, groupTerms);
       const module = this.device.createShaderModule({ code: layered ? code : code.replaceAll("P.layered", "0u") });
       const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.computeLayout] });
       const make = (entryPoint) => this.device.createComputePipeline({ layout, compute: { module, entryPoint } });
@@ -1358,18 +1401,23 @@ export class BlurRenderer {
     this.tablesDirty = true;
   }
 
+  // Terms are added smallest first: with a low-precision accumulator, adding small terms to a
+  // large sum loses them.
   setKernel(params, radius, transition) {
-    const channels = separableChannels(params, 1 + transition);
+    const channels = separableChannels(params, 1 + transition).reverse();
     if (channels.length > MAX_CHANNELS) throw new Error(`At most ${MAX_CHANNELS} separable channels.`);
-    this.kernelSpec = { channels, radius, transition };
+    const terms = separableChannels(params, 1 + transition, { pairs: false }).reverse();
+    this.kernelSpec = { channels, terms, radius, transition };
+    this.termCount = terms.length;
     this.tablesDirty = true;
   }
 
-  // Tap tables, computed in double precision: one exact uniform radius, or the dense radius-node
-  // grid for varying blur. Both varying shader modes share the same normalized tables.
-  buildTables() {
+  // Tap tables, computed in double precision: one exact uniform radius (complex pairs), or the
+  // dense radius-node grid for varying blur (real terms in groups of G). Both varying shader modes
+  // share the same normalized tables.
+  buildTables(G = 2) {
     const { channels, radius, transition } = this.kernelSpec;
-    if (this.varying) { this.buildContinuousTable(); return; }
+    if (this.varying) { this.buildContinuousTable(G); return; }
     this.continuousKey = null;
     const radii = [radius];
     const { halves, tables, fix, small } = tapTables(channels, radii, transition);
@@ -1401,30 +1449,42 @@ export class BlurRenderer {
     this.tablesDirty = false;
   }
 
-  buildContinuousTable() {
-    const { channels, radius, transition } = this.kernelSpec;
+  buildContinuousTable(G) {
+    const { terms, radius, transition } = this.kernelSpec;
     const maxRadius = this.varying.kind === "map" ? this.varying.maxRadius : Math.max(1, radius);
-    const key = JSON.stringify([channels, transition, maxRadius]);
-    if (key === this.continuousKey) { this.tablesDirty = false; return; }
-    const c = radiusTables(channels, transition, maxRadius);
-    const n = channels.length, L = Math.min(127, Math.max(2, Math.ceil(Math.log2(maxRadius) * LEVELS_PER_OCTAVE) + 2));
+    const key = JSON.stringify([terms, transition, maxRadius]);
+    if (key !== this.continuousKey) {
+      this.continuous = radiusTables(terms, transition, maxRadius);
+      this.continuousKey = key;
+      this.continuousGroup = null;
+    }
+    if (G === this.continuousGroup) { this.tablesDirty = false; return; }
+    const c = this.continuous;
+    const T = terms.length, L = Math.min(127, Math.max(2, Math.ceil(Math.log2(maxRadius) * LEVELS_PER_OCTAVE) + 2));
     const norm = HALVES + 4;
     const profile = norm + c.count;
-    const data = new Float32Array(2 * (profile + 2 * n * c.count * c.stride));
-    data.set([0, c.support, c.stride, c.count, norm, 0, 0, profile], 2 * HALVES);
+    // f32 offsets: each term's sign, then taps [group][node][tap][term of the group].
+    const signs = 2 * profile;
+    const taps = signs + T + (T % 2);
+    const data = new Float32Array(taps + T * c.count * c.stride + 1 & ~1); // whole vec2f entries
+    data.set([0, c.support, c.stride, c.count, norm, signs, 0, taps], 2 * HALVES);
     c.halves.forEach((half, i) => { data[2 * (norm + i)] = half; });
-    for (let dir = 0; dir < 2; dir++) for (let ch = 0; ch < n; ch++) for (let i = 0; i < c.count; i++) {
-      data.set(c.tables[i][dir][ch], 2 * (profile + ((dir * n + ch) * c.count + i) * c.stride));
+    terms.forEach((term, j) => { data[signs + j] = term.sign; });
+    // Horizontal taps only: a term's vertical taps are these times its sign.
+    for (let j = 0; j < T; j++) for (let i = 0; i < c.count; i++) {
+      const table = c.tables[i][0][j];
+      const start = taps + ((Math.floor(j / G) * c.count + i) * c.stride) * G + j % G;
+      for (let t = 0; t < c.stride; t++) data[start + t * G] = table[2 * t];
     }
     this.kernel?.destroy();
     this.kernel = this.device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.device.queue.writeBuffer(this.kernel, 0, data);
-    this.channels = n;
+    this.channels = T / G;
     this.K = c.half;
     this.taps = 2 * this.K + 1;
     this.levels = L; // retained only for depth classification, not kernel selection
     this.stride = c.stride;
-    this.continuousKey = key;
+    this.continuousGroup = G;
     this.tablesDirty = false;
   }
 
@@ -1434,7 +1494,7 @@ export class BlurRenderer {
     return {
       source: px * 16,
       accumulator: px * 16,
-      intermediate: px * (packed ? 16 : 32),
+      intermediate: this.mid?.size ?? 0,
       radiusMap: this.radiusBuffer?.size ?? 0,
       levelMaps: (this.levelMaps?.size ?? 0) + (this.tiles?.size ?? 0),
       layers: this.layerBuffer?.size ?? 0,
@@ -1451,19 +1511,24 @@ export class BlurRenderer {
   // (null = off); `occlusion` is the depth-of-field occlusion threshold in octaves (0 = off).
   // Depth of field: `layers` (1 or 2) depth layers with a locally chosen split.
   // `interpolate` (default false) blends adjacent radius nodes instead of selecting the nearest.
+  // `groupTerms`: varying radius, real terms filtered by each horizontal and vertical pass, one of
+  // groupOptions(termCount); more terms mean fewer passes and a larger intermediate.
   async render({
     exposure = 1, precision = "f32", showSource = false, time = 0, invFocus = 0, capture = false,
-    sizeBlur = 1, occlusion = 1, layers = 1, showLayers = 0, interpolate = false,
+    sizeBlur = 1, occlusion = 1, layers = 1, showLayers = 0, interpolate = false, groupTerms = null,
   } = {}) {
-    if (this.tablesDirty) this.buildTables();
+    const varying = !!this.varying;
+    const G = groupOptions(this.termCount).includes(groupTerms) ? groupTerms : defaultGroup(this.termCount);
+    if (this.tablesDirty || (varying && G !== this.continuousGroup)) this.buildTables(G);
     const packed = precision === "f16";
     const { width, height, device } = this;
-    const midBytes = width * height * (packed ? 16 : 32);
+    this.groupTerms = varying ? G : 2;
+    // Entries of 16 bytes (f32) or 8 (packed) per term; layer scratch needs 16 bytes per pixel.
+    const midBytes = width * height * (varying ? (packed ? 8 * Math.max(G, 2) : 16 * G) : (packed ? 16 : 32));
     if (!this.mid || this.mid.size !== midBytes) {
       this.mid?.destroy();
       this.mid = device.createBuffer({ size: midBytes, usage: GPUBufferUsage.STORAGE });
     }
-    const varying = !!this.varying;
     const layerCount = this.varying?.kind === "depth" && !showSource ? Math.max(1, Math.min(MAX_LAYERS, Math.round(layers))) : 1;
     const layered = layerCount > 1;
     if (layered) this.ensureLayerBuffer();
@@ -1501,16 +1566,16 @@ export class BlurRenderer {
     new Uint32Array(v, 12, 3).set([showSource ? 1 : 0, layered ? 1 : 0, showLayers]);
     device.queue.writeBuffer(this.view, 0, v);
 
-    // Without mixed-radius correction state, nearest lookup can share sources across eight
-    // outputs again. Interpolation retains four to limit register pressure.
-    const horizontalOutputs = varying && !interpolate ? ROWS : HORIZONTAL_OUTPUTS;
-    const p = this.computePipelines(packed, varying && interpolate, layered, horizontalOutputs);
+    // Uniform radius: complex pairs, register-blocked over ROWS outputs. Varying: groups of G terms,
+    // with outputs per thread chosen to bound the accumulators.
+    const horizontalOutputs = varying ? horizontalOutputsFor(G, interpolate) : HORIZONTAL_OUTPUTS;
+    const p = this.computePipelines(packed, varying && interpolate, layered, horizontalOutputs, varying ? G : 2);
     const [horizontal, vertical] = varying ? [p.horizontalVarying, p.verticalVarying] : [p.horizontal, p.vertical];
     const groups = { h: [Math.ceil(Math.ceil(width / (varying ? horizontalOutputs : ROWS)) / 64), height], v: [Math.ceil(width / 64), Math.ceil(height / ROWS)] };
     const bindGroup = device.createBindGroup({
       layout: this.computeLayout,
       entries: [
-        { binding: 0, resource: { buffer: this.params, size: 80 } },
+        { binding: 0, resource: { buffer: this.params, size: PARAMS_BYTES } },
         ...[
           this.source, this.kernel, this.radiusBuffer ?? this.noRadius, this.mid, this.acc,
           this.levelMaps ?? this.noLevels, this.tiles ?? this.noTiles, (layered && this.layerBuffer) || this.noLayer,
@@ -1571,9 +1636,9 @@ export class BlurRenderer {
         pass(p.reachX, first, tileGroups, "prepare");
         pass(p.verticalLevels, first, rowGroups, "prepare");
         pass(p.reachY, first, tileGroups, "prepare");
-        for (let ch = 0; ch < this.channels; ch++) {
-          pass(horizontal, first + ch, groups.h, "horizontal");
-          pass(vertical, first + ch, groups.v, "vertical");
+        for (let group = 0; group < this.channels; group++) {
+          pass(horizontal, first + group, groups.h, "horizontal");
+          pass(vertical, first + group, groups.v, "vertical");
         }
         if (!layered) continue;
         if (layer === layerCount - 1) {

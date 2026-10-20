@@ -11,8 +11,8 @@ pass, at a cost proportional to the blur radius rather than its area.
   optimum in a few iterations.
 - **Live visualizations**: radial cross-section with the evolving population, error curve,
   convergence, and the 2-D kernel.
-- **Blur demo**: hand-written WGSL compute shaders processing one channel at a time, so memory
-  doesn't grow with the channel count. Uniform or spatially varying disc radius: tilt-shift, or
+- **Blur demo**: hand-written WGSL compute shaders processing the kernel's real separable terms in
+  groups, so memory grows with the group size, not the term count. Uniform or spatially varying disc radius: tilt-shift, or
   depth of field from GPU-rendered Tetras or an animated 3D night street, or from an
   RGB-D video: by default a woman in a field (1080p, 24 fps, with Video Depth Anything's 15 fps
   depth interpolated in time; included), Video Depth Anything's comparison clips and long-video
@@ -230,12 +230,19 @@ $$
 K(x, y) = \sum_j e_j\, g_j(x)\, g_j(y), \qquad g_j = f^\mathsf{T} C R^\mathsf{T} u_j / e_j ,
 $$
 
-with orthonormal $g_j$. Two terms make one complex channel:
+with orthonormal $g_j$, and $v_j = \mathrm{sign}(e_j)\,h_j$ for $h_j = \sqrt{|e_j|}\,g_j$. Every term is
+already separable and real; nothing makes two of them belong together. Pairing them into one complex
+channel is only a way to filter two terms per pass:
 
 $$
 \mathrm{Re}\bigl[(\sqrt{|e_a|}\, g_a + i \sqrt{|e_b|}\, g_b)(\pm\sqrt{|e_a|}\, g_a \mp i \sqrt{|e_b|}\, g_b)\bigr]
 = e_a g_a g_a + e_b g_b g_b .
 $$
+
+All terms together reproduce the components' sum to rounding (about $10^{-14}$ relative for presets
+1–6). None of them is negligible for the presets, and leaving out the smallest ones breaks circular
+symmetry: for preset 6, dropping one of its 12 terms already deviates by $1.8 \cdot 10^{-3}$ of the peak, no
+better than the full 5-component preset with as many terms, which stays circular.
 
 The real rank is at most twice the number of rates, so this needs no more channels than the
 per-component forms. Negligible terms ($|e_j| < 10^{-14} \max |e|$) are dropped. A channel's pass is
@@ -260,24 +267,22 @@ For all-single kernels, the panel also shows the article's separable form. Pasti
 text back (Use pasted parameters) reads its parameter section.
 
 At the bottom of the optimizer, **How the kernel is formed** has two figures, both drawn as real
-separable terms $h(x)\,v(y)$: each term's horizontal and vertical 1-D kernels and their product, with pairs
-of terms summed into complex channels. **Components** uses each component's own separable form (the
+separable terms $h(x)\,v(y)$: each term's horizontal and vertical 1-D kernels and their product. **Components** uses each component's own separable form (the
 article's $\sqrt{a_0}$ form, or the $x^{2j} \times Q_j$ channels above). Its channels sum into the
 component, and the components into the kernel, which shows how much the components cancel. This is
 the math view: the blur never computes components, but the figure shows each component's circular
 symmetry.
-**Channels** uses the rendering channels, summed into the kernel as the shader accumulates them.
-The shader never forms a channel's two real terms separately. Its complex horizontal and vertical
-passes give $\mathrm{Re}[h v]$, their sum, directly. A channel alone is not circularly symmetric.
+**Rendering terms** shows these real terms in the order the blur adds them, smallest first (with a
+low-precision accumulator, small terms added to a large sum would be lost), summed directly into the
+kernel. Brackets mark the pass groups (below). A single term is not circularly symmetric.
 Each image uses its own scale, printed below it.
 
 ### 4. Discrete implementation (WebGPU)
 
 See [`src/blur.js`](src/blur.js). The **uniform-radius path**, for a disc radius of $R$ pixels,
 uses point-sampled taps and sliding-register reuse as follows. The varying-radius path instead
-uses pixel-integrated tables, with eight horizontal outputs per thread for nearest-node lookup,
-four for interpolation, and eight vertical outputs; its source-dependent taps do not use the
-uniform path's sliding tap window.
+uses pixel-integrated tables and processes the terms in groups (see Pass groups below); its
+source-dependent taps do not use the uniform path's sliding tap window.
 
 1. **Taps.** Use $t = -K \dots K$ with $K = \lceil R(1+\tau) \rceil$, evaluating each 1-D kernel at
    $(t/R)^2$. Compute tap values in double precision on the CPU and upload them as complex f32
@@ -312,6 +317,19 @@ complex lane as two half floats in one `u32`
 WebGPU device supports it. At 960×600 the
 intermediate is 17.6 MiB, or 8.8 MiB packed, whatever the number of channels. Keeping all
 channels at once would take channels × that.
+
+#### Pass groups
+
+For a varying radius, the terms are processed in equal groups of $G$ (**Terms per pass**; only
+splits into equal groups are offered, by default two groups). One horizontal pass filters a
+group's $G$ terms, storing $G$ real 4-lane intermediates per pixel (16 bytes each in f32, 8 packed),
+and one vertical pass filters them and adds their sum into the accumulator. Only the horizontal
+taps are stored: a term's vertical taps are the same times $\mathrm{sign}(e_j)$, which the horizontal
+pass applies to its output. Larger groups share each source pixel's lookups (radius, level, table
+entry, occlusion test) among more terms and need fewer passes, at the cost of intermediate memory
+and registers; the horizontal outputs per thread shrink as $G$ grows to bound the accumulators
+($\lfloor 16/G \rfloor$, at most 8; $\lfloor 8/G \rfloor$ when interpolating). Every split gives
+the same image up to f32 summation order (a GPU test checks all splits of preset 6).
 
 #### Spatially varying radius
 

@@ -1,4 +1,5 @@
 import { radiusTables } from '../src/radius-tables.js';
+import { groupOptions } from '../src/blur.js';
 import { PARAMS_PER_COMPONENT, presetParams, separableChannels } from '../src/problem.js';
 
 const pad = (c) => [...c, ...Array(PARAMS_PER_COMPONENT - c.length).fill(0)];
@@ -26,6 +27,25 @@ export async function continuousGPU(renderer, check, read) {
       let error = 0;
       for (let i = 3; i < data.length; i += 4) error = Math.max(error, Math.abs(data[i] - 1));
       check(`integrated raw DC ${name}, r=${r}, ${precision}, interpolation=${interpolate}`, error, precision === 'f32' ? 1e-4 : 0.02);
+    }
+  }
+  // Every split of the terms into pass groups renders the same image (up to f32 summation order).
+  const ramp = new Float32Array(width * height);
+  for (let i = 0; i < ramp.length; i++) ramp[i] = 0.3 + 0.6 * (i % width) - 0.2 * Math.floor(i / width);
+  for (let i = 0; i < source.length; i++) source[i] = ((i * 7919) % 101) / 100;
+  renderer.setImage(source, width, height);
+  renderer.setRadiusMap(ramp);
+  renderer.setKernel(presetParams(6), 9, 0.2);
+  for (const interpolate of [false, true]) for (const precision of ['f32', 'f16']) {
+    const images = [];
+    for (const groupTerms of groupOptions(renderer.termCount)) {
+      await renderer.render({ interpolate, precision, groupTerms, sizeBlur: 1, occlusion: 0 });
+      images.push([groupTerms, await read(renderer.device, renderer.acc)]);
+    }
+    for (const [groupTerms, data] of images.slice(1)) {
+      let error = 0;
+      data.forEach((v, i) => (error = Math.max(error, Math.abs(v - images[0][1][i]))));
+      check(`pass groups of ${groupTerms} terms match groups of ${images[0][0]} (${precision}, interpolation=${interpolate})`, error, 1e-5);
     }
   }
 }

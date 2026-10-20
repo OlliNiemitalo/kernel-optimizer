@@ -350,7 +350,9 @@ const NEGLIGIBLE_TERM = 1e-14;
 // diagonalizing R C Rᵀ = Σ e_j u_j u_jᵀ gives Re K = Σ e_j g_j(x) g_j(y) with g_j = fᵀ C Rᵀ u_j / e_j,
 // paired into complex channels: Re[(√|e_a| g_a + i√|e_b| g_b)(±√|e_a| g_a ∓ i√|e_b| g_b)]. Unlike
 // per-component forms, the passes carry no large cancelling parts that f16 intermediates can't resolve.
-export function separableChannels(params, support = 2) {
+// With pairs = false, each real term e_j g_j(x) g_j(y) is its own real channel: h = √|e_j| g_j and
+// v = sign(e_j) h.
+export function separableChannels(params, support = 2, { pairs = true } = {}) {
   const mult = multiplicities(params);
   const terms = [];
   mult.forEach((m, u) => {
@@ -425,6 +427,12 @@ export function separableChannels(params, support = 2) {
     return { decay: params[k0], phase: params[k0 + 1], cos: poly(0), sin: poly(1) };
   });
   const channels = [];
+  if (!pairs) {
+    return kept.map(({ value, coef }) => {
+      const s = Math.sqrt(Math.abs(value));
+      return { h: side([{ factor: [s, 0], coef }]), v: side([{ factor: [Math.sign(value) * s, 0], coef }]), terms: 1, sign: Math.sign(value) };
+    });
+  }
   for (let j = 0; j < kept.length; j += 2) {
     const [a, b] = [kept[j], kept[j + 1]];
     const sa = Math.sqrt(Math.abs(a.value));
@@ -435,7 +443,7 @@ export function separableChannels(params, support = 2) {
       h.push({ factor: [0, sb], coef: b.coef });
       v.push({ factor: [0, -Math.sign(b.value) * sb], coef: b.coef });
     }
-    channels.push({ h: side(h), v: side(v) });
+    channels.push({ h: side(h), v: side(v), terms: b ? 2 : 1 });
   }
   return channels;
 }
@@ -449,7 +457,7 @@ export function formatParams(params, problem, error) {
   const higher = mult.filter((m) => m > 1).length;
   const lines = [
     `Number of components: ${n} (${higher} with repeated rates, multiplicities ${mult.join(", ")}; ` +
-      `${channelCount(mult)} channels), transition bandwidth: ${problem.transition}, ` +
+      `${2 * channelCount(mult)} rendering terms), transition bandwidth: ${problem.transition}, ` +
       `ripple: ±${error.toFixed(6)}`,
     "",
     "// Profile k(x) as a sum of components (article format; multiplicity m adds terms up to (x*x)^(m-1)):",
@@ -477,11 +485,11 @@ export function formatParams(params, problem, error) {
   const row = (side) => side.flatMap(({ cos, sin }) => cos.flatMap((z, k) => [...z, ...sin[k]])).map(fmt).join(", ");
   lines.push(
     "",
-    `// Rendering channels (${channels.length}, as the blur uses them): kernel(x, y) = Re Σ_n h_n(x) v_n(y), with`,
+    `// Rendering terms in ${channels.length} pairs, as the blur uses them: kernel(x, y) = Re Σ_n h_n(x) v_n(y), with`,
     "// h = H f(x) and v = V f(y), where f are the real basis functions of the components above:",
     "//   'u cos x^2k' = x^2k cos(c_u x²) exp(-b_u x²), 'u sin x^2k' = x^2k sin(c_u x²) exp(-b_u x²).",
     "// The kernel is f(x)ᵀ Re(Hᵀ V) f(y), and Re(Hᵀ V) is the components' weight matrix (up to rounding",
-    "// and, at high multiplicity, nearly dependent basis directions). Rows: channels; entries re, im; columns:",
+    "// and, at high multiplicity, nearly dependent basis directions). Rows: pairs (re, im: one term each); columns:",
     `// ${basis.join(", ")}`,
     "// H:",
     ...channels.map((ch) => row(ch.h)),

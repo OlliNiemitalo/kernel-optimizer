@@ -66,7 +66,7 @@
                 <button id="copyShader">Copy</button>
                 <button id="downloadShader">Download</button>
               </div>
-              <p class="note">The compute shader follows the intermediate precision and smooth radius steps settings. Its header describes the buffers, tap tables built from the channels under "Current kernel", and dispatch order.</p>
+              <p class="note">The compute shader follows the intermediate precision and smooth radius steps settings. Its header describes the buffers, tap tables built from the rendering terms under "Current kernel", and dispatch order.</p>
               <textarea id="shaderCode" rows="24" readonly spellcheck="false"></textarea>
             </details>
           </div>
@@ -134,6 +134,7 @@
               <label title="Number format of the image between the horizontal and the vertical blur pass. 16-bit halves its memory and renders within 1/255 of 32-bit.">Intermediate precision
                 <select id="precision"><option value="f16" selected>16-bit</option><option value="f32">32-bit</option></select>
               </label>
+              <label title="Varying blur: the kernel's real terms are filtered in equal groups, each by one horizontal and one vertical pass (see Rendering terms). More terms per group: fewer passes, a larger intermediate image and more registers per pixel. The result is the same up to rounding. A uniform radius always uses pairs.">Terms per pass <select id="groupTerms"></select></label>
               <label class="check"><input id="follow" type="checkbox" checked /> Follow the optimizer's kernel</label>
             </fieldset>
 
@@ -187,7 +188,7 @@
                   frequency <i>c</i> and weights <i>r</i> and <i>i</i>.</p>
                 <p class="note">Multiplicity, per component, 1 to 10: <i>m</i> coinciding rates in closed form,
                   <code>(a<sub>0</sub> + a<sub>1</sub> r² + … + a<sub><i>m</i>−1</sub> r<sup>2(<i>m</i>−1)</sup>)·e<sup>λr²</sup></code>,
-                  costing <i>m</i> channels (1 = single, 2 = merged pair). Example: 2, 2, 1.
+                  costing 2<i>m</i> rendering terms (1 = single, 2 = merged pair). Example: 2, 2, 1.
                   <a data-readme="#2-kernel-model" href="https://github.com/OlliNiemitalo/kernel-optimizer#2-kernel-model">More in the README</a>.</p>
               </details>
             </fieldset>
@@ -275,7 +276,7 @@
             </div>
             <h3>Current kernel</h3>
             <p class="note">As text, for copying: the profile k(x) as an expression, its parameters (which Use pasted parameters
-              accepts), and the channels that the blur uses.</p>
+              accepts), and the rendering terms, in pairs.</p>
             <textarea id="output" rows="12" readonly spellcheck="false"></textarea>
             <div class="buttons">
               <button id="copy">Copy</button>
@@ -298,15 +299,14 @@
                 <canvas id="componentsFigure" aria-label="Components summed into the kernel"></canvas>
               </figure>
               <figure>
-                <figcaption>Channels</figcaption>
-                <p class="note">What the blur computes. A <b>channel</b> is a 2-D kernel Re[h(x) v(y)], given by a complex
-                  horizontal filter h and a complex vertical filter v; the channels ch0, ch1, … sum to K. Each row is a real
-                  term, h<sub>re</sub>v<sub>re</sub> or −h<sub>im</sub>v<sub>im</sub>, and each pair of terms sums to a
-                  channel. The blur filters the image with each channel by one horizontal pass (h) and one vertical pass (v),
-                  which give the real part directly, without computing the terms separately, and adds up the filtered
-                  images. With more than one channel, the channels are not circularly symmetric; only their sum K is. The channels' peaks stay near K's, so 16-bit
-                  intermediate images suffice.</p>
-                <canvas id="channelsFigure" aria-label="Channels summed into the kernel"></canvas>
+                <figcaption>Rendering terms</figcaption>
+                <p class="note">What the blur computes: real separable terms, each a 1-D filter h(x) times ±h(y), numbered
+                  t0, t1, … by size and added smallest first, which loses the least to rounding. Each bracket is a group
+                  of terms (Terms per pass, varying blur) that one horizontal pass filters and one vertical pass filters
+                  and sums into K; a uniform radius uses pairs. Together, the terms equal the components' sum up to
+                  rounding. A single term is not circularly symmetric, nor is the sum of only the largest ones; K is.
+                  The terms' peaks stay near K's, so 16-bit intermediate images suffice.</p>
+                <canvas id="channelsFigure" aria-label="Rendering terms summed into the kernel"></canvas>
               </figure>
             </div>
           </div>

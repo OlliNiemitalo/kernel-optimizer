@@ -221,21 +221,23 @@ function valueImage(ctx, values, w, h) {
   return { img, peak };
 }
 
-// How the kernel is formed, as real separable terms h(x) v(y) (pairs of which are complex channels
-// Re[h v]) summed into the kernel: "components" uses each component's own separable form, its channels
-// summed into the component; "channels" uses the renderer's channels, summed as the shader accumulates
-// them. Each image is normalized to its own peak, printed under it.
-export function drawDecomposition(canvas, best, transition, mode) {
-  const T = 56, gap = 46, rowH = T + 20, strip = 7, top = 8, left = 8;
+// How the kernel is formed, as real separable terms h(x) v(y) summed into the kernel: "components"
+// uses each component's own separable form, its terms summed into the component; "channels" uses
+// the renderer's real terms, in the order the blur adds them (smallest first), summed directly into
+// K, with a bracket for each group of groupTerms terms filtered by one horizontal and one vertical
+// pass. Each image is normalized to its own peak, printed under it.
+export function drawDecomposition(canvas, best, transition, mode, { groupTerms = 2 } = {}) {
+  const T = 56, gap = 46, rowH = T + 20, strip = 7, top = 8;
+  const left = mode === "channels" ? 24 : 8; // room for the pass-group brackets
   const dpr = window.devicePixelRatio || 1;
   const n = Math.round(T * dpr);
   const S = 1 + transition;
   const xs = Array.from({ length: n }, (_, i) => ((i + 0.5) / n * 2 - 1) * S);
   const mult = best ? multiplicities(best) : [];
-  const channels = !best ? [] : mode === "components" ? componentChannels(best) : separableChannels(best, S);
+  const channels = !best ? [] : mode === "components" ? componentChannels(best) : separableChannels(best, S, { pairs: false });
   const leaves = [];
   const groups = channels.map((ch, j) => {
-    const caption = mode === "channels" ? `ch${j}`
+    const caption = mode === "channels" ? ""
       : mult[ch.component] === 1 ? `u${ch.component}`
       : `u${ch.component}.${j - channels.findIndex((c) => c.component === ch.component)}`;
     const h = xs.map((x) => channelSide(ch.h, x * x));
@@ -247,11 +249,16 @@ export function drawDecomposition(canvas, best, transition, mode) {
       const tile = new Float64Array(n * n);
       for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) tile[y * n + x] = hs[x] * vs[y];
       group.leaves.push(leaves.length);
-      leaves.push({ tile, h: hs, v: vs });
+      leaves.push({ tile, h: hs, v: vs, channel: j });
     }
     if (group.leaves.length === 1) leaves[group.leaves[0]].caption = caption;
     return group;
   });
+  if (mode === "channels") {
+    // In the order the blur adds them: smallest first.
+    leaves.forEach((leaf, i) => (leaf.caption = `t${i}`));
+    leaves.reverse();
+  }
   const tileX = left + T + 20 + strip + 24;
   const colX = (col) => tileX + col * (T + gap);
   // Terms into channels, channels into components (component form), then one sum into the kernel.
@@ -265,10 +272,10 @@ export function drawDecomposition(canvas, best, transition, mode) {
     ops.push({ node, children, caption });
     return node;
   };
-  let nodes = groups.map((g) => ({ ...g, node: combine(g.leaves.map((i) => leafNodes[i]), g.caption) }));
+  let nodes = groups.map((g) => ({ ...g, node: mode === "channels" ? null : combine(g.leaves.map((i) => leafNodes[i]), g.caption) }));
   nodes = mode === "components"
     ? mult.map((_, u) => combine(nodes.filter((g) => g.component === u).map((g) => g.node), `u${u}`))
-    : nodes.map((g) => g.node);
+    : leafNodes;
   if (nodes.length) combine(nodes);
   const columns = Math.max(0, ...ops.map((o) => o.node.col)) + 1;
   canvas.style.width = `${colX(columns) - gap + 8}px`;
@@ -306,5 +313,19 @@ export function drawDecomposition(canvas, best, transition, mode) {
     for (let i = 1; i < children.length; i++) label("+", plusX, (children[i - 1].y + children[i].y) / 2, 18);
     label("=", colX(node.col) - gap / 2 + 10, node.y, 18);
     drawTile(node, ops.at(-1).node === node ? "K" : caption);
+  }
+  if (mode !== "channels") return;
+  // A bracket for each pass group: one horizontal and one vertical pass.
+  ctx.strokeStyle = "#5c677d";
+  ctx.lineWidth = 1;
+  for (let first = 0; first < leaves.length; first += groupTerms) {
+    const last = Math.min(first + groupTerms, leaves.length) - 1;
+    const y0 = top + first * rowH + 2, y1 = top + last * rowH + T - 2;
+    ctx.beginPath();
+    ctx.moveTo(14, y0);
+    ctx.lineTo(10, y0);
+    ctx.lineTo(10, y1);
+    ctx.lineTo(14, y1);
+    ctx.stroke();
   }
 }
