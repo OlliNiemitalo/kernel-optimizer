@@ -39,7 +39,18 @@ export function loadVideo(url, { signal, onError, onSeek, onEnded, timeoutMs = 3
         reject(error);
       }
     };
-    const failed = () => fail(mediaError(element, url));
+    let retries = 2;
+    const failed = () => {
+      // Chrome's HTTP cache intermittently fails concurrent range requests for the same URL
+      // (net::ERR_CACHE_OPERATION_NOT_SUPPORTED), surfacing as MEDIA_ERR_SRC_NOT_SUPPORTED.
+      if (!loaded && retries > 0 && element.error?.code !== 3) {
+        retries--;
+        element.src = url;
+        element.load();
+        return;
+      }
+      fail(mediaError(element, url));
+    };
     const abort = () => {
       cleanup();
       element.removeEventListener("error", failed);

@@ -69,11 +69,24 @@ test("media errors reject initial loading with browser code, details, and URL", 
     const promise = loadVideo(`depth-${code}.mp4`);
     const video = videos.at(-1);
     video.error = { code, message: "Browser details" };
-    video.dispatchEvent(new Event("error"));
+    for (let attempt = 0; attempt < (code === 3 ? 1 : 3); attempt++) video.dispatchEvent(new Event("error"));
     await assert.rejects(promise, new RegExp(`MEDIA_ERR_${name}.*Browser details.*depth-${code}\\.mp4`));
     assert.equal(video.src, undefined);
     assert.equal(video.pauses, 1);
   }
+});
+
+test("an intermittent load failure is retried", async (t) => {
+  const videos = setup(t);
+  const promise = loadVideo("depth.mp4");
+  const video = videos[0];
+  video.error = { code: 4, message: "Format error" };
+  video.dispatchEvent(new Event("error"));
+  assert.equal(video.src, "depth.mp4");
+  assert.equal(video.loads, 2);
+  video.error = null;
+  video.dispatchEvent(new Event("loadeddata"));
+  assert.equal(await promise, video);
 });
 
 test("a stalled load times out rather than waiting forever", async (t) => {
