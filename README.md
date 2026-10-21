@@ -58,6 +58,20 @@ URL options: `?calibrate` enables jax-js's GPU microbenchmark at startup. By def
 because it allocates about 128 MB and can stall the page for several seconds. It is not required
 for the optimizer.
 
+**Sharing a kernel.** **Copy link** (under Current kernel) copies a URL that opens the page with
+just the current kernel, as `?kernel=b,c,r,i;b,c,r,i,r1,i1;…`: components separated by `;`, each
+with $2 + 2m$ numbers for multiplicity $m$ (so the count gives the multiplicity, even when the top
+weights are zero). Numbers are written exactly. The `problem` search parameter also records the
+component count and requested multiplicities, transition bandwidth, pass/stop sample counts,
+frequency-band constraint, negative-value penalty, and dense-grid sample count. Demo and solver
+settings are not shared. Older kernel-only links use the default problem settings.
+The address bar tracks the latest current kernel and problem, at the demo's 150 ms update cadence
+during optimization, even with demo following disabled or without WebGPU. Pausing or hiding/leaving
+the page flushes any pending update. Reopening a restored browser URL recovers the result, not
+the population or running optimizer. Browser session restoration is required; a sudden shutdown
+can lose the latest pending update. An invalid link shows an error and the default kernel.
+The page title links to the default view.
+
 **Control availability.** Blur-specific controls are disabled when blur is off. The player bar under
 the picture (go to start, previous frame, play/pause, next frame, time, speed) is available only for
 videos and the animated world; the seek bar, duration and loop only for videos, and full screen for
@@ -222,6 +236,7 @@ $5 \cdot 10^5$. 16-bit intermediates (relative precision $5 \cdot 10^{-4}$) then
 term $s^k \mathrm{Re}[a_k e^{\lambda s}]$ separately, including within a repeated-rate component.
 The bottom **Components** diagram expands each such term into separable products, sums these into
 the radial term (labeled `u0 x^0`, `u0 x^2`, etc.), then sums terms into whole components and the kernel.
+Stages with only one input reuse its image rather than repeating it; coincident labels share that tile.
 Individual separable products need not be circularly symmetric. Every image has its own peak scale;
 large intermediate peaks indicate cancellation, not an incorrectly scaled final kernel.
 

@@ -263,11 +263,15 @@ export function drawDecomposition(canvas, best, transition, mode, { groupTerms =
   const ops = [];
   const leafNodes = leaves.map((leaf, i) => ({ tile: leaf.tile, y: top + i * rowH + T / 2, col: 0 }));
   const combine = (children, caption = "") => {
-    if (children.length === 1 && !caption) return children[0];
+    if (children.length === 1) {
+      const node = children[0];
+      if (caption) node.caption = [caption, node.caption].filter(Boolean).join(" / ");
+      return node;
+    }
     const tile = new Float64Array(n * n);
     for (const c of children) for (let i = 0; i < tile.length; i++) tile[i] += c.tile[i];
-    const node = { tile, y: (children[0].y + children.at(-1).y) / 2, col: Math.max(...children.map((c) => c.col)) + 1 };
-    ops.push({ node, children, caption });
+    const node = { tile, y: (children[0].y + children.at(-1).y) / 2, col: Math.max(...children.map((c) => c.col)) + 1, caption };
+    ops.push({ node, children });
     return node;
   };
   let nodes = groups.map((g) => ({ ...g, node: mode === "channels" ? null : combine(g.leaves.map((i) => leafNodes[i])) }));
@@ -281,7 +285,7 @@ export function drawDecomposition(canvas, best, transition, mode, { groupTerms =
   } else {
     nodes = leafNodes;
   }
-  if (nodes.length) combine(nodes);
+  if (nodes.length) combine(nodes, "K");
   const columns = Math.max(0, ...ops.map((o) => o.node.col)) + 1;
   canvas.style.width = `${colX(columns) - gap + 8}px`;
   canvas.style.height = `${top + Math.max(1, leaves.length) * rowH}px`;
@@ -304,20 +308,20 @@ export function drawDecomposition(canvas, best, transition, mode, { groupTerms =
   };
   const ds = Math.round(strip * dpr);
   leaves.forEach((leaf, i) => {
-    const node = { tile: leaf.tile, y: top + i * rowH + T / 2, col: 0 };
+    const node = leafNodes[i];
     if (leaf.h) {
       put(Array.from({ length: ds }, () => leaf.h).flat(), n, ds, left, node.y - strip / 2);
       label("*", left + T + 10, node.y, 18);
       put(leaf.v.flatMap((a) => Array(ds).fill(a)), ds, n, left + T + 20, node.y - T / 2);
       label("=", left + T + 20 + strip + 12, node.y, 18);
     }
-    drawTile(node, leaf.caption);
+    drawTile(node, node.caption || leaf.caption);
   });
-  for (const { node, children, caption } of ops) {
+  for (const { node, children } of ops) {
     const plusX = colX(Math.max(...children.map((c) => c.col))) + T + gap / 2 - 10;
     for (let i = 1; i < children.length; i++) label("+", plusX, (children[i - 1].y + children[i].y) / 2, 18);
     label("=", colX(node.col) - gap / 2 + 10, node.y, 18);
-    drawTile(node, ops.at(-1).node === node ? "K" : caption);
+    drawTile(node, node.caption);
   }
   if (mode !== "channels") return;
   // A bracket for each pass group: one horizontal and one vertical pass.

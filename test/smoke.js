@@ -14,6 +14,7 @@ import { populationPreview } from '../src/plots.js';
 import {
   MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, defaultProblem, formatParams, maxError, multiplicities, nonnegativePresetParams,
   parseParams, presetParams, profile, sampleGrid, separableChannels, sortByFrequency, withStride, channelSide, componentChannels,
+  kernelFromQuery, kernelToQuery, problemFromQuery,
 } from "../src/problem.js";
 
 const devices = await init();
@@ -389,6 +390,41 @@ for (const extra of [[3.1, 9.4, -0.8, 2.2, 1.7, -0.6], [3.1, 9.4, -0.8, 2.2, 1.7
 assert.deepEqual(withStride([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0], 6), [...pad([1, 2, 3, 4, 5, 6]), ...pad([7, 8, 9, 10])]);
 assert.throws(() => withStride(Array(2 + 2 * (MAX_MULTIPLICITY + 1)).fill(1), 2 + 2 * (MAX_MULTIPLICITY + 1)));
 console.log("PASS view-state kernel layouts");
+{
+  const sorted = [...sortByFrequency(presetParams(2)), ...pad([3.1, 9.4, -0.8, 2.2, 0.1 + 0.2, -1 / 3, 0, 0])];
+  // Multiplicity 3 with a zero top weight survives, and components come back in frequency order.
+  const query = kernelToQuery(sorted, [1, 1, 3]);
+  assert.equal(query.split(";")[2].split(",").length, 8);
+  const reversed = query.split(";").reverse().join(";");
+  for (const text of [query, reversed, encodeURIComponent(query)].map((q) => new URLSearchParams(`kernel=${q}`).get("kernel"))) {
+    const { params, multiplicity } = kernelFromQuery(text);
+    assert.deepEqual(params, sorted);
+    assert.deepEqual(multiplicity, [1, 1, 3]);
+  }
+  assert.deepEqual(kernelFromQuery(kernelToQuery(sorted)).multiplicity, [1, 1, 2]);
+  assert.deepEqual(kernelFromQuery(kernelToQuery(sorted, [1, 1, 1])).multiplicity, [1, 1, 2]);
+  for (const bad of ["", "1,2,3", "1,2,3,4,5", "0,2,3,4", "1,2,x,4", "1,2,3,4,", Array(9).fill("1,2,3,4").join(";"),
+    Array(PARAMS_PER_COMPONENT + 2).fill(1).join(",")]) assert.throws(() => kernelFromQuery(bad), bad);
+}
+console.log("PASS kernel URL round trip with multiplicities");
+{
+  const problem = { ...problemFor([3, 1]), transition: 0.5, passSamples: 120, stopSamples: 320,
+    frequencyBands: false, negativeWeight: 100, denseSamples: 4000 };
+  const url = new URL("https://example.com/optimizer/");
+  url.searchParams.set("kernel", kernelToQuery(presetParams(2), [3, 1]));
+  url.searchParams.set("problem", JSON.stringify(problem));
+  assert.deepEqual(problemFromQuery(new URL(url.href).searchParams.get("problem")), problem);
+  const restored = kernelFromQuery(url.searchParams.get("kernel"), 8, { sort: false });
+  assert.deepEqual(restored.multiplicity, [3, 1]);
+  assert.deepEqual(restored.params, presetParams(2));
+  for (const update of [
+    { components: 0 }, { multiplicity: [1] }, { multiplicity: [11, 1] },
+    { transition: 0 }, { transition: "0.5" }, { passSamples: 1 }, { stopSamples: 1e9 },
+    { frequencyBands: "false" }, { negativeWeight: 0 }, { denseSamples: 0 },
+  ]) assert.throws(() => problemFromQuery(JSON.stringify({ ...problem, ...update })));
+  for (const text of ["null", "{}", "invalid"]) assert.throws(() => problemFromQuery(text));
+}
+console.log("PASS optimization problem URL round trip and validation");
 
 // jax-js batch cost agrees with the double-precision JS cost.
 {

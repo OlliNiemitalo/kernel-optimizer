@@ -12,7 +12,7 @@
   </head>
   <body>
     <header>
-      <h1>Circular blur kernel optimizer</h1>
+      <h1><a href="./" title="Default view, with the article's 3-component kernel">Circular blur kernel optimizer</a></h1>
       <p>
         An out-of-focus lens spreads each point of light into a disc, which is slow to compute directly. Following
         Olli Niemitalo's article <a href="https://yehar.com/blog/?p=1495">Circularly symmetric convolution and lens blur</a>,
@@ -280,6 +280,7 @@
             <textarea id="output" rows="12" readonly spellcheck="false"></textarea>
             <div class="buttons">
               <button id="copy">Copy</button>
+              <button id="copyLink" title="Copy a link with the current kernel, multiplicities, and optimization problem settings">Copy link</button>
               <button id="applyPasted">Use pasted parameters…</button>
             </div>
             <textarea id="pasted" rows="3" placeholder="One component per line: b, c, r, i (single), then r1, i1, r2, i2, … for multiplicity 2 to 10" spellcheck="false" hidden></textarea>

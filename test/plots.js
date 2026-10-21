@@ -78,9 +78,19 @@ export function testPlots() {
   try {
     for (const dpr of [1, 1.25, 2]) {
       Object.defineProperty(globalThis, "window", { configurable: true, value: { devicePixelRatio: dpr } });
+      for (const count of [1, 2, 3]) {
+        const diagram = canvasRecorder();
+        drawDecomposition(diagram.canvas, presetParams(count), 0.5, "components");
+        const n = Math.round(56 * dpr);
+        const tiles = diagram.images.filter((image) => image.width === n && image.height === n);
+        // Two real products per component, one component sum, and a kernel sum only if needed.
+        assert.equal(tiles.length, 3 * count + (count > 1 ? 1 : 0));
+        assert.equal(diagram.labels.filter(({ text }) => text === "=").length, tiles.length);
+        checkImage(diagram.labels.find(({ text }) => text.startsWith("K ")).image, presetParams(count));
+      }
       for (const params of [
         reported, presetParams(2), [...presetParams(1), ...reported],
-        pad([3, 0, 0, 1, 0, 0, 2, 0]), pad([3, 0, 0, 0]),
+        pad([3, 0, 0, 1, 0, 0, 2, 0]), pad([3, 0, 0, 0]), pad([3, 0, 1, 0]),
         pad([3, 2, ...Array.from({ length: 2 * MAX_MULTIPLICITY }, (_, i) => 0.1 ** Math.floor(i / 2))]),
       ]) {
         const terms = componentTerms(params);

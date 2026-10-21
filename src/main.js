@@ -97,7 +97,8 @@ import { FineTuner } from "./finetune.js";
 import { remezSteps } from "./remez.js";
 import { drawConvergence, drawDecomposition, drawDisc, drawError, drawProfile, populationPreview } from "./plots.js";
 import {
-  MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, maxError, multiplicities,
+  MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, kernelFromQuery, kernelToQuery,
+  maxError, multiplicities, problemFromQuery,
   parseParams, presetParams, nonnegativePresetParams, PRESETS, sampleGrid, separableChannels, sortByFrequency, withStride,
 } from "./problem.js";
 import { loadImage, proceduralScene } from "./scene.js";
@@ -133,6 +134,40 @@ const state = {
   imageFile: null,
   focus: 0, // focus slider position; its square is 1 / distance
 };
+
+const KERNEL_UPDATE_INTERVAL = 150;
+let kernelUrlTimer = null;
+let lastKernelUrlTime = -Infinity;
+
+function currentKernelUrl() {
+  const url = new URL(location.href);
+  url.searchParams.set("kernel", kernelToQuery(state.current.params, readProblem().multiplicity));
+  url.searchParams.set("problem", JSON.stringify({ ...readProblem(), denseSamples: Math.max(10, Math.round(num("denseSamples"))) }));
+  return url;
+}
+
+function saveKernelUrl() {
+  if (kernelUrlTimer !== null) clearTimeout(kernelUrlTimer);
+  kernelUrlTimer = null;
+  if (!state.current) return;
+  const url = currentKernelUrl();
+  if (url.href !== location.href) {
+    try {
+      history.replaceState(history.state, "", url);
+    } catch (e) {
+      setStatus(`Could not save the current kernel in the address bar: ${e.message}`);
+      return;
+    }
+  }
+  lastKernelUrlTime = performance.now();
+}
+
+function requestKernelUrl() {
+  if (kernelUrlTimer !== null) return;
+  const wait = state.running ? Math.max(0, KERNEL_UPDATE_INTERVAL - (performance.now() - lastKernelUrlTime)) : 0;
+  if (!wait) saveKernelUrl();
+  else kernelUrlTimer = setTimeout(saveKernelUrl, wait);
+}
 
 // Multiplicity per component (1 = single, m = m coinciding rates), padded or truncated to the component count.
 function readMultiplicity(components) {
@@ -209,6 +244,7 @@ function setCurrent(params, source) {
   // The preset menu shows which preset is current, if any.
   const preset = /^article (non-negative )?preset \((\d) components\)$/.exec(source);
   $("preset").value = preset ? `${preset[1] ? "nn" : ""}${preset[2]}` : "";
+  requestKernelUrl();
   if ($("follow").checked) requestBlur(true);
 }
 
@@ -364,6 +400,7 @@ function updateRunButton() {
 
 function setRunning(running) {
   state.running = running;
+  if (!running) saveKernelUrl();
   updateRunButton();
   const version = ++runVersion;
   if (running) runLoop(version);
@@ -850,7 +887,7 @@ function requestBlur(kernelChanged = false) {
   updateVaryingControls();
   if (blurPending || !state.blur) return;
   blurPending = true;
-  const wait = state.running ? Math.max(0, 150 - (performance.now() - lastBlurTime)) : 0;
+  const wait = state.running ? Math.max(0, KERNEL_UPDATE_INTERVAL - (performance.now() - lastBlurTime)) : 0;
   setTimeout(() => nextFrame().then(renderBlur), wait);
 }
 
@@ -1228,6 +1265,21 @@ function wire() {
     if ($("population").dataset.auto) $("population").value = $("projected").checked ? 32 : 512;
   });
   $("copy").onclick = () => navigator.clipboard.writeText($("output").value);
+  $("copyLink").onclick = async () => {
+    if (!state.current) return;
+    const url = currentKernelUrl();
+    for (const key of [...url.searchParams.keys()]) {
+      if (key !== "kernel" && key !== "problem") url.searchParams.delete(key);
+    }
+    url.hash = "";
+    const link = url.href;
+    try {
+      await navigator.clipboard.writeText(link);
+      setStatus(`Copied a link to the current kernel: ${link}`);
+    } catch {
+      setStatus(`Could not copy to the clipboard. Link to the current kernel: ${link}`);
+    }
+  };
   $("applyPasted").onclick = () => {
     const box = $("pasted");
     if (box.hidden) {
@@ -1414,6 +1466,10 @@ async function main() {
   const repo = import.meta.env.VITE_REPO_URL;
   if (repo) for (const a of document.querySelectorAll("a[data-readme]")) a.href = repo + a.dataset.readme;
   wire();
+  window.addEventListener("pagehide", saveKernelUrl);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) saveKernelUrl();
+  });
   updateVaryingControls();
   showShader();
   describeRanges(readProblem());
@@ -1432,6 +1488,30 @@ async function main() {
   } catch (e) {
     setStatus(`jax-js failed to initialize: ${e.message}`);
     return;
+  }
+  const linked = new URLSearchParams(location.search).get("kernel");
+  if (linked !== null) {
+    try {
+      const problemText = new URLSearchParams(location.search).get("problem");
+      const problem = problemText === null ? null : problemFromQuery(problemText);
+      const { params, multiplicity } = kernelFromQuery(linked, 8, { sort: !problem });
+      $("components").value = problem?.components ?? params.length / PARAMS_PER_COMPONENT;
+      setMultiplicity(problem?.multiplicity ?? multiplicity);
+      if (problem) {
+        for (const id of ["transition", "passSamples", "stopSamples", "denseSamples"]) $(id).value = problem[id];
+        $("frequencyBands").checked = problem.frequencyBands;
+        $("negGain").value = problem.negativeWeight;
+      }
+      describeRanges(readProblem());
+      setCurrent(params, "shared link");
+      discardDE({ include: state.current.params });
+      return;
+    } catch (e) {
+      setCurrent(sortByFrequency(presetParams(3)), "article preset (3 components)");
+      discardDE();
+      setStatus(`Could not load the kernel from the link: ${e.message} Showing the 3-component article preset.`);
+      return;
+    }
   }
   setCurrent(sortByFrequency(presetParams(3)), "article preset (3 components)");
   discardDE();

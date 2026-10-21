@@ -516,6 +516,48 @@ export function formatParams(params, problem, error) {
   return lines.join("\n");
 }
 
+// URL form: components separated by ";", each b, c, r, i, then r1, i1, … up to its multiplicity, so the
+// count of numbers (2 + 2m) gives the multiplicity even when the top weights are zero.
+// Numbers use the shortest text that round-trips exactly.
+export function kernelToQuery(params, multiplicity = multiplicities(params)) {
+  const used = multiplicities(params);
+  return used.map((m, u) => params.slice(u * PARAMS_PER_COMPONENT, u * PARAMS_PER_COMPONENT + 2 + 2 * Math.max(m, multiplicity[u] ?? 1))
+    .map(String).join(",")).join(";");
+}
+
+export function problemFromQuery(text) {
+  const p = JSON.parse(text);
+  const integer = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+  if (!p || !integer(p.components, 1, 8) ||
+      !Array.isArray(p.multiplicity) || p.multiplicity.length !== p.components ||
+      !p.multiplicity.every((m) => integer(m, 1, MAX_MULTIPLICITY)) ||
+      !Number.isFinite(p.transition) || p.transition <= 0 ||
+      !integer(p.passSamples, 2, 5000) || !integer(p.stopSamples, 2, 5000) ||
+      typeof p.frequencyBands !== "boolean" ||
+      !Number.isFinite(p.negativeWeight) || p.negativeWeight < 1 ||
+      !integer(p.denseSamples, 10, 20000)) {
+    throw new Error("Invalid optimization problem settings in the link.");
+  }
+  return p;
+}
+
+// Returns { params, multiplicity }.
+export function kernelFromQuery(text, maxComponents = 8, { sort = true } = {}) {
+  const rows = text.split(";").filter((row) => row.trim());
+  if (rows.length < 1 || rows.length > maxComponents) throw new Error(`Expected 1 to ${maxComponents} components.`);
+  const components = rows.map((row) => {
+    const numbers = row.split(",").map((v) => (v.trim() ? Number(v) : NaN));
+    if (numbers.length < 4 || numbers.length % 2 || numbers.length > PARAMS_PER_COMPONENT || !numbers.every(Number.isFinite)) {
+      throw new Error(`Expected each component as b, c, r, i, then r1, i1, … (multiplicity up to ${MAX_MULTIPLICITY}).`);
+    }
+    if (!(numbers[0] > 0)) throw new Error("Decay b must be positive.");
+    return { params: padded(numbers), multiplicity: numbers.length / 2 - 1 };
+  });
+  // Ascending frequency, as elsewhere, keeping each multiplicity with its component.
+  if (sort) components.sort((a, b) => a.params[1] - b.params[1]);
+  return { params: components.flatMap((c) => c.params), multiplicity: components.map((c) => c.multiplicity) };
+}
+
 // One component per line: b, c, r, i and, for multiplicity m > 1, r1, i1, … up to r(m-1), i(m-1).
 // The whole "Current kernel" text also works: its parameter section is used. Unstructured text: groups of 4.
 export function parseParams(text) {
