@@ -5,6 +5,7 @@
 // channels per pass; unused terms are zero. The same 1-D profile, with x² → x² + y², is the 2-D kernel.
 
 export const MAX_MULTIPLICITY = 10;
+export const MAX_COMPONENTS = 10;
 export const PARAMS_PER_COMPONENT = 2 + 2 * MAX_MULTIPLICITY;
 
 const padded = (component) => [...component, ...Array(PARAMS_PER_COMPONENT - component.length).fill(0)];
@@ -528,7 +529,7 @@ export function kernelToQuery(params, multiplicity = multiplicities(params)) {
 export function problemFromQuery(text) {
   const p = JSON.parse(text);
   const integer = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
-  if (!p || !integer(p.components, 1, 8) ||
+  if (!p || !integer(p.components, 1, MAX_COMPONENTS) ||
       !Array.isArray(p.multiplicity) || p.multiplicity.length !== p.components ||
       !p.multiplicity.every((m) => integer(m, 1, MAX_MULTIPLICITY)) ||
       !Number.isFinite(p.transition) || p.transition <= 0 ||
@@ -542,7 +543,7 @@ export function problemFromQuery(text) {
 }
 
 // Returns { params, multiplicity }.
-export function kernelFromQuery(text, maxComponents = 8, { sort = true } = {}) {
+export function kernelFromQuery(text, maxComponents = MAX_COMPONENTS, { sort = true } = {}) {
   const rows = text.split(";").filter((row) => row.trim());
   if (rows.length < 1 || rows.length > maxComponents) throw new Error(`Expected 1 to ${maxComponents} components.`);
   const components = rows.map((row) => {

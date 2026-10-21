@@ -12,7 +12,7 @@ import { testViewControls } from './view-controls.js';
 import { testPlots } from './plots.js';
 import { populationPreview } from '../src/plots.js';
 import {
-  MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, defaultProblem, formatParams, maxError, multiplicities, nonnegativePresetParams,
+  MAX_COMPONENTS, MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, defaultProblem, formatParams, maxError, multiplicities, nonnegativePresetParams,
   parseParams, presetParams, profile, sampleGrid, separableChannels, sortByFrequency, withStride, channelSide, componentChannels,
   kernelFromQuery, kernelToQuery, problemFromQuery,
 } from "../src/problem.js";
@@ -53,6 +53,59 @@ for (const size of [0, 8, 24, 32, 512]) {
 const D1 = PARAMS_PER_COMPONENT;
 const pad = (c) => [...c, ...Array(D1 - c.length).fill(0)];
 const binomial = (n, k) => Array.from({ length: k }, (_, j) => (n - j) / (j + 1)).reduce((a, b) => a * b, 1);
+const pastedTen = `7.148185516924103, 2.4927349464132558, -1242.6335320030207, 435.1383849993189
+13.97011128857182, 3.895575022534836, 1392.3314399989267, 638.7307769993176
+6.8989770619005375, 7.476990508899397, -375.25432200238583, 485.81362499651027
+7.0295872483302295, 12.172942127710726, 50.24416900119528, 358.28113199585056
+7.602767849720905, 15.65397904113909, 251.22341800281518, -98.10971700247157
+6.624758031834333, 18.75368396970372, -70.80337099593586, -33.03615600114058
+5.841447009473684, 23.267768013476132, -13.118463995076524, 11.5558290020063
+6.836643992578203, 25.436927996489974, 9.560691003252611, 3.0842850032656344
+4.31348099995382, 28.96548400078732, -0.5601639992634236, 0.010000007078592587
+3.0536740000345017, 32.57196899995972, 0.009999996171068724, 0.03756300474029547`;
+{
+  const center = parseParams(pastedTen);
+  const problem = { ...problemFor(Array(10).fill(1)), passSamples: 32, stopSamples: 32 };
+  const limits = bounds(problem);
+  const options = { bounds: limits, populationSize: 8, dimensions: center.length, seed: 123, center };
+  assert.equal(center.length, 10 * D1);
+  assert.ok(problem.components <= MAX_COMPONENTS);
+  const population = initialPopulation(options);
+  assert.deepEqual(Array.from(population.slice(0, center.length)), Array.from(Float32Array.from(center)));
+  for (let k = 1; k < 8; k++) {
+    assert.ok(population.slice(k * center.length, (k + 1) * center.length).some((v, j) => v !== population[j]));
+    for (let j = 0; j < center.length; j++) {
+      const v = population[k * center.length + j];
+      assert.ok(v >= Math.fround(limits.foldLo[j]) && v <= Math.fround(limits.foldHi[j]));
+    }
+  }
+  for (const [offset, value] of [
+    [2 * D1 + 1, limits.foldLo[2 * D1 + 1] - 1e-4],
+    [1, limits.foldHi[1] + 1e-4], [4, 1e-50],
+  ]) {
+    const invalid = center.slice();
+    invalid[offset] = value;
+    assert.throws(() => initialPopulation({ ...options, center: invalid }));
+  }
+  const upper = center.slice();
+  upper[1] = Math.fround(limits.foldHi[1]);
+  assert.doesNotThrow(() => initialPopulation({ ...options, center: upper }));
+  assert.deepEqual(kernelFromQuery(kernelToQuery(center)).params, center);
+  assert.deepEqual(problemFromQuery(JSON.stringify({ ...problem, denseSamples: 2000 })), { ...problem, denseSamples: 2000 });
+  for (const Evolution of [DifferentialEvolution, ProjectedEvolution]) {
+    const de = new Evolution({ components: 10, multiplicity: problem.multiplicity, grid: sampleGrid(problem),
+      bounds: limits, populationSize: 8, F: 0.5, CR: 0.9, seed: 123, populationCenter: center });
+    try {
+      const snap = await de.snapshot();
+      assert.ok(Array.from(snap.costs).every(Number.isFinite));
+      de.step();
+      assert.ok(Number.isFinite((await de.snapshot()).bestCost));
+    } finally {
+      de.dispose();
+    }
+  }
+}
+console.log("PASS pasted ten-component centered populations and float32-equivalent search boundaries");
 for (const multiplicity of [[1], [2]]) {
   const problem = { ...problemFor(multiplicity), frequencyBands: false, passSamples: 32, stopSamples: 32 };
   const limits = bounds(problem);
@@ -403,7 +456,7 @@ console.log("PASS view-state kernel layouts");
   }
   assert.deepEqual(kernelFromQuery(kernelToQuery(sorted)).multiplicity, [1, 1, 2]);
   assert.deepEqual(kernelFromQuery(kernelToQuery(sorted, [1, 1, 1])).multiplicity, [1, 1, 2]);
-  for (const bad of ["", "1,2,3", "1,2,3,4,5", "0,2,3,4", "1,2,x,4", "1,2,3,4,", Array(9).fill("1,2,3,4").join(";"),
+  for (const bad of ["", "1,2,3", "1,2,3,4,5", "0,2,3,4", "1,2,x,4", "1,2,3,4,", Array(MAX_COMPONENTS + 1).fill("1,2,3,4").join(";"),
     Array(PARAMS_PER_COMPONENT + 2).fill(1).join(",")]) assert.throws(() => kernelFromQuery(bad), bad);
 }
 console.log("PASS kernel URL round trip with multiplicities");

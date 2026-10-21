@@ -634,7 +634,11 @@ perturbations of up to ±5% of each parameter's normal initialization range. The
 symmetrically near search bounds; pinned parameters remain fixed. It uses the displayed **Seed**
 for reproducibility and resumes only if optimization was already running. A kernel outside the
 current search bounds or with incompatible pinned parameters is rejected rather than silently
-changed; check the frequency-band and component settings. **New population** instead samples
+changed; check the frequency-band and component settings. **Use pasted parameters** turns off
+**Keep each component in its own frequency band** when a pasted frequency lies outside its band.
+Boundary values that round to the
+same float32 value as the bound are accepted, including pasted GPU results. Up to ten components
+are supported in the optimizer, pasted parameters, and shared URLs. **New population** instead samples
 the global initialization ranges. **Include the current kernel as a member**, grouped with
 these two buttons, retains the exact current kernel as member zero in either mode when checked;
 when unchecked, every member is sampled. The local neighborhood limits initialization only;

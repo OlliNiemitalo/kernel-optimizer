@@ -95,9 +95,10 @@ import { DifferentialEvolution } from "./de.js";
 import { ProjectedEvolution, workerSolvers } from "./projected-de.js";
 import { FineTuner } from "./finetune.js";
 import { remezSteps } from "./remez.js";
+import { withinBounds } from "./population.js";
 import { drawConvergence, drawDecomposition, drawDisc, drawError, drawProfile, populationPreview } from "./plots.js";
 import {
-  MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, kernelFromQuery, kernelToQuery,
+  MAX_COMPONENTS, MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, kernelFromQuery, kernelToQuery,
   maxError, multiplicities, problemFromQuery,
   parseParams, presetParams, nonnegativePresetParams, PRESETS, sampleGrid, separableChannels, sortByFrequency, withStride,
 } from "./problem.js";
@@ -180,7 +181,7 @@ function setMultiplicity(mult) {
 }
 
 function readProblem() {
-  const components = Math.min(8, Math.max(1, Math.round(num("components"))));
+  const components = Math.min(MAX_COMPONENTS, Math.max(1, Math.round(num("components"))));
   return {
     components,
     multiplicity: readMultiplicity(components),
@@ -1214,7 +1215,7 @@ function wire() {
       setRunning(false);
       if (id === "multiplicity") {
         const count = ($("multiplicity").value.match(/\d+/g) ?? []).length;
-        if (count >= 1 && count <= 8) $("components").value = count;
+        if (count >= 1 && count <= MAX_COMPONENTS) $("components").value = count;
       }
       const problem = readProblem();
       setMultiplicity(problem.multiplicity);
@@ -1289,11 +1290,19 @@ function wire() {
     }
     try {
       const params = sortByFrequency(parseParams(box.value));
+      if (params.length / PARAMS_PER_COMPONENT > MAX_COMPONENTS) throw new Error(`At most ${MAX_COMPONENTS} components are supported.`);
       setRunning(false);
-      $("components").value = params.length / PARAMS_PER_COMPONENT;
+      const n = params.length / PARAMS_PER_COMPONENT;
+      $("components").value = n;
       setMultiplicity(multiplicities(params));
+      // Frequency bands would reject the pasted kernel as a population center, so drop them.
+      const banded = bounds({ ...readProblem(), frequencyBands: true });
+      const outside = $("frequencyBands").checked && Array.from({ length: n }, (_, u) => u * PARAMS_PER_COMPONENT + 1)
+        .some((j) => !withinBounds(params[j], banded.foldLo[j], banded.foldHi[j]));
+      if (outside) $("frequencyBands").checked = false;
       setCurrent(params, "pasted parameters");
       discardDE({ include: state.current.params });
+      if (outside) setStatus(`${$("status").textContent} “Keep each component in its own frequency band” was turned off because the pasted frequencies don't fit it.`);
       box.hidden = true;
     } catch (e) {
       setStatus(e.message);
@@ -1494,7 +1503,7 @@ async function main() {
     try {
       const problemText = new URLSearchParams(location.search).get("problem");
       const problem = problemText === null ? null : problemFromQuery(problemText);
-      const { params, multiplicity } = kernelFromQuery(linked, 8, { sort: !problem });
+      const { params, multiplicity } = kernelFromQuery(linked, MAX_COMPONENTS, { sort: !problem });
       $("components").value = problem?.components ?? params.length / PARAMS_PER_COMPONENT;
       setMultiplicity(problem?.multiplicity ?? multiplicity);
       if (problem) {
