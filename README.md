@@ -218,6 +218,18 @@ optimized kernel may have huge, cancelling imaginary parts. For example, a multi
 kernel with ripple ±0.000064 had weights near $2 \cdot 10^6$, and $\sum_n |h_n(x)||v_n(y)|$ reached
 $5 \cdot 10^5$. 16-bit intermediates (relative precision $5 \cdot 10^{-4}$) then give errors far above 1.
 
+**Component visualizations.** The profile's **Components** switch shows each nonzero polynomial
+term $s^k \mathrm{Re}[a_k e^{\lambda s}]$ separately, including within a repeated-rate component.
+The bottom **Components** diagram expands each such term into separable products, sums these into
+the radial term (labeled `u0 x^0`, `u0 x^2`, etc.), then sums terms into whole components and the kernel.
+Individual separable products need not be circularly symmetric. Every image has its own peak scale;
+large intermediate peaks indicate cancellation, not an incorrectly scaled final kernel.
+
+The optimizer's top 2-D kernel preview adds the peak-normalized signed kernel to a dark-blue
+background in linear RGB, then clips the resulting display channels to [0, 1] before sRGB encoding.
+Negative lobes therefore darken the background. This is display-only; the kernel,
+optimization, blur rendering, and the bottom diagrams' gray/red colors are unchanged.
+
 **Rendering channels.** Instead, `separableChannels` in [`src/problem.js`](src/problem.js)
 decomposes the real kernel as a whole. In the real basis $f$ of all components' functions
 $t^k \cos(c x^2) e^{-bx^2}$ and $t^k \sin(c x^2) e^{-bx^2}$ ($t = 2bx^2$, $k < m$), the kernel is

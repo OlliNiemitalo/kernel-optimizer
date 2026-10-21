@@ -9,6 +9,7 @@ import { FineTuner } from "../src/finetune.js";
 import { chebyshev, optimalWeights, remezPolish } from "../src/remez.js";
 import { ProjectedEvolution } from "../src/projected-de.js";
 import { testViewControls } from './view-controls.js';
+import { testPlots } from './plots.js';
 import { populationPreview } from '../src/plots.js';
 import {
   MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, defaultProblem, formatParams, maxError, multiplicities, nonnegativePresetParams,
@@ -31,6 +32,8 @@ const unusedWeights = (params, multiplicity) => Math.max(0, ...multiplicity.flat
 
 testViewControls();
 console.log('PASS view-dependent control availability and diagnostic selection');
+testPlots();
+console.log('PASS component profile curves and radial decomposition intermediates');
 
 // Preview rows are stable across redraws, distinct, and cover small/large populations.
 for (const size of [0, 8, 24, 32, 512]) {

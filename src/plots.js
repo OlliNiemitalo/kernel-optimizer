@@ -1,6 +1,6 @@
 // Canvas 2-D plotting for profiles, errors, convergence, and the 2-D disc.
 import {
-  PARAMS_PER_COMPONENT, channelSide, componentChannels, componentProfile, multiplicities, profile, separableChannels,
+  channelSide, componentChannels, componentTerms, multiplicities, profile, separableChannels,
 } from "./problem.js";
 
 const COLORS = ["#4cc9f0", "#f72585", "#90be6d", "#f9c74f", "#b5179e", "#43aa8b", "#f3722c", "#577590"];
@@ -105,9 +105,8 @@ export function drawProfile(canvas, { best, label, population = [], transition, 
   const n = 600;
   const xs = Array.from({ length: n }, (_, k) => (k / (n - 1)) * xmax);
   const bestY = best ? xs.map((x) => profile(best, x)) : [];
-  const nc = best ? best.length / PARAMS_PER_COMPONENT : 0;
   const componentYs = best && showComponents
-    ? Array.from({ length: nc }, (_, u) => xs.map((x) => componentProfile(best, u, x)))
+    ? componentTerms(best).map((term) => xs.map((x) => profile(term.params, x)))
     : [];
   // Components can be much larger than the sum, so the y range grows to show them in full.
   const all = bestY.concat(...componentYs);
@@ -127,8 +126,8 @@ export function drawProfile(canvas, { best, label, population = [], transition, 
   ctx.fillRect(X(1 + transition), Y(tol), X(xmax) - X(1 + transition), Y(-tol) - Y(tol));
   line(ctx, X, Y, [0, 1, 1, 1 + transition, 1 + transition, xmax], [1, 1, 0, 0, 0, 0], "#5c677d", 1);
   for (const p of population) line(ctx, X, Y, xs, xs.map((x) => profile(p, x)), "#8b93a7", 1, 0.25);
-  componentYs.forEach((ys, u) => line(ctx, X, Y, xs, ys, COLORS[u % COLORS.length], 1, 0.8));
   if (best) line(ctx, X, Y, xs, bestY, "#ffffff", 2);
+  componentYs.forEach((ys, u) => line(ctx, X, Y, xs, ys, COLORS[u % COLORS.length], 1, 0.8));
   ctx.restore();
 }
 
@@ -178,13 +177,12 @@ export function drawConvergence(canvas, history) {
   ctx.restore();
 }
 
-// 2-D kernel K(√(x²+y²)) as light, normalized to its peak: positive values gray, negative values
-// red, both with brightness |K| / max |K| sRGB-encoded.
+// Signed kernel light added to a dark-blue background; the resulting display color is clipped to [0, 1].
 export function drawDisc(canvas, best, xmax) {
   const size = canvas.width;
   const ctx = canvas.getContext("2d");
   const img = ctx.createImageData(size, size);
-  const srgb = (v) => 255 * (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
+  const background = [0.002, 0.005, 0.02];
   if (best) {
     const lutN = 2048;
     const rmax = xmax * Math.SQRT2;
@@ -196,10 +194,7 @@ export function drawDisc(canvas, best, xmax) {
         const y = ((py + 0.5) / size - 0.5) * 2 * xmax;
         const v = lut[Math.min(lutN - 1, Math.round((Math.hypot(x, y) / rmax) * (lutN - 1)))] / peak;
         const o = (py * size + px) * 4;
-        const level = srgb(Math.min(Math.abs(v), 1));
-        img.data[o] = level;
-        img.data[o + 1] = v >= 0 ? level : 0;
-        img.data[o + 2] = v >= 0 ? level : 0;
+        for (let c = 0; c < 3; c++) img.data[o + c] = srgbLevel(Math.max(0, Math.min(1, background[c] + v)));
         img.data[o + 3] = 255;
       }
     }
@@ -209,12 +204,12 @@ export function drawDisc(canvas, best, xmax) {
 
 const srgbLevel = (v) => 255 * (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
 
-// Values (row-major w × h) as drawDisc colors, normalized to their own peak, which is returned.
+// Signed values (row-major w × h): positive gray, negative red, normalized to their own peak.
 function valueImage(ctx, values, w, h) {
-  const peak = values.reduce((m, v) => Math.max(m, Math.abs(v)), 0) || 1;
+  const peak = values.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
   const img = ctx.createImageData(w, h);
   values.forEach((value, i) => {
-    const v = value / peak;
+    const v = value / (peak || 1);
     const level = srgbLevel(Math.min(Math.abs(v), 1));
     img.data.set([level, v >= 0 ? level : 0, v >= 0 ? level : 0, 255], 4 * i);
   });
@@ -222,7 +217,7 @@ function valueImage(ctx, values, w, h) {
 }
 
 // How the kernel is formed, as real separable terms h(x) v(y) summed into the kernel: "components"
-// uses each component's own separable form, its terms summed into the component; "channels" uses
+// splits each polynomial term into separable products, then sums terms into components; "channels" uses
 // the renderer's real terms, in the order the blur adds them (smallest first), summed directly into
 // K, with a bracket for each group of groupTerms terms filtered by one horizontal and one vertical
 // pass. Each image is normalized to its own peak, printed under it.
@@ -234,15 +229,15 @@ export function drawDecomposition(canvas, best, transition, mode, { groupTerms =
   const S = 1 + transition;
   const xs = Array.from({ length: n }, (_, i) => ((i + 0.5) / n * 2 - 1) * S);
   const mult = best ? multiplicities(best) : [];
-  const channels = !best ? [] : mode === "components" ? componentChannels(best) : separableChannels(best, S, { pairs: false });
+  const terms = best ? componentTerms(best) : [];
+  const channels = !best ? [] : mode === "components"
+    ? terms.flatMap((term, termIndex) => componentChannels(term.params).map((ch) => ({ ...ch, component: term.component, termIndex })))
+    : separableChannels(best, S, { pairs: false });
   const leaves = [];
   const groups = channels.map((ch, j) => {
-    const caption = mode === "channels" ? ""
-      : mult[ch.component] === 1 ? `u${ch.component}`
-      : `u${ch.component}.${j - channels.findIndex((c) => c.component === ch.component)}`;
     const h = xs.map((x) => channelSide(ch.h, x * x));
     const v = xs.map((y) => channelSide(ch.v, y * y));
-    const group = { caption, component: ch.component, leaves: [] };
+    const group = { component: ch.component, termIndex: ch.termIndex, leaves: [] };
     // Re[h v] = h_re v_re + h_im (−v_im)
     for (const [hs, vs] of [[h.map((z) => z[0]), v.map((z) => z[0])], [h.map((z) => z[1]), v.map((z) => -z[1])]]) {
       if (!hs.some((a) => a) || !vs.some((a) => a)) continue;
@@ -251,7 +246,10 @@ export function drawDecomposition(canvas, best, transition, mode, { groupTerms =
       group.leaves.push(leaves.length);
       leaves.push({ tile, h: hs, v: vs, channel: j });
     }
-    if (group.leaves.length === 1) leaves[group.leaves[0]].caption = caption;
+    if (!group.leaves.length) {
+      group.leaves.push(leaves.length);
+      leaves.push({ tile: new Float64Array(n * n), h: h.map(() => 0), v: v.map(() => 0), channel: j });
+    }
     return group;
   });
   if (mode === "channels") {
@@ -261,21 +259,28 @@ export function drawDecomposition(canvas, best, transition, mode, { groupTerms =
   }
   const tileX = left + T + 20 + strip + 24;
   const colX = (col) => tileX + col * (T + gap);
-  // Terms into channels, channels into components (component form), then one sum into the kernel.
+  // Real products into channels, polynomial terms, components, and finally the kernel.
   const ops = [];
   const leafNodes = leaves.map((leaf, i) => ({ tile: leaf.tile, y: top + i * rowH + T / 2, col: 0 }));
   const combine = (children, caption = "") => {
-    if (children.length === 1) return children[0];
+    if (children.length === 1 && !caption) return children[0];
     const tile = new Float64Array(n * n);
     for (const c of children) for (let i = 0; i < tile.length; i++) tile[i] += c.tile[i];
     const node = { tile, y: (children[0].y + children.at(-1).y) / 2, col: Math.max(...children.map((c) => c.col)) + 1 };
     ops.push({ node, children, caption });
     return node;
   };
-  let nodes = groups.map((g) => ({ ...g, node: mode === "channels" ? null : combine(g.leaves.map((i) => leafNodes[i]), g.caption) }));
-  nodes = mode === "components"
-    ? mult.map((_, u) => combine(nodes.filter((g) => g.component === u).map((g) => g.node), `u${u}`))
-    : leafNodes;
+  let nodes = groups.map((g) => ({ ...g, node: mode === "channels" ? null : combine(g.leaves.map((i) => leafNodes[i])) }));
+  if (mode === "components") {
+    const termNodes = terms.map((term, termIndex) => ({
+      component: term.component,
+      node: combine(nodes.filter((g) => g.termIndex === termIndex).map((g) => g.node),
+        mult[term.component] === 1 ? "" : `u${term.component} x^${2 * term.power}`),
+    }));
+    nodes = mult.map((_, u) => combine(termNodes.filter((term) => term.component === u).map((term) => term.node), `u${u}`));
+  } else {
+    nodes = leafNodes;
+  }
   if (nodes.length) combine(nodes);
   const columns = Math.max(0, ...ops.map((o) => o.node.col)) + 1;
   canvas.style.width = `${colX(columns) - gap + 8}px`;

@@ -193,6 +193,23 @@ export function componentProfile(params, u, x) {
   return componentAt(params, u * PARAMS_PER_COMPONENT, x * x);
 }
 
+// Isolate each nonzero power of s, retaining the component's rate and parameter layout.
+export function componentTerms(params) {
+  return multiplicities(params).flatMap((m, component) => {
+    const offset = component * PARAMS_PER_COMPONENT;
+    const powers = Array.from({ length: m }, (_, power) => power)
+      .filter((power) => params[offset + 2 + 2 * power] || params[offset + 3 + 2 * power]);
+    return (powers.length ? powers : [0]).map((power) => {
+      const term = Array(PARAMS_PER_COMPONENT).fill(0);
+      term[0] = params[offset];
+      term[1] = params[offset + 1];
+      term[2 + 2 * power] = params[offset + 2 + 2 * power];
+      term[3 + 2 * power] = params[offset + 3 + 2 * power];
+      return { component, power, params: term };
+    });
+  });
+}
+
 // Kernel profile at s = x².
 export function profileAt(params, s) {
   let sum = 0;

@@ -263,13 +263,13 @@
             <div class="plot-controls">
               <label>Plot range <input id="xmax" type="number" min="1.2" max="10" step="0.1" value="2.5" /></label>
               <label class="check"><input id="showPopulation" type="checkbox" checked /> Population</label>
-              <label class="check"><input id="showComponents" type="checkbox" /> Components</label>
+              <label class="check" title="Show each component's polynomial terms separately: x^0, x^2, x^4, …"><input id="showComponents" type="checkbox" /> Components</label>
             </div>
             <div class="grid">
               <canvas id="profile" class="plot"></canvas>
               <div class="disc-wrap">
                 <canvas id="disc" width="320" height="320"></canvas>
-                <p class="note">The kernel K(x, y), normalized to its peak: positive values in gray levels, negative values in red, on the same brightness scale.</p>
+                <p class="note">The kernel K(x, y), normalized to its peak, added to a dark-blue background.</p>
               </div>
               <canvas id="error" class="plot"></canvas>
               <canvas id="convergence" class="plot"></canvas>
@@ -286,15 +286,17 @@
             <h3>How the kernel is formed</h3>
             <p class="note">The kernel K is a sum of separable terms, each a horizontal 1-D filter h(x) times a vertical one
               v(y), and it can be split into such terms in two ways, shown below. Each image is normalized to its own peak
-              (printed under it), in the colors of the kernel above, over |x|, |y| ≤ 1 + transition bandwidth.
+              (printed under it), with positive values in gray and negative values in red, over |x|, |y| ≤ 1 + transition bandwidth.
               <a data-readme="#3-from-components-to-separable-channels" href="https://github.com/OlliNiemitalo/kernel-optimizer#3-from-components-to-separable-channels">More in the README</a>.</p>
             <div class="decomposition">
               <figure>
                 <figcaption>Components</figcaption>
                 <p class="note">Each component split on its own, as in the article. Each row is a real term: h drawn as a
                   horizontal strip, v as a vertical one, and their product. A component is a complex Gaussian in x times
-                  one in y, whose real part is two terms (with multiplicity <i>m</i>, <i>m</i> such products). The terms
-                  add up to the components u0, u1, …, each circularly symmetric, and these to K. Peaks much larger than
+                  one in y, with polynomial factors for repeated rates. Separable products first add up to the
+                  radial polynomial terms u0 x^0, u0 x^2, … (the colored curves in the profile), then to the
+                  components u0, u1, …, and finally to K. Only the polynomial terms, whole components, and K are
+                  circularly symmetric; individual separable products need not be. Peaks much larger than
                   K's show cancellation between components.</p>
                 <canvas id="componentsFigure" aria-label="Components summed into the kernel"></canvas>
               </figure>
