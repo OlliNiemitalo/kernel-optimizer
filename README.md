@@ -65,7 +65,9 @@ weights are zero). Numbers are written exactly. The `problem` search parameter a
 component count and requested multiplicities, transition bandwidth, pass/stop sample counts,
 frequency-band constraint, negative-value penalty, and dense-grid sample count. Demo and solver
 settings are not shared. Older kernel-only links use the default problem settings.
-The address bar tracks the latest current kernel and problem, at the demo's 150 ms update cadence
+Built-in presets do not add kernel or problem parameters to the address bar; selecting a preset
+removes those parameters. **Copy link** can still explicitly share a preset.
+For optimized, pasted, or restored kernels, the address bar tracks the latest current kernel and problem, at the demo's 150 ms update cadence
 during optimization, even with demo following disabled or without WebGPU. Pausing or hiding/leaving
 the page flushes any pending update. Reopening a restored browser URL recovers the result, not
 the population or running optimizer. Browser session restoration is required; a sudden shutdown

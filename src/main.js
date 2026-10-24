@@ -122,7 +122,7 @@ const state = {
   history: [],
   populationSample: [],
   include: null, // kernel to include once in the next population
-  current: null, // { params, source, error, denseError }
+  current: null, // { params, source, preset, error, denseError }
   blur: null,
   world: null,
   source: null, // "world", "video", "image" or "procedural"
@@ -151,7 +151,11 @@ function saveKernelUrl() {
   if (kernelUrlTimer !== null) clearTimeout(kernelUrlTimer);
   kernelUrlTimer = null;
   if (!state.current) return;
-  const url = currentKernelUrl();
+  const url = state.current.preset ? new URL(location.href) : currentKernelUrl();
+  if (state.current.preset) {
+    url.searchParams.delete("kernel");
+    url.searchParams.delete("problem");
+  }
   if (url.href !== location.href) {
     try {
       history.replaceState(history.state, "", url);
@@ -233,9 +237,11 @@ function describeRanges(problem) {
 function setCurrent(params, source) {
   $("centerPopulation").disabled = state.busy;
   const problem = readProblem();
+  const preset = /^article (non-negative )?preset \((\d) components\)$/.exec(source);
   state.current = {
     params: Array.from(params),
     source,
+    preset: !!preset,
     error: maxError(params, sampleGrid(problem)),
     denseError: maxError(params, denseGrid(problem)),
   };
@@ -243,7 +249,6 @@ function setCurrent(params, source) {
     formatParams(state.current.params, problem, state.current.error) +
     `\n\n// Source: ${source}; ripple on the dense grid: ±${state.current.denseError.toFixed(6)}`;
   // The preset menu shows which preset is current, if any.
-  const preset = /^article (non-negative )?preset \((\d) components\)$/.exec(source);
   $("preset").value = preset ? `${preset[1] ? "nn" : ""}${preset[2]}` : "";
   requestKernelUrl();
   if ($("follow").checked) requestBlur(true);
