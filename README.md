@@ -967,7 +967,7 @@ candidates per second.
 | `src/projected-de.js`, `src/weight-worker.js`, `src/population.js` | Differential evolution with exact weights (variable projection) on CPU workers; shared population initialization |
 | `src/remez.js` | Exchange (dual simplex) linear minimax solver and Remez refinement of all parameters |
 | `src/blur.js` | WebGPU blur: WGSL compute and display shaders |
-| `src/world.js` | Animated 3D night street ray-cast on the GPU: procedural textures, puddles with traced reflections, glossy highlights; adaptive 4× antialiasing and procedural patterns box-filtered over the pixel footprint; the circle of confusion from the z-buffer |
+| `src/world.js` | Animated 3D night street ray-cast on the GPU: procedural textures, puddles with traced reflections, glossy highlights; adaptive 4× antialiasing and procedural patterns box-filtered over the pixel footprint; the circle of confusion from the z-buffer (in edge pixels, the samples' 1 / depth averaged with luminance weights, so a bright in-focus light's edge isn't partly blurred into bumps) |
 | `src/shapes.js` | Test scene ("Tetras"): three tetrahedra in a row against a black, starry background at infinity, ray-cast with 4× antialiasing; drag the picture to turn the view; the Scale slider (or the wheel over the picture) scales the tetrahedra about the middle one |
 | `src/video.js` | RGB-D video as a depth-of-field source: color over grayscale depth, or a color video with an inferno-coded depth video |
 | `tools/tum_rgbd_video.py` | Converts a [TUM RGB-D](https://cvg.cit.tum.de/data/datasets/rgbd-dataset) sequence to that format (fills depth holes, H.264) |

@@ -376,6 +376,13 @@ fn differs(a: vec4f, b: vec4f) -> bool {
   return abs(la - lb) > 0.1 * (la + lb) + 0.005 || abs(a.w - b.w) > 0.05 * max(a.w, b.w) + 1e-4;
 }
 
+// Weight of a sample's 1 / depth in an edge pixel: its luminance, so the brightest content keeps its
+// own blur radius. A plain average would give a bright in-focus light's partly covered edge pixels
+// part of the background's radius, spreading them into bumps around the light.
+fn depthWeight(a: vec4f) -> f32 {
+  return dot(a.rgb, vec3f(0.2126, 0.7152, 0.0722)) + 0.01;
+}
+
 // 2: where a pixel differs from a 4-neighbor (an edge or a small light), 3 more samples on a
 // rotated grid with half the footprint; result into scratch, as neighbors still read color.
 @compute @workgroup_size(8, 8)
@@ -390,16 +397,17 @@ fn refine(@builtin(global_invocation_id) id: vec3u) {
   if (edge) {
     let cam = camera(W.time);
     let px = 0.5 * PIXEL / f32(W.height);
-    sum += shade(cam, center(id) + vec2f(0.375, 0.125), px);
-    sum += shade(cam, center(id) + vec2f(-0.125, 0.375), px);
-    sum += shade(cam, center(id) + vec2f(-0.375, -0.375), px);
-    sum *= 0.25;
+    let a = shade(cam, center(id) + vec2f(0.375, 0.125), px);
+    let b = shade(cam, center(id) + vec2f(-0.125, 0.375), px);
+    let d = shade(cam, center(id) + vec2f(-0.375, -0.375), px);
+    let w = vec4f(depthWeight(c), depthWeight(a), depthWeight(b), depthWeight(d));
+    sum = vec4f(0.25 * (c.rgb + a.rgb + b.rgb + d.rgb), dot(w, vec4f(c.w, a.w, b.w, d.w)) / (w.x + w.y + w.z + w.w));
   }
   scratch[i] = sum;
 }
 
-// 3: final color, and the circle of confusion (linear in 1 / depth, so averaging 1 / depth
-// averages the samples' blur radii).
+// 3: final color, and the circle of confusion (linear in 1 / depth, so the weighted 1 / depth
+// is a weighted average of the samples' blur radii).
 @compute @workgroup_size(64)
 fn resolve(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= W.width * W.height) { return; }
