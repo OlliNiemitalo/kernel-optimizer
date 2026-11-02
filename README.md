@@ -26,9 +26,10 @@ pass, at a cost proportional to the blur radius rather than its area.
 
 Based on Olli Niemitalo,
 [Circularly symmetric convolution and lens blur](https://yehar.com/blog/?p=1495) (2010), extended
-with repeated rates (components of multiplicity up to 10) and real rates. With both, the component
-form is universal: it covers every circularly symmetric kernel with a finite number of separable
-rendering terms, at exactly that number (see [Universality](#universality)).
+with repeated rates (components of multiplicity up to 10) and real rates. With both, the components
+characterize exactly the circularly symmetric kernels of finite separable rank, each at its minimum
+number of rendering terms (see [Universality](#universality)). This is exact representability, not a
+universal approximation theorem.
 
 ## Running
 
@@ -356,9 +357,11 @@ Each image uses its own scale, printed below it.
 #### Universality
 
 Are complex and real components, with multiplicities, the most expressive kernels for a given
-number of rendering terms? Yes. Ignoring discretization and truncation, any circularly symmetric
-kernel that splits into $N$ separable terms is a sum of such components that costs exactly $N$
-terms.
+number of rendering terms? Yes, in the sense of exact representation. Ignoring discretization and
+truncation, any circularly symmetric kernel that splits into $N$ separable terms is a sum of such
+components that costs exactly $N$ terms, and no decomposition into arbitrary real 1-D filters needs
+fewer. The theorem below characterizes the kernels of finite separable rank; it is not a universal
+approximation theorem (see the limits after the proof).
 
 **Theorem.** Let $K(x, y) = \varphi(x^2 + y^2)$ on $\mathbb{R}^2$ with $\varphi$ continuous on $[0, \infty)$, and let its
 *separable rank* $N$ be the least number of real functions $h_n, v_n$ (of any kind) with
@@ -405,6 +408,22 @@ would be impossible, and a component with $c = 0$ would be charged $2m$ terms in
 at most 10 components of multiplicity at most 10, decays $b \in [0.2, 20]$ in differential
 evolution, and at most 32 rendering terms in the blur demo. The theorem says nothing about
 which structure is best for a given $N$; see [Reference results](#7-reference-results).
+
+What the theorem does not say:
+
+- **Most radial kernels have infinite separable rank.** For example, $\varphi(s) = e^{-s^2}$ is not an
+  exponential polynomial, so no finite number of terms represents it exactly. The disc target
+  itself is discontinuous, which is why the optimizer fits it in the minimax sense, with a transition band.
+- **Approximation, without a rate.** Uniform approximation is possible: on $[0, \infty)$ the function
+  $e^{-s}$ separates points and vanishes nowhere, so by the Stone–Weierstrass theorem, finite sums of
+  $e^{-ks}$ ($k = 1, 2, \dots$; real Gaussians, one term each) are dense in the continuous $\varphi$ that tend
+  to 0 at infinity, in the supremum norm over the whole plane. This gives no bound on the error for a given $N$,
+  and the weights of such approximations can grow large and cancel.
+- **Numerical conditioning.** A minimal-rank representation need not be well conditioned. The
+  multiplicity-6 example above has weights near $2 \cdot 10^6$; the rendering channels rebalance the
+  passes, but nothing bounds the weights in general.
+- **The optimizer.** Differential evolution and Remez refinement find local, not certified global, optima.
+- **The discrete renderer.** Sampling, truncation, finite precision and the app's limits are outside the theorem.
 
 ### 4. Discrete implementation (WebGPU)
 
