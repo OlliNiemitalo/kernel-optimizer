@@ -1,7 +1,7 @@
 // Remez-style minimax solvers for the kernel parameters (CPU, float64).
 //
 // chebyshev(): discrete linear Chebyshev approximation min_z max_j W_j |t_j − a_j·z| by the
-// single-point exchange (Stiefel) algorithm, i.e. the dual simplex method on m + 1 reference rows.
+// single-point exchange (Stiefel) algorithm, i.e. the simplex method on the LP dual, with m + 1 reference rows.
 // The weight may depend on the sign of the error (W⁺ when t_j > a_j·z, else W⁻).
 //
 // The kernel is linear in its weights (r_k, i_k) and nonlinear in decays and frequencies:
@@ -525,7 +525,7 @@ function newtonStep(p, live, active, lambda, delta, nu, scale) {
 
 // Nonlinear minimax refinement of all kernel parameters, as a generator yielding after each
 // iteration. Start: exchange-optimal weights for the given rates. Each iteration then tries
-//  1. a trust-region Gauss–Newton step (Osborne–Watson): the linearized minimax problem in new
+//  1. a Gauss–Newton step (the linearization of Osborne and Watson, with a trust region added): the linearized minimax problem in new
 //     weights and rate increments, solved by exchange, with rows |μ ẑ_i| ≤ δ bounding each
 //     rate's scaled change (warm-started reference);
 //  2. second-order Remez steps: Newton on the KKT system of the near-active extrema (degenerate

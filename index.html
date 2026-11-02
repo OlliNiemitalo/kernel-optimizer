@@ -247,7 +247,7 @@
               <label>Iterations <input id="remezIterations" type="number" min="1" max="1000" step="1" value="50" /></label>
               <details class="help">
                 <summary>How it works</summary>
-                <p class="note">Minimax on the dense grid (Dense grid samples per band, below), in double precision on the CPU. First solves the optimal weights for the current decays and frequencies exactly by an exchange (dual simplex) algorithm. Then each iteration tries a trust-region Gauss–Newton step whose linearized minimax problem is solved by exchange, and Newton steps on the equal-ripple (Remez) equations of the extremal points, keeping whichever lowers the ripple. Stops when no step improves. Usually converges in a few iterations from a kernel near a local optimum.</p>
+                <p class="note">Minimax on the dense grid (Dense grid samples per band, below), in double precision on the CPU. First solves the optimal weights for the current decays and frequencies exactly by an exchange algorithm (the simplex method on the dual linear program). Then each iteration tries a trust-region Gauss–Newton step whose linearized minimax problem is solved by exchange, and Newton steps on the equal-ripple (Remez) equations of the extremal points, keeping whichever lowers the ripple. Stops when no step improves. Usually converges in a few iterations from a kernel near a local optimum.</p>
               </details>
             </fieldset>
 

@@ -384,7 +384,10 @@ $\varphi(\cdot + v)$ of an $N$-term decomposition lies in $\mathrm{span}\{F_n\}$
 $\varphi(\cdot + v_1), \dots, \varphi(\cdot + v_d)$ of $W$, writing $\varphi(u + v) = \sum_i g_i(v)\, \varphi(u + v_i)$ is a
 $d$-term decomposition. So $N = d$.
 
-(3) *Finite rank forces exponential polynomials* (Levi-Civita, 1913; Anselone and Korevaar, 1964).
+(3) *Finite rank forces exponential polynomials.* This is the classical theorem on finite-dimensional
+translation-invariant function spaces: Levi-Civita (1913) for smooth functions on $\mathbb{R}$, Anselone and
+Korevaar (1964) for continuous ones on $\mathbb{R}$, and J. J. Stone (1960) for commutative semigroups such as
+$[0, \infty)$ (Laczkovich, 2020, Theorem A, gives the history). A direct argument for $[0, \infty)$:
 The translations $T_t f = f(\cdot + t)$, $t \ge 0$, map $W$ into itself. Choose points $u_1, \dots, u_d$ at which
 evaluation $E: W \to \mathbb{R}^d$ is injective. Then $M(t) = E\, T_t E^{-1}$ is a $d \times d$ matrix, continuous in $t$
 (its action on the basis is $\varphi(u_k + v_i + t)$), with $M(0) = I$ and $M(t + t') = M(t) M(t')$. A continuous
@@ -401,6 +404,12 @@ anti-triangular with $\binom{m_\mu - 1}{k}\, a_{\mu, m_\mu - 1} \ne 0$ on the an
 independent, so the rank over $\mathbb{C}$ is $\sum_\mu m_\mu$, which counts $2m$ for a complex-rate component and $m$
 for a real-rate one. A real kernel has the same rank over $\mathbb{R}$ as over $\mathbb{C}$ (both are the
 largest rank of its sample matrices). The per-component channels above attain this rank. ∎
+
+*Measurable kernels.* Continuity can be weakened to measurability, except at the center. Laczkovich
+(2020) extends Theorem A to measurable functions. On the semigroup $[0, \infty)$ there is one exponential
+besides $e^{\lambda s}$: the indicator of $s = 0$ (if $m(s_0) = 0$ for some $s_0 > 0$, then $m(s_0/n)^n = 0$, so
+$m = 0$ on $(0, \infty)$). So a measurable $\varphi$ of finite rank is a sum of components on $(0, \infty)$, and only its
+value at $s = 0$ may differ, which adds one term. That single point affects no blur.
 
 So for a budget of $N$ rendering terms, the kernels to search are exactly the component structures
 (multiplicities and rate types) costing at most $N$, and nothing else. Without real rates, odd $N$
@@ -798,7 +807,9 @@ generation is one jitted GPU call with no data read back:
 4. Bounds: reflect once at each bound, then clamp. Pinned parameters have both bounds at zero.
 5. The child replaces its target only if its cost is strictly lower.
 
-Search heuristics, mostly taken from the article's solutions:
+Search heuristics. The frequency bands and the reflection bounds $b \in [0.2, 20]$ come from the article's
+optimizer source (`phaseGaussParallelOpti.cpp` in its `phasegauss1.1.zip`); the initial ranges are this app's, fitted to the
+article's published sets:
 
 - Channel slot $k$ oscillates within $(1.14k + 0.5)\pi \pm 0.4\pi$; a complex-rate component of multiplicity $m$ spans
   the bands of the $m$ slots it occupies. Real rates ($c = 0$) shift the complex slots up by half a
@@ -806,8 +817,10 @@ Search heuristics, mostly taken from the article's solutions:
   0.47–0.51, 1.49–1.56 and 2.62, and two real terms at 0.83–0.84 and 1.97 (c, r; c, c, r; c, c, c, r; and with
   a real multiplicity 2). The unshifted slots would exclude these optima.
 - Initial decay $b \in [0.3,\ 1 + N_\text{ch}]$, where $N_\text{ch}$ is half the number of rendering terms
-  (the number of complex channels when all rates are complex).
-- Initial weights within $\pm 2 \cdot 2.5^{N_\text{ch} - 1}$.
+  (the number of complex channels when all rates are complex). The article's $N$-component sets have
+  decays up to 0.86, 1.96, 2.82, 4.34, 4.89 and 6.51 for $N = 1 \dots 6$.
+- Initial weights within $\pm 2 \cdot 2.5^{N_\text{ch} - 1}$. The article's largest weights grow from 1.86 to 162
+  over $N = 1 \dots 6$, about 2.4× per component.
 
 **Exact weights (variable projection, the default).** With **Solve weights exactly (CPU
 workers)** checked, differential evolution ([`src/projected-de.js`](src/projected-de.js)) searches
@@ -878,17 +891,20 @@ constraints, and lowering $\alpha$ until a reference multiplier reaches zero pic
 point. The new level is
 $\delta' = \delta + (|e_{j^*}| - \delta / W_{j^*}) / \sum |\lambda'| / W > \delta$, so the level rises
 monotonically to the optimum, where it equals the grid maximum (the certificate). This is Stiefel's
-exchange, i.e. the dual simplex method. The classical Remez rule (keep alternating signs) needs a
+exchange algorithm (Stiefel, 1960), which he showed to be a simplex method; here it is the simplex
+method on the dual linear program above. The classical Remez rule (keep alternating signs) needs a
 Haar system, which complex Gaussians are not; here the signs come from the dual vector instead.
 From any start, 9–23 exchanges (tens of milliseconds for 4000 grid points) solve the weights of
 2–6 components.
 
-*2. Gauss–Newton (Osborne–Watson)*: linearize in the rates around the current kernel; the unknowns
+*2. Gauss–Newton*: linearize in the rates around the current kernel, as Osborne and Watson (1969) did for
+nonlinear minimax approximation; the unknowns
 are the new weights and the rate increments, the columns are $\varphi_k$ and $\partial K / \partial \theta$.
 The subproblem is again linear minimax and is solved by the same exchange, warm-started from the
 previous reference. Extra rows $|\mu \tilde{\Delta\theta}_i| \le \delta$ (in units of the column's
 maximum kernel change) form a trust region, with $\mu$ adapted from the ratio of actual to
-predicted reduction.
+predicted reduction. The trust region is this app's safeguard; Osborne and Watson's convergence
+theory instead assumed the Haar condition.
 
 *3. Second-order Remez steps.* Gauss–Newton converges quadratically only when the error has
 $\dim(w, \theta) + 1$ extremal points at the ripple level. Starting from the article's 5-component set
@@ -976,6 +992,24 @@ last pair carries one term and costs as much as two.
 On an Intel UHD (Gen9) laptop GPU, differential evolution evaluates roughly 100,000–250,000
 candidates per second.
 
+### References
+
+- O. Niemitalo, [Circularly symmetric convolution and lens blur](https://yehar.com/blog/?p=1495) (2010), and
+  its source code, [phasegauss1.1.zip](https://yehar.com/blog/wp-content/uploads/2010/09/phasegauss1.1.zip)
+  (`phaseGaussParallelOpti.cpp`: the presets, the 200 + 200 grid, and the frequency bands).
+- T. Levi-Civita, "Sulle funzioni che ammettono una formula d'addizione del tipo
+  $f(x+y)=\sum_{i=1}^n X_i(x)Y_i(y)$", *Rend. R. Accad. Lincei* (5) 22 (1913), 181–183.
+- P. M. Anselone and J. Korevaar, "Translation invariant subspaces of finite dimension",
+  *Proc. Amer. Math. Soc.* 15 (1964), 747–752, [doi:10.1090/S0002-9939-1964-0169048-7](https://doi.org/10.1090/S0002-9939-1964-0169048-7).
+- J. J. Stone, *Exponential polynomials on commutative semigroups*, Applied Mathematics and Statistics
+  Laboratory Technical Note 14, Stanford University (1960).
+- M. Laczkovich, "The Levi-Civita equation in function classes", *Aequationes Math.* 94 (2020), 689–701,
+  [doi:10.1007/s00010-019-00686-1](https://doi.org/10.1007/s00010-019-00686-1) (open access; Theorem A and its history).
+- E. Stiefel, "Note on Jordan elimination, linear programming and Tchebycheff approximation",
+  *Numer. Math.* 2 (1960), 1–17, [doi:10.1007/BF01386203](https://doi.org/10.1007/BF01386203).
+- M. R. Osborne and G. A. Watson, "An algorithm for minimax approximation in the nonlinear case",
+  *Comput. J.* 12 (1969), 63–68, [doi:10.1093/comjnl/12.1.63](https://doi.org/10.1093/comjnl/12.1.63).
+
 ## Project layout
 
 | Path | Contents |
@@ -984,7 +1018,7 @@ candidates per second.
 | `src/model.js`, `src/trig.js` | Traced (jax-js) kernel profile and accurate sine and cosine |
 | `src/de.js`, `src/finetune.js` | Differential evolution and gradient fine-tuning |
 | `src/projected-de.js`, `src/weight-worker.js`, `src/population.js` | Differential evolution with exact weights (variable projection) on CPU workers; shared population initialization |
-| `src/remez.js` | Exchange (dual simplex) linear minimax solver and Remez refinement of all parameters |
+| `src/remez.js` | Exchange (simplex on the dual linear program) minimax solver and Remez refinement of all parameters |
 | `src/blur.js` | WebGPU blur: WGSL compute and display shaders |
 | `src/world.js` | Animated 3D night street ray-cast on the GPU: procedural textures, puddles with traced reflections, glossy highlights; adaptive 4× antialiasing and procedural patterns box-filtered over the pixel footprint; the circle of confusion from the z-buffer (in edge pixels, the samples' 1 / depth averaged with luminance weights, so a bright in-focus light's edge isn't partly blurred into bumps) |
 | `src/shapes.js` | Test scene ("Tetras"): three tetrahedra in a row against a black, starry background at infinity, ray-cast with 4× antialiasing; drag the picture to turn the view; the Scale slider (or the wheel over the picture) scales the tetrahedra about the middle one |
