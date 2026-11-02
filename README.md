@@ -26,7 +26,9 @@ pass, at a cost proportional to the blur radius rather than its area.
 
 Based on Olli Niemitalo,
 [Circularly symmetric convolution and lens blur](https://yehar.com/blog/?p=1495) (2010), extended
-with repeated rates (components of multiplicity up to 10).
+with repeated rates (components of multiplicity up to 10) and real rates. With both, the component
+form is universal: it covers every circularly symmetric kernel with a finite number of separable
+rendering terms, at exactly that number (see [Universality](#universality)).
 
 ## Running
 
@@ -62,9 +64,10 @@ for the optimizer.
 just the current kernel, as `?kernel=b,c,r,i;b,c,r,i,r1,i1;…`: components separated by `;`, each
 with $2 + 2m$ numbers for multiplicity $m$ (so the count gives the multiplicity, even when the top
 weights are zero). Numbers are written exactly. The `problem` search parameter also records the
-component count and requested multiplicities, transition bandwidth, pass/stop sample counts,
+component count and requested multiplicities and rate types, transition bandwidth, pass/stop sample counts,
 frequency-band constraint, negative-value penalty, and dense-grid sample count. Demo and solver
-settings are not shared. Older kernel-only links use the default problem settings.
+settings are not shared. Older kernel-only links use the default problem settings, and older problem
+settings without rate types use complex rates.
 Built-in presets do not add kernel or problem parameters to the address bar; selecting a preset
 removes those parameters. **Copy link** can still explicitly share a preset.
 For optimized, pasted, or restored kernels, the address bar tracks the latest current kernel and problem, at the demo's 150 ms update cadence
@@ -173,13 +176,26 @@ $$
 
 with $a_0 = B$ and $a_1 = A$ above. The term $a_k s^k e^{\lambda s}$ is $k!\,a_k$ times the $k$-th divided
 difference of $e^{\mu s}$ over $k + 1$ rates $\mu$ that all tend to $\lambda$. Multiplicity 1 is a single
-component and 2 a merged pair; the app supports up to 10. The blur demo renders at most 16
-channels in total.
+component and 2 a merged pair; the app supports up to 10. The blur demo renders at most 32
+rendering terms (16 complex channels for a uniform radius, 16 pass groups for a varying one).
 
 The full kernel is a sum of components. Parameters are stored as 22 numbers per component
 $[b, c, r_0, i_0, r_1, i_1, \dots, r_9, i_9]$ ($r_0 = r_w$, $i_0 = i_w$), with the weights of unused
 powers of $s$ pinned to zero. A copied view state records this as `kernelStride`; older view states
 without it have six numbers per component and are converted.
+
+A component with a **real rate**, $c = 0$, is a Gaussian times a real polynomial,
+
+$$
+K(s) = R(s)\, e^{-bs}, \qquad R(s) = \sum_{k=0}^{m-1} r_k s^k ,
+$$
+
+and its weights $i_k$ have no effect ($\sin 0 = 0$). It costs only $m$ rendering terms instead of $2m$
+(below), so odd numbers of terms become possible. The **Rate types** setting chooses per component:
+`c` (complex, the default) or `r` (real), e.g. `c, c, r`. A real-rate component's $c$ and $i_k$ are
+pinned to zero. Kernels need no new format: any component with $c = 0$ is real, the same way
+multiplicity is read from the highest nonzero weight. Under these settings, the optimizer shows the
+number of rendering terms the chosen structure costs, per component (e.g. `Rendering terms: 5 (2 + 2 + 1)`).
 
 ### 3. From components to separable channels
 
@@ -227,6 +243,9 @@ $$
   anti-diagonal. Its rank is $2m$, and each channel's $\mathrm{Re}\,[h v] = h_\mathrm{re} v_\mathrm{re} - h_\mathrm{im} v_\mathrm{im}$
   adds at most 2. A multiplicity-$m$ component therefore costs exactly as many channels as $m$
   single components.
+- **Real rate → $m$ real terms.** With $c = 0$ the same channels are real, so each adds one term
+  $h_j v_j$. The coefficient matrix is the single anti-triangular block with $\binom{m-1}{j} r_{m-1} \ne 0$ on
+  the anti-diagonal, of rank $m$, so $m$ terms are needed.
 
 These per-component forms show what is possible, but the renderer doesn't use them: their passes
 can be far larger than the kernel. Only the real part of $\sum h v$ is the kernel, and an
@@ -239,8 +258,35 @@ term $s^k \mathrm{Re}[a_k e^{\lambda s}]$ separately, including within a repeate
 The bottom **Components** diagram expands each such term into separable products, sums these into
 the radial term (labeled `u0 x^0`, `u0 x^2`, etc.), then sums terms into whole components and the kernel.
 Stages with only one input reuse its image rather than repeating it; coincident labels share that tile.
+Each sum is drawn with right-angle brackets joining its summed images to the result, marked with ∑.
 Individual separable products need not be circularly symmetric. Every image has its own peak scale;
 large intermediate peaks indicate cancellation, not an incorrectly scaled final kernel.
+
+Splitting each polynomial term on its own is redundant, so this diagram has more rows than
+**Rendering terms**. The term $s^k$ expands binomially into $k + 1$ complex channels, that is $2(k + 1)$
+real products, so a multiplicity-$m$ component gets $m(m + 1)$ rows, but its rank is only $2m$
+(for a real rate, $m(m + 1)/2$ real products and rank $m$).
+Products from different terms with the same horizontal factor $x^{2j} e^{\lambda x^2}$ merge into a
+single channel $x^{2j} \times Q_j$ (above). For example, the $s^0$ term's $e^{\lambda x^2} \cdot e^{\lambda y^2}$
+and the $s^1$ term's $e^{\lambda x^2} \cdot y^2 e^{\lambda y^2}$ merge. With multiplicities 2, 1, the diagram shows
+$6 + 2 = 8$ products, while the renderer uses $4 + 2 = 6$ terms. This redundancy exists only in the
+diagram. The optimization parameters have no redundancy: each power has one weight $a_k$, and a
+component's $2m$ real weights match its $2m$ rendering terms (a real rate's $m$ weights $r_k$, its $m$ terms).
+The diagram keeps the per-term split so that each colored curve in the profile has its own tile.
+
+The parameters still have a few exact symmetries, none tied to this diagram:
+- Swapping components of equal multiplicity and rate type leaves the kernel unchanged. With the
+  frequency-range constraint on, each complex-rate slot has its own $c$ range, which mostly removes this.
+  Presets and pasted or linked kernels are sorted by $c$ to match those ranges.
+- $(c, i_k)$ and $(-c, -i_k)$ give the same kernel (complex conjugation). The bounds keep $c \ge 0$.
+- At $c = 0$ the weights $i_k$ multiply $\sin 0 = 0$ and have no effect. Such a component is a real
+  rate: the solvers leave $c$ and $i_k$ out (differential evolution pins them to zero), and the renderer
+  gives it $m$ terms.
+
+Two components with nearly equal rates are close to one multiplicity-2 component, so near that point
+the problem is ill-conditioned. Two real Gaussians with free decays tend to run into this: their
+best fit is the limit of coinciding rates with cancelling weights, a real multiplicity-2 component,
+which has the same cost and no cancellation (see [Reference results](#7-reference-results)).
 
 The optimizer's top 2-D kernel preview adds the peak-normalized signed kernel to a dark-blue
 background in linear RGB, then clips the resulting display channels to [0, 1] before sRGB encoding.
@@ -273,8 +319,9 @@ All terms together reproduce the components' sum to rounding (about $10^{-14}$ r
 symmetry: for preset 6, dropping one of its 12 terms already deviates by $1.8 \cdot 10^{-3}$ of the peak, no
 better than the full 5-component preset with as many terms, which stays circular.
 
-The real rank is at most twice the number of rates, so this needs no more channels than the
-per-component forms. Negligible terms ($|e_j| < 10^{-14} \max |e|$) are dropped. A channel's pass is
+The real rank is at most twice the number of rates (once for real rates), so this needs no more channels than the
+per-component forms. Negligible terms ($|e_j| < 10^{-14} \max |e|$) are dropped. Real rates contribute
+only their cosine functions to $f$, since their sine functions vanish. A channel's pass is
 then a sum over components of $\bigl(C(x^2)\cos(cx^2) + S(x^2)\sin(cx^2)\bigr)e^{-bx^2}$, with
 complex polynomials $C$ and $S$. Here $\sum_n |h_n||v_n|$ stays near the kernel's own size:
 
@@ -306,6 +353,59 @@ low-precision accumulator, small terms added to a large sum would be lost), summ
 kernel. Brackets mark the pass groups (below). A single term is not circularly symmetric.
 Each image uses its own scale, printed below it.
 
+#### Universality
+
+Are complex and real components, with multiplicities, the most expressive kernels for a given
+number of rendering terms? Yes. Ignoring discretization and truncation, any circularly symmetric
+kernel that splits into $N$ separable terms is a sum of such components that costs exactly $N$
+terms.
+
+**Theorem.** Let $K(x, y) = \varphi(x^2 + y^2)$ on $\mathbb{R}^2$ with $\varphi$ continuous on $[0, \infty)$, and let its
+*separable rank* $N$ be the least number of real functions $h_n, v_n$ (of any kind) with
+$K(x, y) = \sum_{n=1}^N h_n(x)\, v_n(y)$. Then $N$ is finite if and only if $\varphi$ is a finite sum of
+components with distinct rates (taking $c \ge 0$),
+
+$$
+\varphi(s) = \sum_{u\,:\,c_u > 0} \mathrm{Re}\bigl[P_u(s)\, e^{\lambda_u s}\bigr] + \sum_{u\,:\,c_u = 0} R_u(s)\, e^{-b_u s},
+$$
+
+with complex polynomials $P_u$ and real polynomials $R_u$ of degree $m_u - 1$. Then
+$N = \sum_{c_u > 0} 2m_u + \sum_{c_u = 0} m_u$, the app's count of rendering terms. ($K$ is integrable exactly when every $b_u > 0$.)
+
+*Proof.* (1) *Reduce to φ(u + v).* Since $x^2, y^2 \ge 0$, a decomposition $\varphi(u + v) = \sum_n F_n(u) G_n(v)$ on
+$[0, \infty)^2$ gives $K = \sum_n F_n(x^2) G_n(y^2)$, and restricting a decomposition of $K$ to $x, y \ge 0$ with
+$u = x^2$, $v = y^2$ gives one of $\varphi(u + v)$. So $N$ is the rank of the kernel $\varphi(u + v)$ on $[0, \infty)^2$.
+
+(2) *Rank is a dimension.* Let $W = \mathrm{span}\{\varphi(\cdot + v) : v \ge 0\}$ and $d = \dim W$. Every section
+$\varphi(\cdot + v)$ of an $N$-term decomposition lies in $\mathrm{span}\{F_n\}$, so $d \le N$. Conversely, with a basis
+$\varphi(\cdot + v_1), \dots, \varphi(\cdot + v_d)$ of $W$, writing $\varphi(u + v) = \sum_i g_i(v)\, \varphi(u + v_i)$ is a
+$d$-term decomposition. So $N = d$.
+
+(3) *Finite rank forces exponential polynomials* (Levi-Civita, 1913; Anselone and Korevaar, 1964).
+The translations $T_t f = f(\cdot + t)$, $t \ge 0$, map $W$ into itself. Choose points $u_1, \dots, u_d$ at which
+evaluation $E: W \to \mathbb{R}^d$ is injective. Then $M(t) = E\, T_t E^{-1}$ is a $d \times d$ matrix, continuous in $t$
+(its action on the basis is $\varphi(u_k + v_i + t)$), with $M(0) = I$ and $M(t + t') = M(t) M(t')$. A continuous
+matrix semigroup is $M(t) = e^{tA}$. Hence $\varphi(t) = (T_t \varphi)(0) = \alpha^\mathsf{T} e^{tA} \beta$ for some vectors
+$\alpha, \beta$: a sum of $P_\mu(t)\, e^{\mu t}$ over the eigenvalues $\mu$ of the real matrix $A$, with
+$\deg P_\mu$ below the Jordan block size. As $\varphi$ is real, nonreal $\mu$ come in conjugate pairs with
+$P_{\bar\mu} = \overline{P_\mu}$, which give $\mathrm{Re}[2 P_\mu e^{\mu s}]$, a complex-rate component. A real $\mu$ gives
+$\mathrm{Re}\,P_\mu(s)\, e^{\mu s}$, a real-rate component.
+
+(4) *The rank of such a sum.* Over $\mathbb{C}$, $\varphi = \sum_\mu P_\mu e^{\mu s}$ with each nonreal rate counted with
+its conjugate. Expanding $(u + v)^k$ binomially as in the channels above, the coefficient matrix of
+$\varphi(u + v)$ in the functions $u^k e^{\mu u}$ and $v^l e^{\mu v}$ is block diagonal over $\mu$. Each block is
+anti-triangular with $\binom{m_\mu - 1}{k}\, a_{\mu, m_\mu - 1} \ne 0$ on the anti-diagonal. These functions are linearly
+independent, so the rank over $\mathbb{C}$ is $\sum_\mu m_\mu$, which counts $2m$ for a complex-rate component and $m$
+for a real-rate one. A real kernel has the same rank over $\mathbb{R}$ as over $\mathbb{C}$ (both are the
+largest rank of its sample matrices). The per-component channels above attain this rank. ∎
+
+So for a budget of $N$ rendering terms, the kernels to search are exactly the component structures
+(multiplicities and rate types) costing at most $N$, and nothing else. Without real rates, odd $N$
+would be impossible, and a component with $c = 0$ would be charged $2m$ terms instead of $m$. The app's own limits still apply:
+at most 10 components of multiplicity at most 10, decays $b \in [0.2, 20]$ in differential
+evolution, and at most 32 rendering terms in the blur demo. The theorem says nothing about
+which structure is best for a given $N$; see [Reference results](#7-reference-results).
+
 ### 4. Discrete implementation (WebGPU)
 
 See [`src/blur.js`](src/blur.js). The **uniform-radius path**, for a disc radius of $R$ pixels,
@@ -316,7 +416,8 @@ source-dependent taps do not use the uniform path's sliding tap window.
 1. **Taps.** Use $t = -K \dots K$ with $K = \lceil R(1+\tau) \rceil$, evaluating each 1-D kernel at
    $(t/R)^2$. Compute tap values in double precision on the CPU and upload them as complex f32
    pairs (separate tables for $h$ and $v$).
-2. **One channel at a time.** For each channel $n$, run a horizontal pass, then a vertical pass
+2. **One channel at a time.** A channel is a pair of rendering terms as one complex filter (the last
+   channel holds a single term when the count is odd). For each channel $n$, run a horizontal pass, then a vertical pass
    that adds its result into an accumulator:
    $$m(x, y) = \sum_t I(x + t, y)\, h_n(t), \qquad A(x, y) \mathrel{+}= \sum_t \mathrm{Re}\,\bigl[m(x, y + t)\, v_n(t)\bigr].$$
    Only one channel's complex intermediate $m$ exists at a time, so memory does not grow with
@@ -349,8 +450,10 @@ channels at once would take channels × that.
 
 #### Pass groups
 
-For a varying radius, the terms are processed in equal groups of $G$ (**Terms per pass**; only
-splits into equal groups are offered, by default two groups). One horizontal pass filters a
+For a varying radius, the terms are processed in groups of $G$ (**Terms per pass**, by default two
+groups). For each number of groups $n$, the smallest size $G = \lceil T/n \rceil$ is offered. When $G$
+doesn't divide $T$, the last group has $T - (n-1)G$ terms and its passes use a shader compiled for that
+size, so no pass filters padding. One horizontal pass filters a
 group's $G$ terms, storing $G$ real 4-lane intermediates per pixel (16 bytes each in f32, 8 packed),
 and one vertical pass filters them and adds their sum into the accumulator. Only the horizontal
 taps are stored: a term's vertical taps are the same times $\mathrm{sign}(e_j)$, which the horizontal
@@ -358,7 +461,8 @@ pass applies to its output. Larger groups share each source pixel's lookups (rad
 entry, occlusion test) among more terms and need fewer passes, at the cost of intermediate memory
 and registers; the horizontal outputs per thread shrink as $G$ grows to bound the accumulators
 ($\lfloor 16/G \rfloor$, at most 8; $\lfloor 8/G \rfloor$ when interpolating). Every split gives
-the same image up to f32 summation order (a GPU test checks all splits of preset 6).
+the same image up to f32 summation order (a GPU test checks all splits of preset 6 and of a
+5-term kernel with a real rate, whose splits into 2 + 2 + 1 and 3 + 2 terms have a shorter last group).
 
 #### Spatially varying radius
 
@@ -627,7 +731,7 @@ differential evolution, the fine-tuning loss, and the displayed ripple alike. Th
 the article's two "almost no negative values" sets, which it gives in the separable form
 $(c + d i)^2 e^{(a + bi)s}$; in this app's parameters that is $b \leftarrow -a$, $c \leftarrow b$,
 $r = c^2 - d^2$, $i = -2cd$. They load with $w = 100$, at which the 1-component set is about
-equiripple, and without the per-slot frequency bands, which they don't follow (one of the
+equiripple, and without the frequency-range constraint, which they don't follow (one of the
 2-component set's rates is almost real).
 
 **Population around current** replaces the population with a local search neighborhood around
@@ -636,8 +740,8 @@ perturbations of up to ±5% of each parameter's normal initialization range. The
 symmetrically near search bounds; pinned parameters remain fixed. It uses the displayed **Seed**
 for reproducibility and resumes only if optimization was already running. A kernel outside the
 current search bounds or with incompatible pinned parameters is rejected rather than silently
-changed; check the frequency-band and component settings. **Use pasted parameters** turns off
-**Keep each component in its own frequency band** when a pasted frequency lies outside its band.
+changed; check the frequency-range constraint and the component settings (multiplicities, rate types). **Use pasted parameters** turns off
+**Constrain rate frequency ranges heuristically** when a pasted frequency lies outside its band.
 Boundary values that round to the
 same float32 value as the bound are accepted, including pasted GPU results. Up to ten components
 are supported in the optimizer, pasted parameters, and shared URLs. **New population** instead samples
@@ -655,7 +759,7 @@ population, preserving its members, generation count and random state. This allo
 negative-gain ramps: pause, change gain, then continue. The faint population curves use a stable
 subset of members and do not reshuffle when re-scored. The highlighted best member can change
 under the new objective. Convergence history is cleared because
-costs under different objectives are not comparable. The frequency-band option (under
+costs under different objectives are not comparable. **Constrain rate frequency ranges heuristically** (under
 **Differential evolution**; Remez refinement and fine-tuning ignore it) is handled the same way: it
 constrains future trial candidates without replacing existing members. Changes to component structure, population
 size, DE parameters, search mode or seed discard the population, so the button returns to Start.
@@ -677,14 +781,18 @@ generation is one jitted GPU call with no data read back:
 
 Search heuristics, mostly taken from the article's solutions:
 
-- Channel slot $k$ oscillates within $(1.14k + 0.5)\pi \pm 0.4\pi$; a component of multiplicity $m$ spans
-  the bands of the $m$ slots it occupies.
-- Initial decay $b \in [0.3,\ 1 + N_\text{ch}]$.
+- Channel slot $k$ oscillates within $(1.14k + 0.5)\pi \pm 0.4\pi$; a complex-rate component of multiplicity $m$ spans
+  the bands of the $m$ slots it occupies. Real rates ($c = 0$) shift the complex slots up by half a
+  slot per real term: without the constraint, one real term put the complex rates at slots
+  0.47–0.51, 1.49–1.56 and 2.62, and two real terms at 0.83–0.84 and 1.97 (c, r; c, c, r; c, c, c, r; and with
+  a real multiplicity 2). The unshifted slots would exclude these optima.
+- Initial decay $b \in [0.3,\ 1 + N_\text{ch}]$, where $N_\text{ch}$ is half the number of rendering terms
+  (the number of complex channels when all rates are complex).
 - Initial weights within $\pm 2 \cdot 2.5^{N_\text{ch} - 1}$.
 
 **Exact weights (variable projection, the default).** With **Solve weights exactly (CPU
 workers)** checked, differential evolution ([`src/projected-de.js`](src/projected-de.js)) searches
-only the decays and frequencies, $2N$ dimensions instead of $2N + 2N_\text{ch}$ (all weights). Each
+only the decays and frequencies (only $b$ for real rates): $2N$ dimensions instead of $2N + 2N_\text{ch}$ (all weights) when all $N$ rates are complex. Each
 candidate's weights are the minimax optimum for its rates, solved by the exchange algorithm of
 the Remez refinement (below) on the DE grid, so its cost is
 $\delta(\theta) = \min_w \max_j W_j |t_j - K(x_j; \theta, w)|$. The weights are thereby always exactly
@@ -730,6 +838,8 @@ $w = (r_0, i_0, r_1, i_1, \dots)$ and nonlinear only in the rates $\theta = (b, 
 $$
 K(x) = \sum_k w_k \varphi_k(s; \theta), \qquad \varphi \in \{s^q e^{-bs}\cos cs,\ s^q e^{-bs}\sin cs\}_{q < m},\quad s = x^2.
 $$
+
+A real rate has only the functions $s^q e^{-bs}$, weights $r_q$ and rate $b$; its $c$ and $i_q$ stay zero.
 
 *1. Optimal weights for fixed rates* are a discrete linear Chebyshev problem,
 $\min_w \max_j W_j |t_j - \Phi_j w|$, with the negative-value penalty as a sign-dependent weight
@@ -794,7 +904,7 @@ $10^{-6}$):
 In the browser, preset 5 took 6.4 s (with the blur re-rendering every improvement), where 3000
 gradient fine-tuning steps took 75 s to reach ±0.004084. The refined kernels also have smaller
 weights (5 components: $\sum |r| + |i|$ 81 instead of 190). Refinement is local and ignores the
-frequency bands. From far-off starts it can be slow or end in a worse optimum: the 6-component set
+frequency-range constraint. From far-off starts it can be slow or end in a worse optimum: the 6-component set
 with 1% parameter noise (ripple ±1.5) reached only ±0.00197 in 50 iterations. Use differential
 evolution to get near a good basin first.
 
@@ -815,6 +925,34 @@ All ripples below are measured on the dense grid ($\tau = 0.2$):
 
 The article's own ripple figures were measured on its sparser 200 + 200 grid, which is why they
 look slightly better.
+
+**Ripple per number of rendering terms.** Best of three projected-DE runs (population 48, 250
+generations, 200 + 200 grid), each Remez refined on 1000 + 1000 points. A later search without the
+frequency-range constraint (four seeds, 300 generations) found the same optima for the mixed and
+all-single structures; with the constraint as it is now, differential evolution alone comes within
+$10^{-4}$ of them:
+
+| Terms | Multiplicities | Rate types | Ripple |
+|---|---|---|---|
+| 2 | 1 | c | ±0.2324 |
+| 2 | 2 (or 1, 1) | r (r, r) | ±0.3261 |
+| 3 | 1, 1 | c, r | ±0.1315 |
+| 3 | 3 (or 1, 1, 1) | r (r, r, r) | ±0.2683 |
+| 4 | 1, 1 | c, c | ±0.07593 |
+| 4 | 1, 2 (or 1, 1, 1) | c, r (c, r, r) | ±0.09050 |
+| 4 | 2 | c | ±0.1165 |
+| 4 | 4 (or 1, 1, 1, 1) | r (r, r, r, r) | ±0.1982 |
+| 5 | 1, 1, 1 | c, c, r | ±0.04459 |
+| 5 | 2, 1 | c, r | ±0.06241 |
+| 6 | 1, 1, 1 | c, c, c | ±0.02653 |
+| 6 | 1, 1, 2 (or 1, 1, 1, 1) | c, c, r (c, c, r, r) | ±0.03023 |
+
+In these runs, all-complex single components stay best for even numbers of terms. A real Gaussian
+fills an odd budget well: 3 and 5 terms lie between their even neighbors. Separate real rates
+converge to a common rate, so real multiplicity does as well as several real components. An odd
+number of terms saves work in the varying-radius blur, which filters real terms in groups
+(the last group can be smaller). The uniform-radius blur filters complex pairs, so there its
+last pair carries one term and costs as much as two.
 
 On an Intel UHD (Gen9) laptop GPU, differential evolution evaluates roughly 100,000–250,000
 candidates per second.

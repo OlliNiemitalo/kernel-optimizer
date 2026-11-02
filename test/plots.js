@@ -85,7 +85,8 @@ export function testPlots() {
         const tiles = diagram.images.filter((image) => image.width === n && image.height === n);
         // Two real products per component, one component sum, and a kernel sum only if needed.
         assert.equal(tiles.length, 3 * count + (count > 1 ? 1 : 0));
-        assert.equal(diagram.labels.filter(({ text }) => text === "=").length, tiles.length);
+        assert.equal(diagram.labels.filter(({ text }) => text === "=").length, 2 * count);
+        assert.equal(diagram.labels.filter(({ text }) => text === "∑").length, tiles.length - 2 * count);
         checkImage(diagram.labels.find(({ text }) => text.startsWith("K ")).image, presetParams(count));
       }
       for (const params of [

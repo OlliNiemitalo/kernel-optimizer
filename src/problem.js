@@ -1,8 +1,10 @@
 // Problem definition for circularly symmetric disc kernels built from phased Gaussians.
 // Component u: Re[P(x²) e^{λ x²}], λ = −b + ic, P(s) = Σ_k a_k s^k, a_k = r_k − i·i_k, that is
 // Σ_k x^{2k} (cos(c x²) r_k + sin(c x²) i_k) exp(-b x²), params laid out as [b, c, r₀, i₀, r₁, i₁, …].
-// Multiplicity m (terms k < m in use) is the limit of m coinciding rates and costs m complex
-// channels per pass; unused terms are zero. The same 1-D profile, with x² → x² + y², is the 2-D kernel.
+// Multiplicity m (terms k < m in use) is the limit of m coinciding rates and costs 2m real rendering
+// terms; unused terms are zero. A component with c = 0 has a real rate: its i weights are inert
+// (sin 0 = 0), so it is R(s) e^{−b s} with a real polynomial R, and costs only m rendering terms.
+// The same 1-D profile, with x² → x² + y², is the 2-D kernel.
 
 export const MAX_MULTIPLICITY = 10;
 export const MAX_COMPONENTS = 10;
@@ -85,16 +87,30 @@ export function defaultProblem() {
   };
 }
 
-// Per component, 1 + the highest power of s with a nonzero weight (at least 1).
+// Per component, 1 + the highest power of s with a nonzero weight (at least 1). The inert i weights
+// of a real-rate component don't count.
 export function multiplicities(params) {
   const n = params.length / PARAMS_PER_COMPONENT;
   return Array.from({ length: n }, (_, u) => {
     let m = MAX_MULTIPLICITY;
     const k = u * PARAMS_PER_COMPONENT;
-    while (m > 1 && !params[k + 2 * m] && !params[k + 2 * m + 1]) m--;
+    const real = params[k + 1] === 0;
+    while (m > 1 && !params[k + 2 * m] && (real || !params[k + 2 * m + 1])) m--;
     return m;
   });
 }
+
+// Per component, whether its rate is real (c = 0).
+export function realRates(params) {
+  const n = params.length / PARAMS_PER_COMPONENT;
+  return Array.from({ length: n }, (_, u) => params[u * PARAMS_PER_COMPONENT + 1] === 0);
+}
+
+// Real separable terms (the kernel's separable rank): 2m per complex-rate component, m per real one.
+export const renderingTerms = (multiplicity, real = []) => multiplicity.reduce((a, m, u) => a + (real[u] ? m : 2 * m), 0);
+
+// Rate types as text: "c" complex, "r" real.
+export const formatRateTypes = (real) => real.map((r) => (r ? "r" : "c")).join(", ");
 
 // Params stored with `stride` numbers per component (6 in older view states), in this layout.
 export function withStride(params, stride) {
@@ -107,17 +123,19 @@ export function withStride(params, stride) {
   }).flat();
 }
 
-export const channelCount = (multiplicity) => multiplicity.reduce((a, m) => a + m, 0);
-
 // The article's heuristic: channel slot k oscillates near (1.14 k + 0.5) π, within ±0.4 π.
 export function centerFrequency(k) {
   return (k * 1.14 + 0.5) * Math.PI;
 }
 
 // Frequency band of each component: one of multiplicity m spans the bands of the m slots it occupies.
-export function frequencyBands(multiplicity) {
-  let slot = 0;
-  return multiplicity.map((m) => {
+// Real-rate components don't oscillate; their band is [0, 0]. Each real term shifts the complex
+// slots up by half a slot (as unconstrained optima show: one real term puts a single complex rate
+// at slot 0.5, two at about 0.85).
+export function frequencyBands(multiplicity, real = []) {
+  let slot = multiplicity.reduce((a, m, u) => a + (real[u] ? m : 0), 0) / 2;
+  return multiplicity.map((m, u) => {
+    if (real[u]) return [0, 0];
     const band = [centerFrequency(slot) - 0.4 * Math.PI, centerFrequency(slot + m - 1) + 0.4 * Math.PI];
     slot += m;
     return band;
@@ -141,25 +159,29 @@ export function sampleGrid(problem, passSamples = problem.passSamples, stopSampl
 }
 
 // Reflection bounds keep the search in a sensible region; initial ranges seed the population.
-// The weights of unused powers of s are pinned to zero.
+// The weights of unused powers of s are pinned to zero, as are c and the i weights of real rates.
 export function bounds(problem) {
   const n = problem.components;
+  const real = problem.real ?? [];
   const d = n * PARAMS_PER_COMPONENT;
   const foldLo = new Float64Array(d);
   const foldHi = new Float64Array(d);
   const initLo = new Float64Array(d);
   const initHi = new Float64Array(d);
-  const channels = channelCount(problem.multiplicity);
-  const weight = 2 * Math.pow(2.5, channels - 1);
-  const topFrequency = centerFrequency(channels - 1) + 0.4 * Math.PI;
-  const bands = frequencyBands(problem.multiplicity);
+  const pairs = renderingTerms(problem.multiplicity, real) / 2;
+  const weight = 2 * Math.pow(2.5, pairs - 1);
+  // The slots, with half a slot per real term below the complex ones.
+  const topFrequency = centerFrequency(Math.max(1, pairs) - 1) + 0.4 * Math.PI;
+  const bands = frequencyBands(problem.multiplicity, real);
   for (let u = 0; u < n; u++) {
     const k = u * PARAMS_PER_COMPONENT;
     foldLo[k] = 0.2;
     foldHi[k] = 20;
     initLo[k] = 0.3;
-    initHi[k] = 1 + channels;
-    if (problem.frequencyBands) {
+    initHi[k] = 1 + pairs;
+    if (real[u]) {
+      // c and every i weight stay at their zero bounds.
+    } else if (problem.frequencyBands) {
       [foldLo[k + 1], foldHi[k + 1]] = bands[u];
       [initLo[k + 1], initHi[k + 1]] = bands[u];
     } else {
@@ -168,12 +190,13 @@ export function bounds(problem) {
       initLo[k + 1] = 0.2;
       initHi[k + 1] = topFrequency;
     }
-    const live = 2 + 2 * problem.multiplicity[u];
+    const used = 2 + 2 * problem.multiplicity[u];
     for (let j = 2; j < PARAMS_PER_COMPONENT; j++) {
-      foldLo[k + j] = j < live ? -1e9 : 0;
-      foldHi[k + j] = j < live ? 1e9 : 0;
-      initLo[k + j] = j < live ? -weight : 0;
-      initHi[k + j] = j < live ? weight : 0;
+      const live = j < used && !(real[u] && j % 2);
+      foldLo[k + j] = live ? -1e9 : 0;
+      foldHi[k + j] = live ? 1e9 : 0;
+      initLo[k + j] = live ? -weight : 0;
+      initHi[k + j] = live ? weight : 0;
     }
   }
   return { foldLo, foldHi, initLo, initHi };
@@ -342,11 +365,13 @@ export function channelSide(side, s) {
 // h = σ x^{2j} e^{λ x²} and v = Q_j(y²) e^{λ y²} / σ (m = 1: h = v = √a₀ e^{λ x²}, the article's form).
 export function componentChannels(params) {
   const mult = multiplicities(params);
+  const real = realRates(params);
   // P(s) e^{λ s} = (P cos + iP sin) e^{-b s}
   const side = (u, P) => [{ decay: params[u * PARAMS_PER_COMPONENT], phase: params[u * PARAMS_PER_COMPONENT + 1], cos: P, sin: P.map(([re, im]) => [-im, re]) }];
   return mult.flatMap((m, u) => {
     const k0 = u * PARAMS_PER_COMPONENT;
-    const a = Array.from({ length: m }, (_, q) => [params[k0 + 2 + 2 * q], -params[k0 + 3 + 2 * q]]);
+    // A real rate's i weights are inert; dropping them keeps its products real.
+    const a = Array.from({ length: m }, (_, q) => [params[k0 + 2 + 2 * q], real[u] ? 0 : -params[k0 + 3 + 2 * q]]);
     if (m === 1) {
       const w = complexSqrt(a[0]);
       return [{ component: u, h: side(u, [w]), v: side(u, [w]) }];
@@ -364,7 +389,8 @@ const NEGLIGIBLE_TERM = 1e-14;
 
 // Separable channels for rendering: the 2-D kernel is Re Σ_n h_n(x) v_n(y), each pass evaluated by
 // channelSide. The real kernel is fᵀ(x) C f(y) in the real basis f = t^k {cos, sin}(c x²) e^{−b x²}
-// (t = 2b x², every component and power k < m). Orthonormalizing f over [0, support] (QR, R) and
+// (t = 2b x², every component and power k < m; real rates only have the cos functions, as sin 0 = 0).
+// Orthonormalizing f over [0, support] (QR, R) and
 // diagonalizing R C Rᵀ = Σ e_j u_j u_jᵀ gives Re K = Σ e_j g_j(x) g_j(y) with g_j = fᵀ C Rᵀ u_j / e_j,
 // paired into complex channels: Re[(√|e_a| g_a + i√|e_b| g_b)(±√|e_a| g_a ∓ i√|e_b| g_b)]. Unlike
 // per-component forms, the passes carry no large cancelling parts that f16 intermediates can't resolve.
@@ -372,10 +398,11 @@ const NEGLIGIBLE_TERM = 1e-14;
 // v = sign(e_j) h.
 export function separableChannels(params, support = 2, { pairs = true } = {}) {
   const mult = multiplicities(params);
+  const real = realRates(params);
   const terms = [];
   mult.forEach((m, u) => {
     const k0 = u * PARAMS_PER_COMPONENT;
-    for (const part of [0, 1]) for (let k = 0; k < m; k++) terms.push({ u, part, k, b: params[k0], c: params[k0 + 1] });
+    for (const part of real[u] ? [0] : [0, 1]) for (let k = 0; k < m; k++) terms.push({ u, part, k, b: params[k0], c: params[k0 + 1] });
   });
   const n = terms.length;
   const C = new Float64Array(n * n);
@@ -389,11 +416,12 @@ export function separableChannels(params, support = 2, { pairs = true } = {}) {
       const im = -params[k0 + 3 + 2 * (k + l)] * f; // Im a_{k+l}
       // Re[a (cos_x + i sin_x)(cos_y + i sin_y)] = Re a (cos cos − sin sin) − Im a (cos sin + sin cos)
       C[(start + k) * n + start + l] = re;
+      if (real[u]) continue;
       C[(start + m + k) * n + start + m + l] = -re;
       C[(start + k) * n + start + m + l] = -im;
       C[(start + m + k) * n + start + l] = -im;
     }
-    start += 2 * m;
+    start += real[u] ? m : 2 * m;
   });
   const rows = QUADRATURE_NODES;
   const A = new Float64Array(rows * n);
@@ -440,6 +468,7 @@ export function separableChannels(params, support = 2, { pairs = true } = {}) {
     const scale = 2 * params[k0];
     const poly = (part) => Array.from({ length: m }, (_, k) => {
       const p = terms.findIndex((t) => t.u === u && t.part === part && t.k === k);
+      if (p < 0) return [0, 0]; // sin functions of a real rate
       return parts.reduce(([re, im], { factor: [fr, fi], coef }) => [re + fr * coef[p] * scale ** k, im + fi * coef[p] * scale ** k], [0, 0]);
     });
     return { decay: params[k0], phase: params[k0 + 1], cos: poly(0), sin: poly(1) };
@@ -471,11 +500,14 @@ const powerOfX2 = (k) => Array(k).fill("x*x").join("*");
 export function formatParams(params, problem, error) {
   const n = params.length / PARAMS_PER_COMPONENT;
   const mult = multiplicities(params);
+  const real = realRates(params);
   const fmt = (v) => v.toFixed(10);
   const higher = mult.filter((m) => m > 1).length;
+  const realCount = real.filter(Boolean).length;
   const lines = [
     `Number of components: ${n} (${higher} with repeated rates, multiplicities ${mult.join(", ")}; ` +
-      `${2 * channelCount(mult)} rendering terms), transition bandwidth: ${problem.transition}, ` +
+      (realCount ? `${realCount} with real rates, rate types ${formatRateTypes(real)}; ` : "") +
+      `${renderingTerms(mult, real)} rendering terms), transition bandwidth: ${problem.transition}, ` +
       `ripple: ±${error.toFixed(6)}`,
     "",
     "// Profile k(x) as a sum of components (article format; multiplicity m adds terms up to (x*x)^(m-1)):",
@@ -487,7 +519,7 @@ export function formatParams(params, problem, error) {
     const terms = Array.from({ length: mult[u] }, (_, q) => (q ? `${powerOfX2(q)} * (${osc(q)})` : `(${osc(q)})`));
     lines.push(mult[u] === 1 ? `${terms[0]} * exp(-${fmt(b)}*x*x)` : `(${terms.join(" + ")}) * exp(-${fmt(b)}*x*x)`);
   }
-  lines.push("", "// b, c, r, i (single), followed by r1, i1, r2, i2, … (weights of x^2, x^4, …) for multiplicity > 1:");
+  lines.push("", "// b, c, r, i (single), followed by r1, i1, r2, i2, … (weights of x^2, x^4, …) for multiplicity > 1; c = 0: real rate:");
   for (let u = 0; u < n; u++) {
     lines.push(params.slice(u * PARAMS_PER_COMPONENT, u * PARAMS_PER_COMPONENT + 2 + 2 * mult[u]).map(fmt).join(", "));
   }
@@ -499,13 +531,13 @@ export function formatParams(params, problem, error) {
     }
   }
   const channels = separableChannels(params, 1 + problem.transition);
-  const basis = mult.flatMap((m, u) => Array.from({ length: m }, (_, k) => [`${u} cos x^${2 * k}`, `${u} sin x^${2 * k}`]).flat());
-  const row = (side) => side.flatMap(({ cos, sin }) => cos.flatMap((z, k) => [...z, ...sin[k]])).map(fmt).join(", ");
+  const basis = mult.flatMap((m, u) => Array.from({ length: m }, (_, k) => real[u] ? [`${u} cos x^${2 * k}`] : [`${u} cos x^${2 * k}`, `${u} sin x^${2 * k}`]).flat());
+  const row = (side) => side.flatMap(({ cos, sin }, u) => cos.flatMap((z, k) => (real[u] ? [...z] : [...z, ...sin[k]]))).map(fmt).join(", ");
   lines.push(
     "",
     `// Rendering terms in ${channels.length} pairs, as the blur uses them: kernel(x, y) = Re Σ_n h_n(x) v_n(y), with`,
     "// h = H f(x) and v = V f(y), where f are the real basis functions of the components above:",
-    "//   'u cos x^2k' = x^2k cos(c_u x²) exp(-b_u x²), 'u sin x^2k' = x^2k sin(c_u x²) exp(-b_u x²).",
+    "//   'u cos x^2k' = x^2k cos(c_u x²) exp(-b_u x²), 'u sin x^2k' = x^2k sin(c_u x²) exp(-b_u x²) (none for a real rate).",
     "// The kernel is f(x)ᵀ Re(Hᵀ V) f(y), and Re(Hᵀ V) is the components' weight matrix (up to rounding",
     "// and, at high multiplicity, nearly dependent basis directions). Rows: pairs (re, im: one term each); columns:",
     `// ${basis.join(", ")}`,
@@ -526,12 +558,14 @@ export function kernelToQuery(params, multiplicity = multiplicities(params)) {
     .map(String).join(",")).join(";");
 }
 
+// The optional `real` (per-component rate types) defaults to all complex, as in older links.
 export function problemFromQuery(text) {
   const p = JSON.parse(text);
   const integer = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
   if (!p || !integer(p.components, 1, MAX_COMPONENTS) ||
       !Array.isArray(p.multiplicity) || p.multiplicity.length !== p.components ||
       !p.multiplicity.every((m) => integer(m, 1, MAX_MULTIPLICITY)) ||
+      (p.real !== undefined && (!Array.isArray(p.real) || p.real.length !== p.components || !p.real.every((r) => typeof r === "boolean"))) ||
       !Number.isFinite(p.transition) || p.transition <= 0 ||
       !integer(p.passSamples, 2, 5000) || !integer(p.stopSamples, 2, 5000) ||
       typeof p.frequencyBands !== "boolean" ||

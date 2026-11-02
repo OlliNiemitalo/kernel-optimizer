@@ -58,20 +58,23 @@ const TILE_ARRAYS = 4 + HIST + 2 + MAX_LAYERS + 2; // max K, max vertical K, rea
 const MAX_QUERIES = 2 * (13 + MAX_LAYERS * (10 + 2 * MAX_CHANNELS) + 2 * FILL_LEVELS);
 const PARAMS_BYTES = 80;
 
-// Real terms per pass group that split termCount into equal groups (at most MAX_CHANNELS of them).
+// Real terms per pass group: for each number of groups n (at most MAX_CHANNELS), the smallest group size
+// ⌈termCount / n⌉. When it doesn't divide termCount, the last group has fewer terms (padded with zero terms).
 export function groupOptions(termCount) {
-  const options = [];
-  for (let g = 1; g <= termCount; g++) if (termCount % g === 0 && termCount / g <= MAX_CHANNELS) options.push(g);
-  return options;
+  const options = new Set();
+  for (let n = Math.min(termCount, MAX_CHANNELS); n >= 1; n--) options.add(Math.ceil(termCount / n));
+  return [...options];
 }
+
+// Pass groups for G terms per group.
+export const groupCount = (termCount, G) => Math.ceil(termCount / G);
 
 // Horizontal outputs per thread for G terms: about 64 accumulator floats (32 when interpolating).
 const horizontalOutputsFor = (G, interpolate) => Math.max(1, Math.min(ROWS, Math.floor((interpolate ? 8 : 16) / G)));
 
-// Default terms per pass group: two groups where possible, else the largest smaller group.
+// Default terms per pass group: two groups (the second one smaller for an odd count).
 export function defaultGroup(termCount) {
-  const options = groupOptions(termCount);
-  return options.filter((g) => g <= termCount / 2).at(-1) ?? termCount;
+  return Math.max(1, Math.ceil(termCount / 2));
 }
 
 const J = Array.from({ length: ROWS }, (_, j) => j);
@@ -92,7 +95,9 @@ for (let p = 1; p < SORT; p <<= 1) {
 const each = (f) => J.map(f).join("\n    ");
 const HORIZONTAL_OUTPUTS = 4;
 
-function computeShader(packed, interpolate = false, horizontalOutputs = HORIZONTAL_OUTPUTS, groupTerms = 2) {
+// groupTerms: terms filtered by this pipeline's passes; fullGroup: terms per group in the table layout,
+// larger than groupTerms only for the shorter last group.
+function computeShader(packed, interpolate = false, horizontalOutputs = HORIZONTAL_OUTPUTS, groupTerms = 2, fullGroup = groupTerms) {
   const HJ = Array.from({ length: horizontalOutputs }, (_, j) => j);
   const eachV = (f) => HJ.map(f).join("\n    ");
   const G = groupTerms;
@@ -184,6 +189,7 @@ struct Complex4 { re: vec4f, im: vec4f }
 ${midAccess}
 
 const G = ${G}u; // varying radius: real terms filtered by one horizontal and one vertical pass
+const GF = ${fullGroup}u; // terms per group in the table layout (G < GF only for a shorter last group)
 
 // The kern buffer as f32 (varying signs and taps); a ninth binding would exceed the portable limit.
 fn kernf(i: u32) -> f32 {
@@ -219,10 +225,10 @@ fn tableCoordinate(key: f32) -> vec2f {
 }
 
 // f32 index of tap 0, term 0 of the current group (P.channel) at a radius node; taps are
-// [group][node][tap][term of the group], G per tap.
+// [group][node][tap][term of the group], G per tap. Earlier groups have GF terms each.
 fn radiusBase(q: vec2f) -> u32 {
   let stride = u32(kern[HALVES + 1u].x);
-  return u32(kern[HALVES + 3u].y) + (P.channel * u32(kern[HALVES + 1u].y) + u32(q.x)) * stride * G;
+  return u32(kern[HALVES + 3u].y) + (P.channel * u32(kern[HALVES + 1u].y) * GF + u32(q.x) * G) * stride;
 }
 // Nearest keys are already clamped and rounded by the prepass.
 fn cachedCoordinate(key: f32) -> vec2f {
@@ -234,7 +240,7 @@ fn radiusTap(base: u32, fraction: f32, t: i32, k: u32) -> f32 {
 }
 // The vertical filter of a term is its horizontal one times the sign of its eigenvalue.
 fn termSign(k: u32) -> f32 {
-  return kernf(u32(kern[HALVES + 2u].y) + P.channel * G + k);
+  return kernf(u32(kern[HALVES + 2u].y) + P.channel * GF + k);
 }
 
 fn radiusHalf(r: f32) -> i32 {
@@ -1088,7 +1094,8 @@ ${displayShader}`;
 //   uniform radius, terms in pairs as one complex channel n = 0 .. channels - 1, block n:
 //                    horizontal  ceil(ceil(width / ${ROWS}) / 64) x height workgroups
 //                    vertical    ceil(width / 64) x ceil(height / ${ROWS}) workgroups
-//   varying radius, terms in groups of G = 2 (the app compiles other G), group n = 0 .. T / G - 1, block n:
+//   varying radius, terms in groups of G = GF = 2 (the app compiles other G), group n = 0 .. ceil(T / G) - 1, block n
+//   (when G doesn't divide T, the last group uses a shader compiled with G = T mod GF and the same GF):
 //                    horizontalVarying ceil(ceil(width / ${HORIZONTAL_OUTPUTS}) / 64) x height workgroups
 //                    verticalVarying   the same counts as vertical
 // then draw with the display shader (acc.rgb / acc.w).
@@ -1139,7 +1146,7 @@ ${displayShader}`;
 // Nearest mode rounds this key, fetches one node, and uses that node's support.
 // The application specializes non-layered shaders by substituting 0u for P.layered. This export
 // retains the generic layered shader and four-output horizontal blocking; use its dispatch above.
-// Taps: [group][node][tap][term of the group], f32, horizontal only: a term's vertical taps are its
+// Taps: [group][node][tap][term of the group] (groups of GF terms, the last possibly fewer), f32, horizontal only: a term's vertical taps are its
 // horizontal ones times its sign, which horizontalVarying applies to its output. Even (nonnegative
 // offsets only),
 // integrated over [t-0.5,t+0.5] in pixel space, zero-padded. Gather support includes a half-pixel
@@ -1284,12 +1291,12 @@ export class BlurRenderer {
     this.animated = null;
   }
 
-  computePipelines(packed, interpolate = false, layered = false, horizontalOutputs = HORIZONTAL_OUTPUTS, groupTerms = 2) {
-    const key = `${packed ? "packed" : "f32"}-${interpolate ? "linear" : "nearest"}-${layered ? "layers" : "single"}-${horizontalOutputs}-${groupTerms}`;
+  computePipelines(packed, interpolate = false, layered = false, horizontalOutputs = HORIZONTAL_OUTPUTS, groupTerms = 2, fullGroup = groupTerms) {
+    const key = `${packed ? "packed" : "f32"}-${interpolate ? "linear" : "nearest"}-${layered ? "layers" : "single"}-${horizontalOutputs}-${groupTerms}-${fullGroup}`;
     if (!this.pipelines[key]) {
       // Without layers, eliminate membership reads/branches and smoothed-map selection from
       // the inner loops. The generic shader remains available for the layered pipeline/export.
-      const code = computeShader(packed, interpolate, horizontalOutputs, groupTerms);
+      const code = computeShader(packed, interpolate, horizontalOutputs, groupTerms, fullGroup);
       const module = this.device.createShaderModule({ code: layered ? code : code.replaceAll("P.layered", "0u") });
       const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.computeLayout] });
       const make = (entryPoint) => this.device.createComputePipeline({ layout, compute: { module, entryPoint } });
@@ -1460,7 +1467,9 @@ export class BlurRenderer {
     }
     if (G === this.continuousGroup) { this.tablesDirty = false; return; }
     const c = this.continuous;
-    const T = terms.length, L = Math.min(127, Math.max(2, Math.ceil(Math.log2(maxRadius) * LEVELS_PER_OCTAVE) + 2));
+    // Groups of G terms; the last has T − (groups − 1) G terms when G doesn't divide T.
+    const T = terms.length, groups = groupCount(T, G);
+    const L = Math.min(127, Math.max(2, Math.ceil(Math.log2(maxRadius) * LEVELS_PER_OCTAVE) + 2));
     const norm = HALVES + 4;
     const profile = norm + c.count;
     // f32 offsets: each term's sign, then taps [group][node][tap][term of the group].
@@ -1473,13 +1482,14 @@ export class BlurRenderer {
     // Horizontal taps only: a term's vertical taps are these times its sign.
     for (let j = 0; j < T; j++) for (let i = 0; i < c.count; i++) {
       const table = c.tables[i][0][j];
-      const start = taps + ((Math.floor(j / G) * c.count + i) * c.stride) * G + j % G;
-      for (let t = 0; t < c.stride; t++) data[start + t * G] = table[2 * t];
+      const group = Math.floor(j / G), size = Math.min(G, T - group * G);
+      const start = taps + group * c.count * c.stride * G + i * c.stride * size + j % G;
+      for (let t = 0; t < c.stride; t++) data[start + t * size] = table[2 * t];
     }
     this.kernel?.destroy();
     this.kernel = this.device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.device.queue.writeBuffer(this.kernel, 0, data);
-    this.channels = T / G;
+    this.channels = groups;
     this.K = c.half;
     this.taps = 2 * this.K + 1;
     this.levels = L; // retained only for depth classification, not kernel selection
@@ -1567,11 +1577,17 @@ export class BlurRenderer {
     device.queue.writeBuffer(this.view, 0, v);
 
     // Uniform radius: complex pairs, register-blocked over ROWS outputs. Varying: groups of G terms,
-    // with outputs per thread chosen to bound the accumulators.
+    // with outputs per thread chosen to bound the accumulators; a shorter last group has its own pipeline.
     const horizontalOutputs = varying ? horizontalOutputsFor(G, interpolate) : HORIZONTAL_OUTPUTS;
     const p = this.computePipelines(packed, varying && interpolate, layered, horizontalOutputs, varying ? G : 2);
     const [horizontal, vertical] = varying ? [p.horizontalVarying, p.verticalVarying] : [p.horizontal, p.vertical];
     const groups = { h: [Math.ceil(Math.ceil(width / (varying ? horizontalOutputs : ROWS)) / 64), height], v: [Math.ceil(width / 64), Math.ceil(height / ROWS)] };
+    const lastSize = varying ? this.termCount - (this.channels - 1) * G : G;
+    const lastOutputs = horizontalOutputsFor(lastSize, interpolate);
+    const lastGroup = lastSize === G ? { horizontal, vertical, h: groups.h } : (() => {
+      const q = this.computePipelines(packed, interpolate, layered, lastOutputs, lastSize, G);
+      return { horizontal: q.horizontalVarying, vertical: q.verticalVarying, h: [Math.ceil(Math.ceil(width / lastOutputs) / 64), height] };
+    })();
     const bindGroup = device.createBindGroup({
       layout: this.computeLayout,
       entries: [
@@ -1637,8 +1653,9 @@ export class BlurRenderer {
         pass(p.verticalLevels, first, rowGroups, "prepare");
         pass(p.reachY, first, tileGroups, "prepare");
         for (let group = 0; group < this.channels; group++) {
-          pass(horizontal, first + group, groups.h, "horizontal");
-          pass(vertical, first + group, groups.v, "vertical");
+          const pipes = group === this.channels - 1 ? lastGroup : { horizontal, vertical, h: groups.h };
+          pass(pipes.horizontal, first + group, pipes.h, "horizontal");
+          pass(pipes.vertical, first + group, groups.v, "vertical");
         }
         if (!layered) continue;
         if (layer === layerCount - 1) {

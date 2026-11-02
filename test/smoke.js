@@ -2,7 +2,7 @@
 import { defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
 import { DifferentialEvolution, initialPopulation } from "../src/de.js";
 import assert from "node:assert/strict";
-import { tapTables } from "../src/blur.js";
+import { defaultGroup, groupOptions, tapTables } from "../src/blur.js";
 import { continuousKernel, integratedKernel, kernelProfile } from "../src/continuous-kernel.js";
 import { radiusTables } from "../src/radius-tables.js";
 import { FineTuner } from "../src/finetune.js";
@@ -14,7 +14,7 @@ import { populationPreview } from '../src/plots.js';
 import {
   MAX_COMPONENTS, MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, defaultProblem, formatParams, maxError, multiplicities, nonnegativePresetParams,
   parseParams, presetParams, profile, sampleGrid, separableChannels, sortByFrequency, withStride, channelSide, componentChannels,
-  kernelFromQuery, kernelToQuery, problemFromQuery,
+  kernelFromQuery, kernelToQuery, problemFromQuery, realRates, renderingTerms, formatRateTypes, frequencyBands, centerFrequency,
 } from "../src/problem.js";
 
 const devices = await init();
@@ -673,3 +673,91 @@ for (const multiplicity of [[1, 1], [2, 1], [3], [10]]) {
   console.log(`Remez [10]: ±${r10.error.toFixed(6)}`);
   check("Remez keeps multiplicity 10", multiplicities(r10.params).join() === "10" ? 0 : 1, 0);
 }
+
+// Real rates (c = 0): R(s) e^{−b s} with a real polynomial costs m rendering terms instead of 2m;
+// the solvers keep c and the i weights at zero.
+{
+  const realProblem = (multiplicity, real) => ({ ...problemFor(multiplicity), real });
+  // Rank: the renderer's term count equals renderingTerms for mixed structures.
+  for (const [params, expected] of [
+    [[...pad([2, 0, 1, 0]), ...pad([5, 0, -0.5, 0])], 2], // difference of Gaussians
+    [pad([3, 0, 0.5, 0, -0.2, 0, 0.05, 0]), 3], // real multiplicity 3
+    [[...presetParams(2), ...pad([4, 0, 0.3, 0, 0.1, 0])], 6], // 2 complex singles + real pair
+    [[...pad([3.1, 9.4, -0.8, 2.2, 1.7, -0.6]), ...pad([1.5, 0, 0.2, 0])], 5], // complex pair + real single
+    [[...pad([2, 0, 1, 0.7]), ...pad([5, 0, -0.5, 0])], 2], // inert i weight on a real rate
+  ]) {
+    const mult = multiplicities(params), real = realRates(params);
+    assert.equal(renderingTerms(mult, real), expected);
+    assert.equal(separableChannels(params, 1.2, { pairs: false }).length, expected, `terms of ${params}`);
+    assert.equal(separableChannels(params, 1.2).length, Math.ceil(expected / 2));
+    let worst = 0, own = 0;
+    const xs = Array.from({ length: 31 }, (_, i) => -1.2 + i * 0.08);
+    for (const x of xs) for (const y of xs) {
+      const sum = (channels) => channels.reduce((acc, ch) => {
+        const [hr, hi] = channelSide(ch.h, x * x), [vr, vi] = channelSide(ch.v, y * y);
+        return acc + hr * vr - hi * vi;
+      }, 0);
+      worst = Math.max(worst, Math.abs(sum(separableChannels(params, 1.2)) - profile(params, Math.hypot(x, y))));
+      own = Math.max(own, Math.abs(sum(componentChannels(params)) - profile(params, Math.hypot(x, y))));
+    }
+    check(`real-rate separable channels (${expected} terms, multiplicities ${mult}, rate types ${formatRateTypes(real)})`, worst, 1e-10);
+    check(`  components' own separable forms`, own, 1e-12);
+  }
+
+  // Bounds pin c and i of real rates; bands skip them.
+  const problem = realProblem([2, 1, 1], [false, true, false]);
+  const b = bounds(problem);
+  assert.deepEqual([b.foldLo[D1 + 1], b.foldHi[D1 + 1], b.initLo[D1 + 1], b.initHi[D1 + 1]], [0, 0, 0, 0]);
+  assert.deepEqual([b.foldLo[D1 + 3], b.foldHi[D1 + 3]], [0, 0]);
+  assert.ok(b.foldHi[D1 + 2] > 0 && b.foldHi[3] > 0 && b.foldHi[5] > 0);
+  // Complex slots start at half a slot per real term: here 0.5 (multiplicity 2: slots 0.5, 1.5) and 2.5.
+  const band = (lo, hi) => [centerFrequency(lo) - 0.4 * Math.PI, centerFrequency(hi) + 0.4 * Math.PI];
+  assert.deepEqual(frequencyBands([2, 1, 1], [false, true, false]), [band(0.5, 1.5), [0, 0], band(2.5, 2.5)]);
+  assert.deepEqual(frequencyBands([2, 1]), [band(0, 1), band(2, 2)]);
+  // All-complex problems keep their old bounds (backward compatible).
+  const old = bounds({ ...problemFor([2, 1]) });
+  const explicit = bounds(realProblem([2, 1], [false, false]));
+  assert.deepEqual(Array.from(old.initHi), Array.from(explicit.initHi));
+  assert.deepEqual(problemFromQuery(JSON.stringify({ ...problem, denseSamples: 100 })).real, [false, true, false]);
+  for (const real of [[true], [0, 1, 0], "r"]) assert.throws(() => problemFromQuery(JSON.stringify({ ...problem, denseSamples: 100, real })));
+
+  // Exchange and Remez keep the real rate real.
+  const grid = sampleGrid(problemFor([1, 1]), 1000, 1000);
+  const mixed = [...sortByFrequency(presetParams(1)), ...pad([4, 0, 0.1, 0])];
+  const w = optimalWeights(mixed, grid);
+  check("exchange weights with a real rate: level equals grid max error", Math.abs(w.error - w.level), 1e-12);
+  assert.ok(w.error < maxError(presetParams(1), grid), "a real Gaussian improves on preset 1");
+  const r = remezPolish(w.params, grid, { iterations: 20 });
+  console.log(`real rates: preset 1 ±${maxError(presetParams(1), grid).toFixed(6)}, + real Gaussian (3 terms) exchange ±${w.error.toFixed(6)}, Remez ±${r.error.toFixed(6)}`);
+  check("Remez with a real rate keeps c = 0 and i = 0", Math.max(Math.abs(r.params[D1 + 1]), Math.abs(r.params[D1 + 3])), 0);
+  check("Remez with a real rate improves", r.error < w.error ? 0 : 1, 0);
+
+  // Projected DE searches only b of the real rate.
+  const de = new ProjectedEvolution({ components: 2, multiplicity: [1, 1], real: [false, true], grid: sampleGrid(problemFor([1, 1])),
+    bounds: bounds(realProblem([1, 1], [false, true])), populationSize: 32, F: 0.76, CR: 0.999, seed: 5 });
+  de.step(60);
+  const snap = await de.snapshot();
+  console.log(`projected DE c, r (3 terms): best ±${snap.bestCost.toFixed(6)}`);
+  check("projected DE keeps the real rate real", Math.max(...de.pop.map((p) => Math.max(Math.abs(p[D1 + 1]), Math.abs(p[D1 + 3])))), 0);
+  check("projected DE with a real rate: best cost is exact", Math.abs(snap.bestCost - maxError(snap.best, de.grid)), 1e-12);
+  assert.equal(separableChannels(snap.best, 1.2, { pairs: false }).length, 3);
+
+  // Fine-tuning freezes c and i of a real rate.
+  const tuner = new FineTuner({ params: r.params, components: 2, grid, learningRate: 1e-4, halfLife: 400 });
+  const tuned = await tuner.run(50, 100, r.error);
+  tuner.dispose();
+  check("fine-tune keeps c = 0 and i = 0 of a real rate", Math.max(Math.abs(tuned.params[D1 + 1]), Math.abs(tuned.params[D1 + 3])), 0);
+
+  // The text export round-trips and lists no sin basis functions for real rates.
+  const text = formatParams(r.params, problemFor([1, 1]), r.error);
+  assert.ok(text.includes("1 with real rates, rate types c, r; 3 rendering terms"));
+  assert.ok(text.includes("// 0 cos x^0, 0 sin x^0, 1 cos x^0\n"));
+  check("parse the Current kernel text with a real rate", Math.max(...parseParams(text).map((v, j) => Math.abs(v - r.params[j]))), 1e-9);
+}
+// Pass groups: the smallest group size for each group count (at most 16 groups); a shorter last group is allowed.
+assert.deepEqual(groupOptions(5), [1, 2, 3, 5]);
+assert.deepEqual(groupOptions(12), [1, 2, 3, 4, 6, 12]);
+assert.deepEqual(groupOptions(8), [1, 2, 3, 4, 8]);
+assert.equal(groupOptions(32)[0], 2);
+assert.deepEqual([1, 2, 5, 12].map(defaultGroup), [1, 1, 3, 6]);
+console.log("PASS real rates and pass groups");

@@ -18,7 +18,7 @@ export function localSolvers() {
   let solver = null;
   return {
     threads: 0,
-    setProblem: (grid, multiplicity) => (solver = new WeightSolver(grid, multiplicity)),
+    setProblem: (grid, multiplicity, real) => (solver = new WeightSolver(grid, multiplicity, real)),
     solve: async (items) => items.map((item) => solveCandidate(solver, item)),
     dispose() {},
   };
@@ -47,9 +47,9 @@ export function workerSolvers(count) {
   });
   return {
     threads: count,
-    setProblem(grid, multiplicity) {
+    setProblem(grid, multiplicity, real) {
       const plain = { x: grid.x, target: grid.target, passSamples: grid.passSamples, negativeWeight: grid.negativeWeight };
-      for (const w of workers) w.postMessage({ type: "problem", grid: plain, multiplicity });
+      for (const w of workers) w.postMessage({ type: "problem", grid: plain, multiplicity, real });
     },
     async solve(items) {
       const size = Math.ceil(items.length / workers.length);
@@ -63,22 +63,23 @@ export function workerSolvers(count) {
 }
 
 export class ProjectedEvolution {
-  constructor({ components, multiplicity, grid, bounds, populationSize, F, CR, seed, startingPoint,
+  // real: per component, whether its rate is real (c = 0, only b searched).
+  constructor({ components, multiplicity, real = [], grid, bounds, populationSize, F, CR, seed, startingPoint,
     populationCenter = null, includeCenter = true, solvers = localSolvers() }) {
     const P = populationSize;
     const D = components * PARAMS_PER_COMPONENT;
     if (P < 4) throw new Error("Population size must be at least 4.");
     const init = initialPopulation({ bounds, populationSize: P, dimensions: D, seed, center: populationCenter, includeCenter });
     if (!populationCenter && startingPoint && startingPoint.length === D) init.set(startingPoint, 0);
-    Object.assign(this, { P, D, F, CR, multiplicity, solvers, generation: 0, revision: 0, failure: null });
-    this.rates = Array.from({ length: 2 * components }, (_, i) => Math.floor(i / 2) * PARAMS_PER_COMPONENT + (i % 2));
+    Object.assign(this, { P, D, F, CR, multiplicity, real, solvers, generation: 0, revision: 0, failure: null });
+    this.rates = Array.from({ length: components }, (_, u) => (real[u] ? [0] : [0, 1]).map((o) => u * PARAMS_PER_COMPONENT + o)).flat();
     this.rand = mulberry32((seed ^ 0x9e3779b9) >>> 0);
     this.setBounds(bounds);
     this.pop = Array.from({ length: P }, (_, k) => Array.from(init.subarray(k * D, (k + 1) * D), (v, j) => fold(v, this.lo[j], this.hi[j])));
     this.cost = new Float64Array(P).fill(Infinity);
     this.refs = new Array(P).fill(null);
     this.grid = grid;
-    solvers.setProblem(grid, multiplicity);
+    solvers.setProblem(grid, multiplicity, real);
     this.queue = Promise.resolve();
     this.enqueue(() => this.evaluate(this.pop.map((params, k) => ({ k, params })), true));
     const exact = populationCenter ? includeCenter && populationCenter : startingPoint?.length === D && startingPoint;
@@ -111,7 +112,7 @@ export class ProjectedEvolution {
     this.revision++;
     this.enqueue(() => {
       this.grid = grid;
-      this.solvers.setProblem(grid, this.multiplicity);
+      this.solvers.setProblem(grid, this.multiplicity, this.real);
       this.setBounds(bounds);
       return this.evaluate(this.pop.map((params, k) => ({ k, params })), true);
     });

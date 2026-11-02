@@ -29,23 +29,27 @@ export async function continuousGPU(renderer, check, read) {
       check(`integrated raw DC ${name}, r=${r}, ${precision}, interpolation=${interpolate}`, error, precision === 'f32' ? 1e-4 : 0.02);
     }
   }
-  // Every split of the terms into pass groups renders the same image (up to f32 summation order).
+  // Every split of the terms into pass groups renders the same image (up to f32 summation order),
+  // including splits whose last group is shorter (5 terms: 2 + 2 + 1, 3 + 2).
   const ramp = new Float32Array(width * height);
   for (let i = 0; i < ramp.length; i++) ramp[i] = 0.3 + 0.6 * (i % width) - 0.2 * Math.floor(i / width);
   for (let i = 0; i < source.length; i++) source[i] = ((i * 7919) % 101) / 100;
   renderer.setImage(source, width, height);
   renderer.setRadiusMap(ramp);
-  renderer.setKernel(presetParams(6), 9, 0.2);
-  for (const interpolate of [false, true]) for (const precision of ['f32', 'f16']) {
-    const images = [];
-    for (const groupTerms of groupOptions(renderer.termCount)) {
-      await renderer.render({ interpolate, precision, groupTerms, sizeBlur: 1, occlusion: 0 });
-      images.push([groupTerms, await read(renderer.device, renderer.acc)]);
-    }
-    for (const [groupTerms, data] of images.slice(1)) {
-      let error = 0;
-      data.forEach((v, i) => (error = Math.max(error, Math.abs(v - images[0][1][i]))));
-      check(`pass groups of ${groupTerms} terms match groups of ${images[0][0]} (${precision}, interpolation=${interpolate})`, error, 1e-5);
+  const fiveTerms = [...pad([2.72, 2.23, -8.11, 6.58]), ...pad([1.16, 6.40, 0.65, 0.40]), ...pad([4.93, 0, 8.52, 0])];
+  for (const [name, params] of [['preset6', presetParams(6)], ['5 terms with a real rate', fiveTerms]]) {
+    renderer.setKernel(params, 9, 0.2);
+    for (const interpolate of [false, true]) for (const precision of ['f32', 'f16']) {
+      const images = [];
+      for (const groupTerms of groupOptions(renderer.termCount)) {
+        await renderer.render({ interpolate, precision, groupTerms, sizeBlur: 1, occlusion: 0 });
+        images.push([groupTerms, await read(renderer.device, renderer.acc)]);
+      }
+      for (const [groupTerms, data] of images.slice(1)) {
+        let error = 0;
+        data.forEach((v, i) => (error = Math.max(error, Math.abs(v - images[0][1][i]))));
+        check(`${name}: pass groups of ${groupTerms} terms match groups of ${images[0][0]} (${precision}, interpolation=${interpolate})`, error, 1e-5);
+      }
     }
   }
 }

@@ -5,17 +5,22 @@
 import { jit, lax, numpy as np, tree, valueAndGrad } from "@hamk-uas/jax-js-nonconsuming";
 import { adam, applyUpdates } from "@hamk-uas/jax-js-nonconsuming/optax";
 import { profileBatch } from "./model.js";
-import { PARAMS_PER_COMPONENT, maxError, multiplicities } from "./problem.js";
+import { PARAMS_PER_COMPONENT, maxError, multiplicities, realRates } from "./problem.js";
 
 export class FineTuner {
   // Parameters are optimized in normalized units θ = p / scale so one learning rate fits all.
-  // A zero scale freezes a parameter at zero (the x² weights of single components).
+  // A zero scale freezes a parameter at zero (the x² weights of single components, and c and the
+  // i weights of real rates).
   constructor({ params, components, grid, learningRate, halfLife = 1000 }) {
     this.components = components;
     this.grid = grid;
     const D = params.length;
     const mult = multiplicities(params);
-    const live = (j) => j % PARAMS_PER_COMPONENT < 2 + 2 * mult[Math.floor(j / PARAMS_PER_COMPONENT)];
+    const real = realRates(params);
+    const live = (j) => {
+      const u = Math.floor(j / PARAMS_PER_COMPONENT), o = j % PARAMS_PER_COMPONENT;
+      return o < 2 + 2 * mult[u] && !(real[u] && o % 2);
+    };
     const scale = Float32Array.from(params, (v, j) => (live(j) ? Math.max(Math.abs(v), 0.05) : 0));
     const minTheta = Float32Array.from({ length: D }, (_, j) =>
       j % PARAMS_PER_COMPONENT === 0 ? 0.05 / scale[j] : -1e30,

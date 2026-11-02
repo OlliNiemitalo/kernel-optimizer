@@ -24,7 +24,7 @@ export function initialPopulation({ bounds, populationSize, dimensions, seed, ce
   const D = dimensions, P = populationSize;
   if (center && (center.length !== D ||
     Array.from(center).some((v, j) => !withinBounds(v, bounds.foldLo[j], bounds.foldHi[j])))) {
-    throw new Error("Current kernel must match the component structure and search bounds. Check frequency bands and pinned parameters.");
+    throw new Error("Current kernel must match the component structure and search bounds. Check the frequency-range constraint, multiplicities, rate types and pinned parameters.");
   }
   const rand = mulberry32(seed);
   const init = new Float32Array(P * D);

@@ -311,16 +311,31 @@ export function drawDecomposition(canvas, best, transition, mode, { groupTerms =
     const node = leafNodes[i];
     if (leaf.h) {
       put(Array.from({ length: ds }, () => leaf.h).flat(), n, ds, left, node.y - strip / 2);
-      label("*", left + T + 10, node.y, 18);
+      label("×", left + T + 10, node.y, 18);
       put(leaf.v.flatMap((a) => Array(ds).fill(a)), ds, n, left + T + 20, node.y - T / 2);
       label("=", left + T + 20 + strip + 12, node.y, 18);
     }
     drawTile(node, node.caption || leaf.caption);
   });
+  // Right-angle brackets: a bar over the summed children, a tick to each child, and an elbow into the sum.
+  ctx.strokeStyle = "#5c677d";
+  ctx.lineWidth = 1;
   for (const { node, children } of ops) {
-    const plusX = colX(Math.max(...children.map((c) => c.col))) + T + gap / 2 - 10;
-    for (let i = 1; i < children.length; i++) label("+", plusX, (children[i - 1].y + children[i].y) / 2, 18);
-    label("=", colX(node.col) - gap / 2 + 10, node.y, 18);
+    // The bar sits midway in the gap, so input ticks and the output elbow have equal length.
+    const nearestRight = Math.max(...children.map((c) => colX(c.col) + T));
+    const barX = (nearestRight + 2 + colX(node.col) - 2) / 2;
+    const topY = Math.min(...children.map((c) => c.y));
+    ctx.beginPath();
+    ctx.moveTo(barX, topY);
+    ctx.lineTo(barX, Math.max(...children.map((c) => c.y)));
+    for (const c of children) {
+      ctx.moveTo(colX(c.col) + T + 2, c.y);
+      ctx.lineTo(barX, c.y);
+    }
+    ctx.moveTo(barX, node.y);
+    ctx.lineTo(colX(node.col) - 2, node.y);
+    ctx.stroke();
+    label("∑", (nearestRight + colX(node.col)) / 2, topY - 16, 14);
     drawTile(node, node.caption);
   }
   if (mode !== "channels") return;

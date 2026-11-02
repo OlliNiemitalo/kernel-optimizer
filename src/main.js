@@ -1,5 +1,5 @@
 import { _setCalibrationState, defaultDevice, init } from "@hamk-uas/jax-js-nonconsuming";
-import { BlurRenderer, defaultGroup, groupOptions, shaderSource, tiltShiftRadiusMap } from "./blur.js";
+import { BlurRenderer, defaultGroup, groupCount, groupOptions, shaderSource, tiltShiftRadiusMap } from "./blur.js";
 import { viewControls } from "./view-controls.js";
 import { World } from "./world.js";
 import { Shapes } from "./shapes.js";
@@ -98,8 +98,8 @@ import { remezSteps } from "./remez.js";
 import { withinBounds } from "./population.js";
 import { drawConvergence, drawDecomposition, drawDisc, drawError, drawProfile, populationPreview } from "./plots.js";
 import {
-  MAX_COMPONENTS, MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, centerFrequency, channelCount, formatParams, kernelFromQuery, kernelToQuery,
-  maxError, multiplicities, problemFromQuery,
+  MAX_COMPONENTS, MAX_MULTIPLICITY, PARAMS_PER_COMPONENT, bounds, formatParams, formatRateTypes, frequencyBands, kernelFromQuery, kernelToQuery,
+  maxError, multiplicities, problemFromQuery, realRates, renderingTerms,
   parseParams, presetParams, nonnegativePresetParams, PRESETS, sampleGrid, separableChannels, sortByFrequency, withStride,
 } from "./problem.js";
 import { loadImage, proceduralScene } from "./scene.js";
@@ -184,11 +184,22 @@ function setMultiplicity(mult) {
   $("multiplicity").value = mult.join(", ");
 }
 
+// Rate type per component, c (complex) or r (real, c = 0), padded with c or truncated to the component count.
+function readRateTypes(components) {
+  const given = ($("rateTypes").value.match(/[a-z]+/gi) ?? []).map((v) => v[0].toLowerCase() === "r");
+  return Array.from({ length: components }, (_, u) => given[u] ?? false);
+}
+
+function setRateTypes(real) {
+  $("rateTypes").value = formatRateTypes(real);
+}
+
 function readProblem() {
   const components = Math.min(MAX_COMPONENTS, Math.max(1, Math.round(num("components"))));
   return {
     components,
     multiplicity: readMultiplicity(components),
+    real: readRateTypes(components),
     transition: num("transition"),
     passSamples: Math.max(2, Math.round(num("passSamples"))),
     stopSamples: Math.max(2, Math.round(num("stopSamples"))),
@@ -217,19 +228,32 @@ function nextFrame() {
   });
 }
 
+// Rendering terms of the chosen structure, per component: 2m for a complex rate, m for a real one.
+function showTermSummary(problem) {
+  const parts = problem.multiplicity.map((m, u) => (problem.real[u] ? m : 2 * m));
+  const terms = parts.reduce((a, b) => a + b, 0);
+  setProp($("termSummary"), "textContent",
+    `Rendering terms: ${terms}${parts.length > 1 ? ` (${parts.join(" + ")})` : ""}` +
+      (terms % 2 ? ". A uniform radius filters terms in pairs, so its last pair has one term." : ""));
+}
+
 function describeRanges(problem) {
-  const n = problem.components;
+  showTermSummary(problem);
   const b = bounds(problem);
-  const bands = problem.frequencyBands
-    ? Array.from({ length: n }, (_, u) => `${(centerFrequency(u) - 0.4 * Math.PI).toFixed(2)}–${(centerFrequency(u) + 0.4 * Math.PI).toFixed(2)}`).join(", ")
-    : `${b.initLo[1].toFixed(2)}–${b.initHi[1].toFixed(2)}`;
-  const m = channelCount(problem.multiplicity);
+  const complex = frequencyBands(problem.multiplicity, problem.real).filter((_, u) => !problem.real[u]);
+  const c = problem.real.findIndex((r) => !r) * PARAMS_PER_COMPONENT + 1;
+  const bands = !complex.length ? "none (all rates real)" : problem.frequencyBands
+    ? complex.map(([lo, hi]) => `${lo.toFixed(2)}–${hi.toFixed(2)}`).join(", ")
+    : `${b.initLo[c].toFixed(2)}–${b.initHi[c].toFixed(2)}`;
+  const terms = renderingTerms(problem.multiplicity, problem.real);
+  const live = b.initHi.findIndex((v, j) => j % PARAMS_PER_COMPONENT >= 2 && v > 0);
   $("ranges").textContent =
-    `${2 * m} rendering terms. Initial ranges: decay b ∈ [${b.initLo[0]}, ${b.initHi[0]}], frequency c ∈ ${bands}, ` +
-    `weights r, i (and r₁, i₁, … of higher multiplicities) ∈ ±${b.initHi[2].toPrecision(3)} ` +
+    `${terms} rendering terms. Initial ranges: decay b ∈ [${b.initLo[0]}, ${b.initHi[0]}], frequency c ∈ ${bands}` +
+    `${problem.real.some(Boolean) && complex.length ? " (real rates: c = 0)" : ""}, ` +
+    `weights r, i (and r₁, i₁, … of higher multiplicities; r only for real rates) ∈ ±${b.initHi[live].toPrecision(3)} ` +
     `(grow 2.5× per pair of terms, as in the article's solutions).`;
   // Larger sets have larger, more strongly cancelling weights, so take smaller relative steps.
-  if ($("ftLr").dataset.auto) $("ftLr").value = Math.min(1e-3, 1e-3 / Math.pow(3, m - 2)).toPrecision(2);
+  if ($("ftLr").dataset.auto) $("ftLr").value = Math.min(1e-3, 1e-3 / Math.pow(3, terms / 2 - 2)).toPrecision(2);
 }
 
 // ---- current kernel -------------------------------------------------------------------
@@ -280,15 +304,19 @@ function drawAll() {
   }
 }
 
-// Offers the equal splits of a kernel's real rendering terms into pass groups, keeps the selected
-// split when still offered, and returns the terms per group.
+// Offers the splits of a kernel's real rendering terms into pass groups (the last group may be
+// smaller), keeps the selected split when still offered, and returns the terms per group.
 function termGroups(params, transition) {
   const terms = separableChannels(params, 1 + transition, { pairs: false }).length;
   const options = groupOptions(terms);
   const select = $("groupTerms");
   const current = Number(select.value);
-  if ([...select.options].map((o) => Number(o.value)).join() !== options.join()) {
-    select.replaceChildren(...options.map((g) => new Option(`${g} (${terms / g} group${terms === g ? "" : "s"})`, g)));
+  const label = (g) => {
+    const n = groupCount(terms, g), last = terms - (n - 1) * g;
+    return `${g} (${n} group${n === 1 ? "" : "s"}${last < g ? `, last ${last}` : ""})`;
+  };
+  if ([...select.options].map((o) => o.text).join() !== options.map(label).join()) {
+    select.replaceChildren(...options.map((g) => new Option(label(g), g)));
   }
   select.value = options.includes(current) ? current : defaultGroup(terms);
   return Number(select.value);
@@ -337,7 +365,7 @@ function createDE({ centered = false, autoStart = false } = {}) {
     };
     if ($("projected").checked) solvers = workerSolvers(Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1)));
     const de = solvers
-      ? new ProjectedEvolution({ ...options, multiplicity: problem.multiplicity, startingPoint: seedWith, solvers })
+      ? new ProjectedEvolution({ ...options, multiplicity: problem.multiplicity, real: problem.real, startingPoint: seedWith, solvers })
       : new DifferentialEvolution({ ...options, startingPoint: seedWith && Float32Array.from(seedWith) });
     state.de?.dispose();
     state.de = de;
@@ -794,6 +822,7 @@ async function applyViewState(view) {
     setRunning(false);
     $("components").value = kernel.length / PARAMS_PER_COMPONENT;
     setMultiplicity(multiplicities(kernel));
+    setRateTypes(realRates(kernel));
     setCurrent(kernel, "view state");
     discardDE({ include: state.current.params });
   }
@@ -868,7 +897,8 @@ function showGpuBreakdown() {
     <div class="io">${writes.filter(Boolean).map(chip).join("")}</div></div>`;
   const G = state.blur.groupTerms ?? 2;
   const groups = state.blur.channels;
-  const loop = `for each of ${groups} group${groups === 1 ? "" : "s"} of ${G} terms${layered ? ", per layer" : ""}`;
+  const lastSize = varying ? state.blur.termCount - (groups - 1) * G : G;
+  const loop = `for each of ${groups} group${groups === 1 ? "" : "s"} of ${G} terms${lastSize < G ? ` (the last of ${lastSize})` : ""}${layered ? ", per layer" : ""}`;
   const html = [
     state.blur.animated && stage("Scene", g.scene, video ? "converts the video frame" : "renders the 3D scene",
       [video && m.videoFrames && b.video], [b.source, varying && b.radius]),
@@ -1213,23 +1243,33 @@ function wire() {
       } else drawAll();
     });
   }
-  for (const id of ["components", "multiplicity", "population", "F", "CR", "seed", "projected"]) {
+  // Preview the term count while typing; the change event then applies the structure.
+  for (const id of ["multiplicity", "rateTypes"]) {
+    $(id).addEventListener("input", () => {
+      const count = ($(id).value.match(id === "multiplicity" ? /\d+/g : /[a-z]+/gi) ?? []).length;
+      const components = count >= 1 && count <= MAX_COMPONENTS ? count : readProblem().components;
+      showTermSummary({ multiplicity: readMultiplicity(components), real: readRateTypes(components) });
+    });
+  }
+  for (const id of ["components", "multiplicity", "rateTypes", "population", "F", "CR", "seed", "projected"]) {
     // The component count reacts while typing or stepping, not only when the field loses focus.
     $(id).addEventListener(id === "components" ? "input" : "change", () => {
       if (id === "components" && !(num("components") >= 1)) return;
       setRunning(false);
-      if (id === "multiplicity") {
-        const count = ($("multiplicity").value.match(/\d+/g) ?? []).length;
+      if (id === "multiplicity" || id === "rateTypes") {
+        const count = ($(id).value.match(id === "multiplicity" ? /\d+/g : /[a-z]+/gi) ?? []).length;
         if (count >= 1 && count <= MAX_COMPONENTS) $("components").value = count;
       }
       const problem = readProblem();
       setMultiplicity(problem.multiplicity);
+      setRateTypes(problem.real);
       const shapeChanged =
         state.current &&
         (state.current.params.length !== problem.components * PARAMS_PER_COMPONENT ||
-          multiplicities(state.current.params).join() !== problem.multiplicity.join());
+          multiplicities(state.current.params).join() !== problem.multiplicity.join() ||
+          realRates(state.current.params).join() !== problem.real.join());
       // A new structure shows the article's kernel for it when there is one, so the plots follow.
-      if (shapeChanged && problem.multiplicity.every((m) => m === 1) && PRESETS[problem.components]) {
+      if (shapeChanged && problem.multiplicity.every((m) => m === 1) && !problem.real.some(Boolean) && PRESETS[problem.components]) {
         setCurrent(sortByFrequency(presetParams(problem.components)), `article preset (${problem.components} components)`);
         discardDE({ include: state.current.params });
         return;
@@ -1247,6 +1287,7 @@ function wire() {
     setRunning(false);
     $("components").value = n;
     setMultiplicity(Array(n).fill(1));
+    setRateTypes(Array(n).fill(false));
     $("transition").value = 0.2;
     $("negGain").value = nonnegative ? NONNEGATIVE_WEIGHT : 1;
     // The non-negative sets don't follow the frequency-band heuristic (one is almost a plain Gaussian).
@@ -1300,6 +1341,7 @@ function wire() {
       const n = params.length / PARAMS_PER_COMPONENT;
       $("components").value = n;
       setMultiplicity(multiplicities(params));
+      setRateTypes(realRates(params));
       // Frequency bands would reject the pasted kernel as a population center, so drop them.
       const banded = bounds({ ...readProblem(), frequencyBands: true });
       const outside = $("frequencyBands").checked && Array.from({ length: n }, (_, u) => u * PARAMS_PER_COMPONENT + 1)
@@ -1307,7 +1349,7 @@ function wire() {
       if (outside) $("frequencyBands").checked = false;
       setCurrent(params, "pasted parameters");
       discardDE({ include: state.current.params });
-      if (outside) setStatus(`${$("status").textContent} “Keep each component in its own frequency band” was turned off because the pasted frequencies don't fit it.`);
+      if (outside) setStatus(`${$("status").textContent} “Constrain rate frequency ranges heuristically” was turned off because the pasted frequencies don't fit it.`);
       box.hidden = true;
     } catch (e) {
       setStatus(e.message);
@@ -1511,6 +1553,7 @@ async function main() {
       const { params, multiplicity } = kernelFromQuery(linked, MAX_COMPONENTS, { sort: !problem });
       $("components").value = problem?.components ?? params.length / PARAMS_PER_COMPONENT;
       setMultiplicity(problem?.multiplicity ?? multiplicity);
+      setRateTypes(problem?.real ?? realRates(params));
       if (problem) {
         for (const id of ["transition", "passSamples", "stopSamples", "denseSamples"]) $(id).value = problem[id];
         $("frequencyBands").checked = problem.frequencyBands;

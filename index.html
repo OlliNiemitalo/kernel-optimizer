@@ -134,7 +134,7 @@
               <label title="Number format of the image between the horizontal and the vertical blur pass. 16-bit halves its memory and renders within 1/255 of 32-bit.">Intermediate precision
                 <select id="precision"><option value="f16" selected>16-bit</option><option value="f32">32-bit</option></select>
               </label>
-              <label title="Varying blur: the kernel's real terms are filtered in equal groups, each by one horizontal and one vertical pass (see Rendering terms). More terms per group: fewer passes, a larger intermediate image and more registers per pixel. The result is the same up to rounding. A uniform radius always uses pairs.">Terms per pass <select id="groupTerms"></select></label>
+              <label title="Varying blur: the kernel's real terms are filtered in groups, each by one horizontal and one vertical pass (see Rendering terms); when the count doesn't divide evenly, the last group is smaller. More terms per group: fewer passes, a larger intermediate image and more registers per pixel. The result is the same up to rounding. A uniform radius always uses pairs.">Terms per pass <select id="groupTerms"></select></label>
               <label class="check"><input id="follow" type="checkbox" checked /> Follow the optimizer's kernel</label>
             </fieldset>
 
@@ -182,13 +182,19 @@
               </label>
               <label>Components <input id="components" type="number" min="1" max="10" step="1" value="3" /></label>
               <label title="Per component, 1 to 10; see About the parameters">Multiplicities <input id="multiplicity" type="text" value="1, 1, 1" spellcheck="false" /></label>
+              <label title="Per component: c = complex rate (oscillating, 2m rendering terms), r = real rate (c = 0, m rendering terms); see About the parameters">Rate types <input id="rateTypes" type="text" value="c, c, c" spellcheck="false" /></label>
+              <p id="termSummary" class="note" role="status"></p>
               <details class="help">
                 <summary>About the parameters</summary>
                 <p class="note">The profile k(x) is a sum of components, each <code>(r cos(c x²) + i sin(c x²))·e<sup>−b x²</sup></code>, with decay <i>b</i>,
                   frequency <i>c</i> and weights <i>r</i> and <i>i</i>.</p>
                 <p class="note">Multiplicity, per component, 1 to 10: <i>m</i> coinciding rates in closed form,
                   <code>(a<sub>0</sub> + a<sub>1</sub> r² + … + a<sub><i>m</i>−1</sub> r<sup>2(<i>m</i>−1)</sup>)·e<sup>λr²</sup></code>,
-                  costing 2<i>m</i> rendering terms (1 = single, 2 = merged pair). Example: 2, 2, 1.
+                  costing 2<i>m</i> rendering terms for a complex rate (1 = single, 2 = merged pair). Example: 2, 2, 1.</p>
+                <p class="note">Rate type, per component: <b>c</b> for a complex rate λ = −b + ic, or <b>r</b> for a real rate
+                  (c = 0, so the weights <i>i</i> have no effect): a plain Gaussian times a real polynomial, costing only
+                  <i>m</i> rendering terms. Example: c, c, r. Every circularly symmetric kernel that splits into a finite number of
+                  separable terms is such a sum of complex and real components, costing exactly that many rendering terms.
                   <a data-readme="#2-kernel-model" href="https://github.com/OlliNiemitalo/kernel-optimizer#2-kernel-model">More in the README</a>.</p>
               </details>
             </fieldset>
@@ -207,8 +213,8 @@
 
             <fieldset>
               <legend>Differential evolution</legend>
-              <p class="note">Global search. With exact weights, it searches the decays <i>b</i> and frequencies <i>c</i>, and each
-                candidate's weights are solved; otherwise it searches all parameters.</p>
+              <p class="note">Global search. With exact weights, it searches the decays <i>b</i> and frequencies <i>c</i> (only
+                <i>b</i> for real rates), and each candidate's weights are solved; otherwise it searches all parameters.</p>
               <div class="row">
                 <button id="run" class="primary grow">Start</button>
               </div>
@@ -226,7 +232,7 @@
               <label title="Probability of taking each further parameter from the mutant (exponential crossover)">Crossover rate CR <input id="CR" type="number" min="0" max="1" step="0.001" value="0.999" /></label>
               <label>Seed <input id="seed" type="number" min="0" step="1" value="1" /></label>
               <label>Generations per frame <input id="gensPerFrame" type="number" min="1" max="1000" step="1" value="10" /></label>
-              <label class="check" title="Component u = 0, 1, 2, … (in order of frequency) searches frequencies c within (1.14u + 0.5)π ± 0.4π. Differential evolution only; Remez refinement and fine-tuning ignore these bounds."><input id="frequencyBands" type="checkbox" checked /> Keep each component in its own frequency band</label>
+              <label class="check" title="Complex-rate components, in order, search frequencies c within slots k at (1.14k + 0.5)π ± 0.4π; a component of multiplicity m spans m slots. The slots start at k = 0, shifted up by half a slot per real-rate term (real rates have c = 0). Differential evolution only; Remez refinement and fine-tuning ignore these bounds."><input id="frequencyBands" type="checkbox" checked /> Constrain rate frequency ranges heuristically</label>
               <details class="help">
                 <summary>About search ranges</summary>
                 <p id="ranges" class="note"></p>
@@ -254,7 +260,7 @@
               <label>Dense grid samples per band <input id="denseSamples" type="number" min="100" max="20000" step="100" value="2000" /></label>
               <details class="help">
                 <summary>How it works</summary>
-                <p class="note">Minimizes a log-sum-exp smooth maximum of |error| on the dense grid with Adam in parameter-relative units (learning rate defaults to 0.001/3<sup>N−2</sup> and halves every third of the run; sharpness, relative to the current ripple, rises 10×). Keeps the best kernel by true maximum error.</p>
+                <p class="note">Minimizes a log-sum-exp smooth maximum of |error| on the dense grid with Adam in parameter-relative units (learning rate defaults to 0.001/3<sup>N−2</sup>, N being half the number of rendering terms, and halves every third of the run; sharpness, relative to the current ripple, rises 10×). Keeps the best kernel by true maximum error.</p>
               </details>
             </fieldset>
           </div>
@@ -280,10 +286,10 @@
             <textarea id="output" rows="12" readonly spellcheck="false"></textarea>
             <div class="buttons">
               <button id="copy">Copy</button>
-              <button id="copyLink" title="Copy a link with the current kernel, multiplicities, and optimization problem settings">Copy link</button>
+              <button id="copyLink" title="Copy a link with the current kernel, multiplicities, rate types, and optimization problem settings">Copy link</button>
               <button id="applyPasted">Use pasted parameters…</button>
             </div>
-            <textarea id="pasted" rows="3" placeholder="One component per line: b, c, r, i (single), then r1, i1, r2, i2, … for multiplicity 2 to 10" spellcheck="false" hidden></textarea>
+            <textarea id="pasted" rows="3" placeholder="One component per line: b, c, r, i (single), then r1, i1, r2, i2, … for multiplicity 2 to 10; c = 0 for a real rate" spellcheck="false" hidden></textarea>
             <h3>How the kernel is formed</h3>
             <p class="note">The kernel K is a sum of separable terms, each a horizontal 1-D filter h(x) times a vertical one
               v(y), and it can be split into such terms in two ways, shown below. Each image is normalized to its own peak
@@ -293,12 +299,16 @@
               <figure>
                 <figcaption>Components</figcaption>
                 <p class="note">Each component split on its own, as in the article. Each row is a real term: h drawn as a
-                  horizontal strip, v as a vertical one, and their product. A component is a complex Gaussian in x times
-                  one in y, with polynomial factors for repeated rates. Separable products first add up to the
+                  horizontal strip, v as a vertical one, and their product. A component is a complex Gaussian (real, for a
+                  real rate) in x times one in y, with polynomial factors for repeated rates. Separable products first add up to the
                   radial polynomial terms u0 x^0, u0 x^2, … (the colored curves in the profile), then to the
                   components u0, u1, …, and finally to K. Only the polynomial terms, whole components, and K are
                   circularly symmetric; individual separable products need not be. Peaks much larger than
-                  K's show cancellation between components.</p>
+                  K's show cancellation between components. Splitting each polynomial term on its own is
+                  redundant: a complex-rate component of multiplicity m gives m(m + 1) rows here (a real-rate one
+                  m(m + 1)/2), but products sharing a factor (such as 1·1 from x^0 and 1·y² from x^2) merge, so it
+                  needs only 2m rendering terms (real: m). The redundancy is only in this figure: the optimization
+                  parameters have none, with one weight per power of x², which is 2m real weights for 2m terms (real: m for m).</p>
                 <canvas id="componentsFigure" aria-label="Components summed into the kernel"></canvas>
               </figure>
               <figure>

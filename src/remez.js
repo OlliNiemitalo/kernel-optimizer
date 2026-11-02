@@ -7,7 +7,7 @@
 // The kernel is linear in its weights (r_k, i_k) and nonlinear in decays and frequencies:
 // optimalWeights() solves the weights exactly by exchange; remezSteps() refines everything.
 
-import { PARAMS_PER_COMPONENT, maxError, multiplicities, profileAt } from "./problem.js";
+import { PARAMS_PER_COMPONENT, maxError, multiplicities, profileAt, realRates } from "./problem.js";
 
 // Householder QR of a p×m row-major matrix (p ≥ m). Returns explicit Q (p×p) and R (m×m).
 function qr(A, p, m) {
@@ -201,17 +201,19 @@ export function chebyshev(rows, target, wPlus, wMinus, { reference = null, maxIt
 }
 
 // Parameter index layout: linear weights (r_k, i_k for k below the multiplicity) and rates (b, c).
+// A real rate (c = 0) has only r_k and b.
 function layout(params) {
-  return layoutFor(multiplicities(params));
+  return layoutFor(multiplicities(params), realRates(params));
 }
 
-function layoutFor(mult) {
+function layoutFor(mult, real = []) {
   const linear = [];
   const rates = [];
   mult.forEach((mu, u) => {
     const k = u * PARAMS_PER_COMPONENT;
-    for (let j = 2; j < 2 + 2 * mu; j++) linear.push(k + j);
-    rates.push(k, k + 1);
+    for (let j = 2; j < 2 + 2 * mu; j++) if (!(real[u] && j % 2)) linear.push(k + j);
+    rates.push(k);
+    if (!real[u]) rates.push(k + 1);
   });
   return { linear, rates };
 }
@@ -267,19 +269,21 @@ function errorWeights(grid) {
 
 // Minimax-optimal linear weights (r_k, i_k) for the given decays and frequencies.
 export function optimalWeights(params, grid) {
-  const sol = new WeightSolver(grid, multiplicities(params)).solve(params);
+  const sol = new WeightSolver(grid, multiplicities(params), realRates(params)).solve(params);
   return { params: sol.params, error: sol.error, level: sol.level, exchanges: sol.exchanges };
 }
 
-// Reusable weight solver for one grid and component structure; a previous reference warm-starts it.
+// Reusable weight solver for one grid and component structure (multiplicities, and which rates
+// are real); a previous reference warm-starts it.
 export class WeightSolver {
-  constructor(grid, multiplicity) {
+  constructor(grid, multiplicity, real = []) {
     this.grid = grid;
     this.s = Float64Array.from(grid.x, (x) => x * x);
     this.target = Float64Array.from(grid.target);
     Object.assign(this, errorWeights(grid));
     this.multiplicity = multiplicity;
-    this.linear = layoutFor(multiplicity).linear;
+    this.real = real;
+    this.linear = layoutFor(multiplicity, real).linear;
     const n = this.s.length, m = this.linear.length;
     this.flat = new Float64Array(n * m);
     this.rows = Array.from({ length: n }, (_, t) => this.flat.subarray(t * m, (t + 1) * m));
@@ -294,6 +298,16 @@ export class WeightSolver {
     let col = 0;
     this.multiplicity.forEach((mu, u) => {
       const b = params[u * PARAMS_PER_COMPONENT], c = params[u * PARAMS_PER_COMPONENT + 1];
+      if (this.real[u]) {
+        // Columns s^q e^{−b s} for the r weights only.
+        for (let t = 0; t < n; t++) {
+          const st = s[t], i = t * m + col;
+          flat[i] = Math.exp(-b * st);
+          for (let q = 1; q < mu; q++) flat[i + q] = st * flat[i + q - 1];
+        }
+        col += mu;
+        return;
+      }
       for (let t = 0; t < n; t++) {
         const st = s[t], E = Math.exp(-b * st);
         const i = t * m + col;
@@ -535,7 +549,7 @@ export function* remezSteps(params, grid, { iterations = 50, minDecay = 0.05, ne
     const step = 2 * Math.max(s[Math.min(j + 1, b)] - s[j], s[j] - s[Math.max(j - 1, a)]);
     return { lo: s[a], hi: s[b], step };
   };
-  const valid = (q) => q.every(Number.isFinite) && rates.every((j, i) => i % 2 === 1 || q[j] >= minDecay);
+  const valid = (q) => q.every(Number.isFinite) && rates.every((j) => j % PARAMS_PER_COMPONENT !== 0 || q[j] >= minDecay);
   // Same weighting as problem.js maxError.
   const errorsOf = (K) => Float64Array.from(K, (k, j) => Math.abs(k - target[j]) * (k < 0 ? negativeWeight : 1));
   const cost = (q) => (valid(q) ? errorsOf(gridProfile(q, s)).reduce((a, x) => Math.max(a, x), 0) : Infinity);
