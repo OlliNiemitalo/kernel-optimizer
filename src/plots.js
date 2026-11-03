@@ -99,17 +99,21 @@ function clipToPlot(ctx, w, h, m) {
   ctx.clip();
 }
 
-// Radial cross-section of the best kernel, with faint population members and the spec.
+// Radial cross-section of the best kernel, with faint population members and the spec. The stop band
+// ends at √2 S (S = 1 + transition), the truncated square kernel's corners; beyond, the profile is unused
+// (shaded) and doesn't set the y range.
 export function drawProfile(canvas, { best, label, population = [], transition, ripple, xmax, showComponents }) {
   const { ctx, w, h } = setupCanvas(canvas);
   const n = 600;
+  const S = 1 + transition, end = S * Math.SQRT2;
   const xs = Array.from({ length: n }, (_, k) => (k / (n - 1)) * xmax);
   const bestY = best ? xs.map((x) => profile(best, x)) : [];
   const componentYs = best && showComponents
     ? componentTerms(best).map((term) => xs.map((x) => profile(term.params, x)))
     : [];
   // Components can be much larger than the sum, so the y range grows to show them in full.
-  const all = bestY.concat(...componentYs);
+  const used = (ys) => ys.filter((_, k) => xs[k] <= end);
+  const all = used(bestY).concat(...componentYs.map(used));
   const lo = Math.min(-0.15, ...all) * (componentYs.length ? 1.05 : 1);
   const hi = Math.max(1.15, ...all) * (componentYs.length ? 1.05 : 1);
   const { X, Y, m } = frame(ctx, w, h, [0, xmax], [lo, hi], {
@@ -119,28 +123,31 @@ export function drawProfile(canvas, { best, label, population = [], transition, 
   ctx.save();
   clipToPlot(ctx, w, h, m);
   ctx.fillStyle = "rgba(255,255,255,0.05)";
-  ctx.fillRect(X(1), m.t, X(1 + transition) - X(1), h - m.t - m.b);
+  ctx.fillRect(X(1), m.t, X(S) - X(1), h - m.t - m.b);
+  if (xmax > end) ctx.fillRect(X(end), m.t, X(xmax) - X(end), h - m.t - m.b);
   const tol = ripple ?? 0;
+  const stopEnd = Math.min(xmax, end);
   ctx.fillStyle = "rgba(144,190,109,0.15)";
   ctx.fillRect(X(0), Y(1 + tol), X(1) - X(0), Y(1 - tol) - Y(1 + tol));
-  ctx.fillRect(X(1 + transition), Y(tol), X(xmax) - X(1 + transition), Y(-tol) - Y(tol));
-  line(ctx, X, Y, [0, 1, 1, 1 + transition, 1 + transition, xmax], [1, 1, 0, 0, 0, 0], "#5c677d", 1);
+  ctx.fillRect(X(S), Y(tol), X(stopEnd) - X(S), Y(-tol) - Y(tol));
+  line(ctx, X, Y, [0, 1, 1, S, S, stopEnd], [1, 1, 0, 0, 0, 0], "#5c677d", 1);
   for (const p of population) line(ctx, X, Y, xs, xs.map((x) => profile(p, x)), "#8b93a7", 1, 0.25);
   if (best) line(ctx, X, Y, xs, bestY, "#ffffff", 2);
   componentYs.forEach((ys, u) => line(ctx, X, Y, xs, ys, COLORS[u % COLORS.length], 1, 0.8));
   ctx.restore();
 }
 
-// Absolute error over pass and stop bands.
+// Absolute error over pass and stop bands; the unused profile beyond the stop band (x > √2 S) is shaded.
 export function drawError(canvas, { best, transition, ripple, xmax }) {
   const { ctx, w, h } = setupCanvas(canvas);
   if (!best) return;
   const n = 800;
+  const S = 1 + transition, end = S * Math.SQRT2;
   const xs = [];
   const es = [];
   for (let k = 0; k < n; k++) {
-    const x = (k / (n - 1)) * xmax;
-    if (x > 1 && x < 1 + transition) continue;
+    const x = (k / (n - 1)) * Math.min(xmax, end);
+    if (x > 1 && x < S) continue;
     xs.push(x);
     es.push(profile(best, x) - (x <= 1 ? 1 : 0));
   }
@@ -148,8 +155,10 @@ export function drawError(canvas, { best, transition, ripple, xmax }) {
   const { X, Y, m } = frame(ctx, w, h, [0, xmax], [-lim, lim], { title: "Error k(x) − target", xlabel: "x" });
   ctx.save();
   clipToPlot(ctx, w, h, m);
-  line(ctx, X, Y, [0, xmax], [ripple, ripple], "#f9c74f", 1, 0.7);
-  line(ctx, X, Y, [0, xmax], [-ripple, -ripple], "#f9c74f", 1, 0.7);
+  ctx.fillStyle = "rgba(255,255,255,0.05)";
+  if (xmax > end) ctx.fillRect(X(end), m.t, X(xmax) - X(end), h - m.t - m.b);
+  line(ctx, X, Y, [0, Math.min(xmax, end)], [ripple, ripple], "#f9c74f", 1, 0.7);
+  line(ctx, X, Y, [0, Math.min(xmax, end)], [-ripple, -ripple], "#f9c74f", 1, 0.7);
   const split = xs.findIndex((x) => x > 1);
   line(ctx, X, Y, xs.slice(0, split), es.slice(0, split), "#4cc9f0", 1.5);
   line(ctx, X, Y, xs.slice(split), es.slice(split), "#f72585", 1.5);
@@ -177,17 +186,21 @@ export function drawConvergence(canvas, history) {
   ctx.restore();
 }
 
-// Signed kernel light added to a dark-blue background; the resulting display color is clipped to [0, 1].
-export function drawDisc(canvas, best, xmax) {
+// The 2-D kernel over the plot range, with a hairline box around the square |x|, |y| ≤ S = 1 + transition
+// that the blur's 1-D passes cover; outside it the kernel is unused. Normalized to the peak within that
+// square. Signed kernel light added to a dark-blue background; the display color is clipped to [0, 1].
+export function drawDisc(canvas, best, xmax, transition) {
   const size = canvas.width;
   const ctx = canvas.getContext("2d");
   const img = ctx.createImageData(size, size);
   const background = [0.002, 0.005, 0.02];
+  const S = 1 + transition;
   if (best) {
     const lutN = 2048;
     const rmax = xmax * Math.SQRT2;
     const lut = Float64Array.from({ length: lutN }, (_, k) => profile(best, (k / (lutN - 1)) * rmax));
-    const peak = lut.reduce((m, v) => Math.max(m, Math.abs(v)), 1e-12);
+    const used = Math.min(xmax, S) * Math.SQRT2;
+    const peak = lut.reduce((m, v, k) => ((k / (lutN - 1)) * rmax <= used ? Math.max(m, Math.abs(v)) : m), 1e-12);
     for (let py = 0; py < size; py++) {
       for (let px = 0; px < size; px++) {
         const x = ((px + 0.5) / size - 0.5) * 2 * xmax;
@@ -200,6 +213,15 @@ export function drawDisc(canvas, best, xmax) {
     }
   }
   ctx.putImageData(img, 0, 0);
+  if (S < xmax) {
+    // Pixel edges at ±S, on half-pixel centers so the 1-pixel line stays sharp.
+    const a = Math.round((0.5 - S / (2 * xmax)) * size) + 0.5, b = Math.round((0.5 + S / (2 * xmax)) * size) - 0.5;
+    ctx.save();
+    ctx.strokeStyle = "rgba(249, 199, 79, 0.8)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(a, a, b - a, b - a);
+    ctx.restore();
+  }
 }
 
 const srgbLevel = (v) => 255 * (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);

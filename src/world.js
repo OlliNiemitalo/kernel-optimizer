@@ -11,6 +11,7 @@ struct World {
   aperture: f32,   // circle-of-confusion radius at Z_REF and the largest radius, in pixels
   dof: u32,        // 1: write the circle of confusion
   invFocus: f32,   // 1 / focus distance, 1/m (0 = infinity)
+  antialias: u32,  // 1: extra subpixel samples at edges (refine pass); 0: one sample per pixel
 }
 
 @group(0) @binding(0) var<uniform> W: World;
@@ -407,11 +408,12 @@ fn refine(@builtin(global_invocation_id) id: vec3u) {
 }
 
 // 3: final color, and the circle of confusion (linear in 1 / depth, so the weighted 1 / depth
-// is a weighted average of the samples' blur radii).
+// is a weighted average of the samples' blur radii). Without antialiasing, the refine pass is
+// skipped and the single sample per pixel is read from color.
 @compute @workgroup_size(64)
 fn resolve(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= W.width * W.height) { return; }
-  let s = scratch[id.x];
+  let s = select(color[id.x], scratch[id.x], W.antialias == 1u);
   color[id.x] = s; // alpha: 1 / depth, for focus picking
   if (W.dof == 1u) { coc[id.x] = clamp(W.aperture * Z_REF * (W.invFocus - s.w), -W.aperture, W.aperture); }
 }
@@ -433,13 +435,15 @@ export class World {
   }
 
   // Encodes one frame into `color` (vec4f per pixel) and, if `coc` is given, the circle of
-  // confusion. `scratch` (16 bytes per pixel) is overwritten.
-  encode(encoder, { color, coc, scratch, width, height, time, aperture, invFocus = 0, timestampWrites }) {
+  // confusion. `scratch` (16 bytes per pixel) is overwritten. `antialias` (default false) adds
+  // subpixel samples at edges; the procedural textures are filtered over the pixel footprint either way.
+  encode(encoder, { color, coc, scratch, width, height, time, aperture, invFocus = 0, antialias = false, timestampWrites }) {
     const u = new ArrayBuffer(32);
     new Uint32Array(u, 0, 2).set([width, height]);
     new Float32Array(u, 8, 2).set([time, aperture]);
     new Uint32Array(u, 16, 1)[0] = coc ? 1 : 0;
     new Float32Array(u, 20, 1)[0] = invFocus;
+    new Uint32Array(u, 24, 1)[0] = antialias ? 1 : 0;
     this.device.queue.writeBuffer(this.uniform, 0, u);
     const bindGroup = this.device.createBindGroup({
       layout: this.layout,
@@ -452,6 +456,7 @@ export class World {
     ];
     // Separate passes: dispatches within one pass were not reliably ordered on Intel Gen9.
     this.pipelines.forEach((pipeline, k) => {
+      if (k === 1 && !antialias) return;
       const writes = timestampWrites && k !== 1 && {
         querySet: timestampWrites.querySet,
         ...(k === 0 ? { beginningOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex } : { endOfPassWriteIndex: timestampWrites.endOfPassWriteIndex }),

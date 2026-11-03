@@ -12,11 +12,14 @@ const dot = (h, v) => h.reduce((s, z, c) => s + z[0] * v[c][0] - z[1] * v[c][1],
 
 export function kernelProfile(channels, transition) {
   const density = PROFILE_DENSITY;
-  const last = Math.ceil(density * (1 + transition));
-  // One zero endpoint closes the truncated profile continuously instead of dropping a nonzero
-  // tap when ceil(radius * support) changes. Extra padding makes the endpoint lookup safe.
-  const stride = last + 3;
-  const support = (last + 1) / density;
+  // The profile ends with a zero endpoint at or just inside S = 1 + transition, so the kernel is not
+  // used beyond the stop band start; the last sample before it closes the truncation continuously
+  // instead of dropping a nonzero tap when ceil(radius * support) changes. Extra padding makes the
+  // endpoint lookup safe.
+  const end = Math.floor(density * (1 + transition) + 1e-9);
+  const last = end - 1;
+  const stride = end + 2;
+  const support = end / density;
   const profiles = [0, 1].map(dir => channels.map(({ h, v }) => {
     const p = new Float64Array(stride * 2);
     for (let t = 0; t <= last; t++) {

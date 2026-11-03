@@ -22,6 +22,7 @@ export function testViewControls() {
         assert.equal(!c.disabled.loop, source === 'video');
         assert.equal(c.disabled.fullscreen, false);
         assert.equal(!c.disabled.shapesScale, source === 'shapes');
+        assert.equal(!c.disabled.antialias, ['world', 'shapes'].includes(source));
         assert.equal(!c.disabled.precision, blur);
         assert.equal(c.layerViews.includes('1'), depth && layers);
         assert.equal(c.layerViews.includes('4'), !(depth && layers));

@@ -26,6 +26,8 @@ export function viewControls({ ready, source, blur, mode, layers, sizeBlur, occl
       sizeBlur: !depth || depthView, sizeBrightness: !depth || !sizeBlur || depthView,
       occlusion: !depth || depthView, occlusionLevels: !depth || !occlusion || depthView,
       shapesScale: !ready || source !== 'shapes',
+      // Subpixel samples exist only for the ray-cast scenes.
+      antialias: !ready || !['world', 'shapes'].includes(source),
       playPause: !playback, stepBack: !playback, stepForward: !playback, sceneTime: !playback,
       toStart: !playback, playbackRate: !playback, seek: !video, loop: !video, fullscreen: !ready,
       precision: !filtering || depthView, follow: !filtering || depthView,

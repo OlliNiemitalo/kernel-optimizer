@@ -129,20 +129,23 @@ export function centerFrequency(k) {
 }
 
 // Frequency band of each component: one of multiplicity m spans the bands of the m slots it occupies.
-// Real-rate components don't oscillate; their band is [0, 0]. Each real term shifts the complex
-// slots up by half a slot (as unconstrained optima show: one real term puts a single complex rate
-// at slot 0.5, two at about 0.85).
+// Real-rate components don't oscillate; their band is [0, 0]. With R real terms, complex slot k sits at
+// R^0.7 / 2 + k (1 + 0.08 R), a fit to unconstrained optima (τ = 0.2, R = 0 … 6, within 0.1 slot).
 export function frequencyBands(multiplicity, real = []) {
-  let slot = multiplicity.reduce((a, m, u) => a + (real[u] ? m : 0), 0) / 2;
+  const R = multiplicity.reduce((a, m, u) => a + (real[u] ? m : 0), 0);
+  const position = (k) => R ** 0.7 / 2 + k * (1 + 0.08 * R);
+  let slot = 0;
   return multiplicity.map((m, u) => {
     if (real[u]) return [0, 0];
-    const band = [centerFrequency(slot) - 0.4 * Math.PI, centerFrequency(slot + m - 1) + 0.4 * Math.PI];
+    const band = [centerFrequency(position(slot)) - 0.4 * Math.PI, centerFrequency(position(slot + m - 1)) + 0.4 * Math.PI];
     slot += m;
     return band;
   });
 }
 
-// Pass band x ∈ [0, 1] uniform; stop band from 1 + transition outwards with log spacing.
+// Pass band x ∈ [0, 1] uniform. Stop band from S = 1 + transition to √2 S: the blur truncates each 1-D
+// pass at |x| ≤ S, so the 2-D kernel uses the profile only up to its square's corners at radius √2 S.
+// The stop band is uniform in s = x², where the components oscillate at constant frequency.
 // negativeWeight multiplies the error wherever the kernel is negative.
 export function sampleGrid(problem, passSamples = problem.passSamples, stopSamples = problem.stopSamples) {
   const n = passSamples + stopSamples;
@@ -152,8 +155,9 @@ export function sampleGrid(problem, passSamples = problem.passSamples, stopSampl
     x[t] = t / (passSamples - 1);
     target[t] = 1;
   }
+  const S = 1 + problem.transition;
   for (let t = 0; t < stopSamples; t++) {
-    x[passSamples + t] = 1 + problem.transition - Math.log((stopSamples - t) / stopSamples);
+    x[passSamples + t] = S * Math.sqrt(1 + t / (stopSamples - 1));
   }
   return { x, target, passSamples, negativeWeight: problem.negativeWeight ?? 1 };
 }
@@ -170,9 +174,9 @@ export function bounds(problem) {
   const initHi = new Float64Array(d);
   const pairs = renderingTerms(problem.multiplicity, real) / 2;
   const weight = 2 * Math.pow(2.5, pairs - 1);
-  // The slots, with half a slot per real term below the complex ones.
-  const topFrequency = centerFrequency(Math.max(1, pairs) - 1) + 0.4 * Math.PI;
   const bands = frequencyBands(problem.multiplicity, real);
+  // The top of the highest complex slot's band (without the constraint, the initial frequency range).
+  const topFrequency = Math.max(centerFrequency(0) + 0.4 * Math.PI, ...bands.map(([, hi]) => hi));
   for (let u = 0; u < n; u++) {
     const k = u * PARAMS_PER_COMPONENT;
     foldLo[k] = 0.2;

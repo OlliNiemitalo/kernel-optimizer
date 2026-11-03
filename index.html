@@ -78,6 +78,7 @@
                 <button id="sceneButton" class="grow" title="A 2-D HDR test image without depth">2D test</button>
               </div>
               <label class="slider" title="Tetras only: size of the tetrahedra and their spacing, scaled about the middle one; the camera stays. The mouse wheel over the picture does the same.">Scale <input id="shapesScale" type="range" min="-4" max="3" step="0.01" value="0" disabled /> <output id="shapesScaleOut">1.00×</output></label>
+              <label class="check" title="3D world and Tetras only: extra subpixel samples per pixel (in the 3D world, at edges and small lights), which antialias geometry edges at a higher rendering cost. Texture filtering over each pixel is separate and always on."><input id="antialias" type="checkbox" disabled /> 3D subpixel sampling (edge antialiasing)</label>
               <label class="stack" title="An image, or an RGB-D video: color on top, inverse depth below as grayscale (white = 0.5 m)">Open an image or RGB-D video
                 <input id="imageFile" type="file" accept="image/*,video/*" />
               </label>
@@ -157,7 +158,9 @@
         <h2 id="optTitle" class="panel-title">Kernel optimizer</h2>
         <p class="note">The kernel K(x, y) is circularly symmetric: K(x, y) = k(√(x² + y²)), where k(x) is its profile along
           a radius, x being the distance from the center in disc radii. The target profile is 1 inside the disc (x ≤ 1) and
-          0 beyond a transition band at its edge (x ≥ 1 + transition bandwidth), with no target in between. The
+          0 in the stop band beyond a transition band at its edge, from S = 1 + transition bandwidth to √2 S, with no target
+          in between. The blur's 1-D passes cover |x| ≤ S, so the 2-D kernel uses the profile only out to the corners of
+          that square, at √2 S. The
           <b>ripple</b> is the largest deviation of k from the target; the optimizers minimize it. Presets
           are the kernels published in <a href="https://yehar.com/blog/?p=1495">the article</a>. The GPU search uses
           <a href="https://github.com/hamk-uas/jax-js-nonconsuming">jax-js-nonconsuming</a>.</p>
@@ -199,7 +202,7 @@
               <label>Transition bandwidth <input id="transition" type="number" min="0.02" max="2" step="0.01" value="0.2" /></label>
               <label title="Multiplier of the error where the kernel is negative">Negative-value penalty <input id="negGain" type="number" min="1" max="1000" step="1" value="1" /></label>
               <label title="Points where the error is measured inside the disc, 0 ≤ x ≤ 1 (the pass band)">Samples inside <input id="passSamples" type="number" min="10" max="5000" step="10" value="200" /></label>
-              <label title="Points where the error is measured outside, from x = 1 + transition bandwidth outwards (the stop band), denser near the edge">Samples outside <input id="stopSamples" type="number" min="10" max="5000" step="10" value="200" /></label>
+              <label title="Points where the error is measured outside, in the stop band from S = 1 + transition bandwidth to √2 S, evenly spaced in x²">Samples outside <input id="stopSamples" type="number" min="10" max="5000" step="10" value="200" /></label>
               <details class="help">
                 <summary>About the negative-value penalty</summary>
                 <p class="note">Errors where the kernel is negative are multiplied by this penalty. Above 1, the optimizers trade ripple for fewer negative values, which look like cheap sharpening (as in the article's non-negative sets).</p>
@@ -227,7 +230,7 @@
               <label title="Probability of taking each further parameter from the mutant (exponential crossover)">Crossover rate CR <input id="CR" type="number" min="0" max="1" step="0.001" value="0.999" /></label>
               <label>Seed <input id="seed" type="number" min="0" step="1" value="1" /></label>
               <label>Generations per frame <input id="gensPerFrame" type="number" min="1" max="1000" step="1" value="10" /></label>
-              <label class="check" title="Complex-rate components, in order, search frequencies c within slots k at (1.14k + 0.5)π ± 0.4π; a component of multiplicity m spans m slots. The slots start at k = 0, shifted up by half a slot per real-rate term (real rates have c = 0). Differential evolution only; Remez refinement and fine-tuning ignore these bounds."><input id="frequencyBands" type="checkbox" checked /> Constrain rate frequency ranges heuristically</label>
+              <label class="check" title="Complex-rate components, in order, search frequencies c within slots k at (1.14k + 0.5)π ± 0.4π; a component of multiplicity m spans m slots. The slots start at k = 0; with R real-rate terms, complex slot k moves to R^0.7 / 2 + k (1 + 0.08 R), a fit to unconstrained optima (real rates have c = 0). Differential evolution only; Remez refinement and fine-tuning ignore these bounds."><input id="frequencyBands" type="checkbox" checked /> Constrain rate frequency ranges heuristically</label>
               <details class="help">
                 <summary>About search ranges</summary>
                 <p id="ranges" class="note"></p>
@@ -270,7 +273,8 @@
               <canvas id="profile" class="plot"></canvas>
               <div class="disc-wrap">
                 <canvas id="disc" width="320" height="320"></canvas>
-                <p class="note">The kernel K(x, y), normalized to its peak, added to a dark-blue background.</p>
+                <p class="note">The kernel K(x, y) over the plot range, normalized to its peak and added to a dark-blue background.
+                  The box marks |x|, |y| ≤ 1 + transition bandwidth, the part the blur uses.</p>
               </div>
               <canvas id="error" class="plot"></canvas>
               <canvas id="convergence" class="plot"></canvas>

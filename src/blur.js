@@ -1165,7 +1165,8 @@ ${computeShader(packed, interpolate)}`;
 // per-channel sums differ between levels. It is returned as `cross` (before the scaling below);
 // the tables are scaled so that the renderer needs a correction (`fix`) only for small levels.
 export function tapTables(channels, radii, transition) {
-  const halves = radii.map((r) => (r === null ? 0 : Math.max(1, Math.ceil(r * (1 + transition)))));
+  // Taps at |t| / R ≤ 1 + transition: the kernel is not used beyond the stop band start.
+  const halves = radii.map((r) => (r === null ? 0 : Math.max(1, Math.floor(r * (1 + transition) + 1e-9))));
   const sum = (taps) => {
     let re = 0;
     let im = 0;
@@ -1523,9 +1524,11 @@ export class BlurRenderer {
   // `interpolate` (default false) blends adjacent radius nodes instead of selecting the nearest.
   // `groupTerms`: varying radius, real terms filtered by each horizontal and vertical pass, one of
   // groupOptions(termCount); more terms mean fewer passes and a larger intermediate.
+  // `antialias` (default false): subpixel samples in the 3D world and Tetras scenes.
   async render({
     exposure = 1, precision = "f32", showSource = false, time = 0, invFocus = 0, capture = false,
     sizeBlur = 1, occlusion = 1, layers = 1, showLayers = 0, interpolate = false, groupTerms = null,
+    antialias = false,
   } = {}) {
     const varying = !!this.varying;
     const G = groupOptions(this.termCount).includes(groupTerms) ? groupTerms : defaultGroup(this.termCount);
@@ -1620,6 +1623,7 @@ export class BlurRenderer {
         time,
         aperture: this.kernelSpec.radius,
         invFocus,
+        antialias,
         timestampWrites: timestampWrites("scene"),
       });
     }

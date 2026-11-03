@@ -15,6 +15,7 @@ struct Shapes {
   invFocus: f32,
   distance: f32,
   scale: f32,
+  antialias: u32, // 1: 4 subpixel samples per pixel; 0: one at the pixel center
 }
 
 @group(0) @binding(0) var<uniform> S: Shapes;
@@ -121,15 +122,19 @@ fn shade(cam: Camera, pos: vec2f) -> vec4f {
   return vec4f(hit.albedo * (1.6 * key + fill) + 0.3 * rim, 1.0 / (S.scale * hit.t * dot(d, cam.fwd)));
 }
 
-// 4 samples per pixel on a rotated grid; alpha averages 1 / depth, so the circle of confusion
-// (linear in it) averages the samples' blur radii.
+// With antialiasing, 4 samples per pixel on a rotated grid; alpha averages 1 / depth, so the circle
+// of confusion (linear in it) averages the samples' blur radii. Without, one sample at the center.
+// The stars are filtered over their footprint either way.
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= S.width || id.y >= S.height) { return; }
   let cam = camera();
   let p = vec2f(f32(id.x) + 0.5, f32(id.y) + 0.5);
-  let s = 0.25 * (shade(cam, p + vec2f(0.375, 0.125)) + shade(cam, p + vec2f(-0.125, 0.375)) +
-    shade(cam, p + vec2f(-0.375, -0.375)) + shade(cam, p + vec2f(0.125, -0.125)));
+  var s = shade(cam, p);
+  if (S.antialias == 1u) {
+    s = 0.25 * (shade(cam, p + vec2f(0.375, 0.125)) + shade(cam, p + vec2f(-0.125, 0.375)) +
+      shade(cam, p + vec2f(-0.375, -0.375)) + shade(cam, p + vec2f(0.125, -0.125)));
+  }
   let i = id.y * S.width + id.x;
   color[i] = s;
   if (S.dof == 1u) { coc[i] = clamp(S.aperture * Z_REF * (S.invFocus - s.w), -S.aperture, S.aperture); }
@@ -168,12 +173,13 @@ export class Shapes {
   }
 
   // Same interface as World.encode; `time` and `scratch` are unused.
-  encode(encoder, { color, coc, width, height, aperture, invFocus = 0, timestampWrites }) {
+  encode(encoder, { color, coc, width, height, aperture, invFocus = 0, antialias = false, timestampWrites }) {
     const u = new ArrayBuffer(48);
     new Uint32Array(u, 0, 2).set([width, height]);
     new Float32Array(u, 8, 3).set([this.yaw, this.pitch, aperture]);
     new Uint32Array(u, 20, 1)[0] = coc ? 1 : 0;
     new Float32Array(u, 24, 3).set([invFocus, this.distance, this.scale]);
+    new Uint32Array(u, 36, 1)[0] = antialias ? 1 : 0;
     this.device.queue.writeBuffer(this.uniform, 0, u);
     const bindGroup = this.device.createBindGroup({
       layout: this.layout,

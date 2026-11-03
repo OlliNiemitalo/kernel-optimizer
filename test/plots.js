@@ -7,10 +7,11 @@ const reported = pad([5.3932719936984945, 2.1675026283783136, 0.978182557971403,
   -1447.0864723543666, -215.61780912155626, 430.4142726210623, -885.7463643834903]);
 
 function canvasRecorder() {
-  const images = [], labels = [], strokes = [];
+  const images = [], labels = [], strokes = [], rects = [];
   let image, points;
   const ctx = {
     setTransform() {}, clearRect() {}, save() {}, restore() {}, rect() {}, clip() {}, fillRect() {},
+    strokeRect(...r) { rects.push(r); },
     beginPath() { points = []; },
     moveTo(x, y) { assert.ok(Number.isFinite(x) && Number.isFinite(y)); points.push([x, y]); },
     lineTo(x, y) { assert.ok(Number.isFinite(x) && Number.isFinite(y)); points.push([x, y]); },
@@ -32,7 +33,7 @@ function canvasRecorder() {
     get clientHeight() { return parseFloat(this.style.height) || 320; },
     style: {}, getContext: () => ctx,
   };
-  return { canvas, images, labels, strokes };
+  return { canvas, images, labels, strokes, rects };
 }
 
 function checkImage(image, params) {
@@ -53,16 +54,18 @@ function checkImage(image, params) {
 
 export function testPlots() {
   for (const params of [pad([3, 0, 0, 0]), pad([0.001, 0, 1, 0]), pad([0.001, 0, -1, 0]), presetParams(1)]) {
-    const { canvas, images } = canvasRecorder();
+    const { canvas, images, rects } = canvasRecorder();
     canvas.width = 32;
     canvas.height = 32;
-    drawDisc(canvas, params, 2.5);
+    drawDisc(canvas, params, 2.5, 0.2);
     const { data } = images[0];
-    const lut = Array.from({ length: 2048 }, (_, i) => profile(params, i / 2047 * 2.5 * Math.SQRT2));
-    const peak = Math.max(1e-12, ...lut.map(Math.abs));
+    // The kernel over the plot range, normalized to its peak within the used square |x|, |y| ≤ S = 1.2.
+    const S = 1.2, rmax = 2.5 * Math.SQRT2;
+    const lut = Array.from({ length: 2048 }, (_, i) => profile(params, i / 2047 * rmax));
+    const peak = Math.max(1e-12, ...lut.filter((_, i) => i / 2047 * rmax <= S * Math.SQRT2).map(Math.abs));
     for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) {
-      const radius = Math.hypot(((x + 0.5) / 32 - 0.5) * 5, ((y + 0.5) / 32 - 0.5) * 5);
-      const v = lut[Math.min(2047, Math.round(radius / (2.5 * Math.SQRT2) * 2047))] / peak;
+      const px = ((x + 0.5) / 32 - 0.5) * 5, py = ((y + 0.5) / 32 - 0.5) * 5;
+      const v = lut[Math.min(2047, Math.round(Math.hypot(px, py) / rmax * 2047))] / peak;
       [0.002, 0.005, 0.02].forEach((background, c) => {
         const linear = Math.max(0, Math.min(1, background + v));
         const expected = Math.round(255 * (linear <= 0.0031308 ? 12.92 * linear : 1.055 * linear ** (1 / 2.4) - 0.055));
@@ -70,6 +73,8 @@ export function testPlots() {
       });
       assert.equal(data[(y * 32 + x) * 4 + 3], 255);
     }
+    // The hairline box at ±S: pixel edges round(32 (0.5 ∓ S / 5)) = 8 and 24, on half-pixel centers.
+    assert.deepEqual(rects, [[8.5, 8.5, 15, 15]]);
     if (params[2] === 0) assert.deepEqual(Array.from(data.slice(0, 4)), [7, 16, 39, 255]);
     if (params[2] === -1) assert.deepEqual(Array.from(data.slice(0, 4)), [0, 0, 0, 255]);
     if (params[2] === 1) assert.deepEqual(Array.from(data.slice(0, 4)), [254, 254, 255, 255]);
@@ -105,7 +110,9 @@ export function testPlots() {
         assert.equal(curves.length, terms.length);
         assert.equal(plot.strokes.at(-1), curves.at(-1));
         const xs = Array.from({ length: 600 }, (_, i) => i / 599 * 2.5);
-        const all = xs.map((x) => profile(params, x)).concat(...terms.map((term) => xs.map((x) => profile(term.params, x))));
+        // The y range covers the used profile only, up to the stop band end √2 · 1.5.
+        const usedXs = xs.filter((x) => x <= 1.5 * Math.SQRT2);
+        const all = usedXs.map((x) => profile(params, x)).concat(...terms.map((term) => usedXs.map((x) => profile(term.params, x))));
         const lo = Math.min(-0.15, ...all) * 1.05, hi = Math.max(1.15, ...all) * 1.05;
         curves.forEach((curve, i) => curve.points.forEach(([, y], j) => {
           const expected = 290 - (profile(terms[i].params, xs[j]) - lo) / (hi - lo) * 268;

@@ -294,7 +294,7 @@ function drawAll() {
   });
   drawError($("error"), { best, transition: problem.transition, ripple, xmax });
   drawConvergence($("convergence"), state.history);
-  drawDisc($("disc"), best, xmax);
+  drawDisc($("disc"), best, xmax, problem.transition);
   const key = best && `${best.join()}|${problem.transition}|${$("groupTerms").value}`;
   if (key !== state.decompositionKey) {
     state.decompositionKey = key;
@@ -772,6 +772,7 @@ function download(url, name) {
 const VIEW_CONTROLS = [
   "blurOn", "radius", "blurMode", "focus", "layers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels",
   "exposure", "precision", "transition", "radiusInterpolation", "groupTerms", "showLayers", "playbackRate", "loop",
+  "antialias",
 ];
 
 // Everything needed to re-render the displayed frame, plus context for bug reports.
@@ -969,6 +970,7 @@ async function renderBlur() {
       precision: $("precision").value,
       interpolate: $("radiusInterpolation").checked,
       groupTerms: Number($("groupTerms").value),
+      antialias: $("antialias").checked,
       showSource: !$("blurOn").checked,
       time: state.sceneTime,
       invFocus: state.focus ** 2,
@@ -1377,7 +1379,7 @@ function wire() {
     $("exposureOut").textContent = `${Math.pow(2, num("exposure")).toFixed(2)}×`;
     requestBlur();
   });
-  for (const id of ["blurOn", "layers", "showLayers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels", "radiusInterpolation"]) {
+  for (const id of ["blurOn", "layers", "showLayers", "sizeBlur", "sizeBrightness", "occlusion", "occlusionLevels", "radiusInterpolation", "antialias"]) {
     $(id).addEventListener("input", () => {
       updateVaryingControls();
       requestBlur();

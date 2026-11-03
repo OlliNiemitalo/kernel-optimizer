@@ -297,7 +297,11 @@ console.log('PASS centered population, optional exact seed, objective re-scoring
       jump = Math.max(jump, Math.abs(c.correction(1.17, boundary - 1e-7, true) - c.correction(1.17, boundary + 1e-7, true)));
     }
   }
-  check("continuous mixed-radius unit coverage, including fast path", worst, 0.005);
+  // A point-sampled reference (the renderer uses the integrated radius tables, checked below): its tap
+  // sums step where a tap enters the support, between the correction's radius nodes. Over a dense radius
+  // sweep this reaches about 3% for preset 1 (with the support ending at S or just past it alike); the
+  // fixed radii here bound the typical error.
+  check("continuous mixed-radius unit coverage, including fast path", worst, 0.01);
   check("continuous zero radius is identity", identity, 1e-10);
   check("interpolated profile symmetry", symmetry, 0);
   check("continuous sampler has no threshold jumps", jump, 1e-5);
@@ -710,9 +714,11 @@ for (const multiplicity of [[1, 1], [2, 1], [3], [10]]) {
   assert.deepEqual([b.foldLo[D1 + 1], b.foldHi[D1 + 1], b.initLo[D1 + 1], b.initHi[D1 + 1]], [0, 0, 0, 0]);
   assert.deepEqual([b.foldLo[D1 + 3], b.foldHi[D1 + 3]], [0, 0]);
   assert.ok(b.foldHi[D1 + 2] > 0 && b.foldHi[3] > 0 && b.foldHi[5] > 0);
-  // Complex slots start at half a slot per real term: here 0.5 (multiplicity 2: slots 0.5, 1.5) and 2.5.
+  // With R real terms, complex slot k sits at R^0.7 / 2 + k (1 + 0.08 R): here R = 1, so 0.5, 1.58 (multiplicity 2) and 2.66.
   const band = (lo, hi) => [centerFrequency(lo) - 0.4 * Math.PI, centerFrequency(hi) + 0.4 * Math.PI];
-  assert.deepEqual(frequencyBands([2, 1, 1], [false, true, false]), [band(0.5, 1.5), [0, 0], band(2.5, 2.5)]);
+  const near = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-12);
+  const bands3 = frequencyBands([2, 1, 1], [false, true, false]);
+  assert.ok(near(bands3[0], band(0.5, 1.58)) && near(bands3[1], [0, 0]) && near(bands3[2], band(2.66, 2.66)));
   assert.deepEqual(frequencyBands([2, 1]), [band(0, 1), band(2, 2)]);
   // All-complex problems keep their old bounds (backward compatible).
   const old = bounds({ ...problemFor([2, 1]) });

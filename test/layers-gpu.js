@@ -98,7 +98,8 @@ export async function layersGPU(renderer, check, read) {
   renderer.setDepthOfField();
   renderer.setKernel(presetParams(3), 69, 0.2);
   for (const interpolate of [false, true]) {
-    await renderer.render({ layers: 2, invFocus: 0.697019047240157 ** 2, interpolate });
+    // The reported view was rendered with antialiasing.
+    await renderer.render({ layers: 2, invFocus: 0.697019047240157 ** 2, interpolate, antialias: true });
     const raw = await read(renderer.device, renderer.radiusBuffer);
     const { smooth, mask } = await sourceMaps(renderer, read);
     let inflation = 0, jump = 0, pairs = 0, subpixelError = 0;

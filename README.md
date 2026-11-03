@@ -82,6 +82,10 @@ The page title links to the default view.
 the picture (go to start, previous frame, play/pause, next frame, time, speed) is available only for
 videos and the animated world; the seek bar, duration and loop only for videos, and full screen for
 every scene (also by double-clicking the picture, again to exit). The Blur on/off switch is in the bar, so it is available in full screen. The space bar plays and pauses, unless a control that uses it has focus.
+**3D subpixel sampling (edge antialiasing)** (Scene, off by default) applies to the 3D world and Tetras only: with it, the
+3D world adds 3 subpixel samples to each pixel at edges and small lights, and Tetras renders 4 per pixel;
+without it, each pixel has one sample at its center. Texture filtering is separate: procedural textures and
+the stars are filtered over the pixel footprint either way.
 Focus, layers, row averaging of the vertical radius and occlusion require depth mode with a depth source (world,
 video or Tetras). Highlight priority additionally requires row averaging, and the occlusion
 threshold requires occlusion. Smooth radius steps are available only for varying blur.
@@ -289,10 +293,14 @@ the problem is ill-conditioned. Two real Gaussians with free decays tend to run 
 best fit is the limit of coinciding rates with cancelling weights, a real multiplicity-2 component,
 which has the same cost and no cancellation (see [Reference results](#7-reference-results)).
 
-The optimizer's top 2-D kernel preview adds the peak-normalized signed kernel to a dark-blue
+The optimizer's top 2-D kernel preview shows the kernel over the plot range, with a hairline box around the
+square $|x|, |y| \le 1 + \tau$ that the 1-D passes cover; the blur uses only the kernel inside it, and the
+image is normalized to the peak there. It adds the peak-normalized signed kernel to a dark-blue
 background in linear RGB, then clips the resulting display channels to [0, 1] before sRGB encoding.
 Negative lobes therefore darken the background. This is display-only; the kernel,
-optimization, blur rendering, and the bottom diagrams' gray/red colors are unchanged.
+optimization, blur rendering, and the bottom diagrams' gray/red colors are unchanged. The profile and
+error plots shade the radii beyond the stop band, $r > \sqrt{2}\,(1 + \tau)$, which the blur never uses,
+and leave them out of the profile's vertical scale.
 
 **Rendering channels.** Instead, `separableChannels` in [`src/problem.js`](src/problem.js)
 decomposes the real kernel as a whole. In the real basis $f$ of all components' functions
@@ -536,7 +544,8 @@ support. Enable it for continuous radius changes: the per-pixel node index and f
 prepared once; the inner loops read two complex taps at integer offsets and blend them, without
 rescaling a profile or normalizing each tap. The option is included in copied view states and
 shader exports; it has no effect on uniform blur. The tables are built from a dense
-complex reference profile (256 points per disc radius), with a continuous zero endpoint. Each tap
+complex reference profile (256 points per disc radius), with a continuous zero endpoint at or just
+inside $1 + \tau$ (see Truncation and corners). Each tap
 is the integral of the scaled profile over the pixel interval, not its value at the pixel center.
 Radius zero is identity; positive subpixel radii use the same integration as larger radii.
 The uniform path uses point-sampled direct tables.
@@ -722,11 +731,15 @@ For preset 3, pixel-integrated table storage is **478,336 bytes at radius 15** a
 
 #### Truncation and corners
 
-Truncating each 1-D profile at normalized distance $1 + \tau$ makes the nominal 2-D support a
-square. Its corners reach $r = \sqrt{2}\,(1 + \tau)$, so the kernel must already be near zero
-there. Discrete tap bounds also account for rounding and, in the varying path, the half-pixel
-integration footprint. The optimizer's stop band extends far beyond the nominal corners, to about
-$1 + \tau + \ln N_\text{stop}$.
+Each 1-D rendering term is used only over $|x| \le S = 1 + \tau$, the pass band plus the transition band
+(both are needed for the 2-D kernel's circular symmetry). The uniform path's taps stop at
+$|t| \le \lfloor R S \rfloor$, and the varying path's reference profile ends with a zero endpoint at
+$\lfloor 256 S \rfloor / 256 \le S$. Interpolating between radius nodes blends tables that are zero-padded to a
+common length, so the shorter node simply contributes zeros there. The 2-D kernel's support is
+therefore the square $|x|, |y| \le S$, and only its corners, out to $r = \sqrt{2}\,S$, use the stop band.
+That is why the optimizer's stop band is $[S, \sqrt{2}\,S]$ (section 6): the profile beyond it is never
+used, and fitting it would only take accuracy from the range that is. The varying path's taps also
+cover the half-pixel integration footprint of each pixel that overlaps the support.
 
 ### 5. Precision
 
@@ -748,9 +761,13 @@ terms get amplified.
 ### 6. Optimization
 
 **Cost.** The cost is the minimax error, $\max_j |K(x_j) - \mathrm{target}_j|$, the ripple shown
-in the plots. The pass band is sampled uniformly on $[0, 1]$. Following the article, stop-band
-samples are $x_t = 1 + \tau - \ln\frac{N - t}{N}$ for $t = 0 \dots N-1$: dense near the edge,
-sparse far out.
+in the plots. The pass band is sampled uniformly on $[0, 1]$. The stop band is $[S, \sqrt{2}\,S]$ with
+$S = 1 + \tau$, the radii that the truncated square kernel uses (see Truncation and corners), sampled
+uniformly in $s = x^2$: $x_t = S\sqrt{1 + t/(N-1)}$ for $t = 0 \dots N-1$, so each oscillation of
+$\cos(cs)$ gets about the same number of samples. All optimizers (both differential evolution modes, Remez
+refinement and fine-tuning) and the displayed ripple use this grid. The article's grid instead
+extended the stop band to about $1 + \tau + \ln N$ ($x_t = 1 + \tau - \ln\frac{N - t}{N}$), which fits the
+profile where the blur never uses it.
 
 **Negative values.** Negative kernel values look like cheap sharpening. The negative-value penalty $w$
 (a problem parameter) multiplies the error wherever the kernel is negative:
@@ -812,10 +829,10 @@ optimizer source (`phaseGaussParallelOpti.cpp` in its `phasegauss1.1.zip`); the 
 article's published sets:
 
 - Channel slot $k$ oscillates within $(1.14k + 0.5)\pi \pm 0.4\pi$; a complex-rate component of multiplicity $m$ spans
-  the bands of the $m$ slots it occupies. Real rates ($c = 0$) shift the complex slots up by half a
-  slot per real term: without the constraint, one real term put the complex rates at slots
-  0.47–0.51, 1.49–1.56 and 2.62, and two real terms at 0.83–0.84 and 1.97 (c, r; c, c, r; c, c, c, r; and with
-  a real multiplicity 2). The unshifted slots would exclude these optima.
+  the bands of the $m$ slots it occupies. With $R$ real-rate terms ($c = 0$), complex slot $k$ moves to
+  $R^{0.7}/2 + k\,(1 + 0.08R)$, a fit to optima found without the constraint for $R = 1 \dots 6$, within 0.1 slot.
+  For example, one real term put the complex rates at slots 0.47–0.51, 1.49–1.56 and 2.62, two at
+  0.83–0.85, 1.98–2.01 and 3.07, and six a single complex rate at 1.81. With $R = 0$ these are the article's slots.
 - Initial decay $b \in [0.3,\ 1 + N_\text{ch}]$, where $N_\text{ch}$ is half the number of rendering terms
   (the number of complex channels when all rates are complex). The article's $N$-component sets have
   decays up to 0.86, 1.96, 2.82, 4.34, 4.89 and 6.51 for $N = 1 \dots 6$.
@@ -837,7 +854,7 @@ A candidate whose basis is singular (coinciding rates) gets infinite cost. A re-
 keeps its rates and re-solves its weights. A kernel included in a new population, or injected
 after Remez refinement or fine-tuning, keeps its own weights: those were tuned on the dense grid,
 and re-solving them on the sparser DE grid would lower the DE cost but raise the dense-grid
-ripple (5 components: ±0.003592 → ±0.003619). Its weights are re-solved only if folding into the
+ripple (5 components: ±0.003592 → ±0.003624). Its weights are re-solved only if folding into the
 search bounds moves its rates. In either search mode, a refined kernel that is in the population
 (injected, or included in a new one) stays the current kernel until the population's best beats
 its dense-grid ripple. A new population without it shows the population's own best.
@@ -845,10 +862,11 @@ its dense-grid ripple. A new population without it shows the population's own be
 This is far slower per candidate than the GPU search (roughly 1 ms in Node on the test laptop
 versus 4–10 µs), but each candidate is worth much more. From random 5-component populations,
 on the 200 + 200 grid, with 40,000 evaluations (3 seeds each): population 32 reached
-±0.00358–±0.00360, population 64 ±0.0037–±0.0039, population 128 ±0.0055–±0.0059. Hence the population defaults to 32 in this
-mode (512 for the GPU search) unless you set it. In the browser, 90 s from a random population
+±0.00358, ±0.00363 and ±0.00416 (one seed stalled), population 64 ±0.00364–±0.00365, population 128
+±0.0052–±0.0062. Population 32 found the best kernel and 64 was the most consistent; the population
+defaults to 32 in this mode (512 for the GPU search) unless you set it. In the browser, 90 s from a random population
 reached ±0.0066 with exact weights, against ±1.7 for the GPU search (both in a background tab,
-which throttles both).
+which throttles both; measured with the article's stop-band grid, see Reference results).
 
 **Gradient fine-tuning** ([`src/finetune.js`](src/finetune.js)) minimizes a smooth maximum of the
 absolute error $a_j = \sqrt{e_j^2 + 10^{-12}}$ on a dense grid (2000 + 2000 samples):
@@ -908,8 +926,8 @@ theory instead assumed the Haar condition.
 
 *3. Second-order Remez steps.* Gauss–Newton converges quadratically only when the error has
 $\dim(w, \theta) + 1$ extremal points at the ripple level. Starting from the article's 5-component set
-there are 17–19 of 21, and Gauss–Newton creeps along a curved valley (4000 iterations took it
-from ±0.00408 only to ±0.00376). So each iteration also tries Newton steps on the KKT system of
+there are 18–19 of 21, and Gauss–Newton creeps along a curved valley (4000 iterations took it
+from ±0.004082 only to ±0.003764). So each iteration also tries Newton steps on the KKT system of
 $\min \delta$ subject to equal ripple on the near-active extrema $k$ (band-local maxima within 5% of
 the maximum):
 
@@ -926,35 +944,38 @@ $c_k = \delta$) is essential: the equal-ripple manifold is strongly curved becau
 cancel. A step is kept only if it lowers the grid maximum. The run stops when nothing improves.
 
 From the article's sets (dense 2000 + 2000 grid; re-checked on 40,000 + 40,000 points, within
-$10^{-6}$):
+$10^{-6}$; the times are from the earlier stop-band grid, see Reference results):
 
 | Components | Article | Optimal weights for the article's rates | Remez refined | Iterations, time (Node) |
 |---|---|---|---|---|
 | 2 | ±0.07729 | ±0.07693 | ±0.07593 | 4, 0.4 s |
-| 3 | ±0.02745 | ±0.02714 | ±0.02653 | 5, 0.3 s |
+| 3 | ±0.02745 | ±0.02714 | ±0.02653 | 6, 0.3 s |
 | 4 | ±0.01093 | ±0.01090 | ±0.009646 | 6, 0.4 s |
-| 5 | ±0.004116 | ±0.004082 | ±0.003592 | 5, 0.6 s |
-| 6 | ±0.001966 | ±0.001941 | ±0.001359 | 12, 2.4 s |
+| 5 | ±0.004116 | ±0.004082 | ±0.003592 | 7, 0.6 s |
+| 6 | ±0.001966 | ±0.001941 | ±0.001359 | 17, 2.4 s |
 
 In the browser, preset 5 took 6.4 s (with the blur re-rendering every improvement), where 3000
-gradient fine-tuning steps took 75 s to reach ±0.004084. The refined kernels also have smaller
+gradient fine-tuning steps took 75 s to reach ±0.004084 (both on the earlier grid). The refined kernels also have smaller
 weights (5 components: $\sum |r| + |i|$ 81 instead of 190). Refinement is local and ignores the
 frequency-range constraint. From far-off starts it can be slow or end in a worse optimum: the 6-component set
-with 1% parameter noise (ripple ±1.5) reached only ±0.00197 in 50 iterations. Use differential
+with 1% parameter noise (ripple ±0.17) reached only ±0.00211 in 50 iterations. Use differential
 evolution to get near a good basin first.
 
 ### 7. Reference results
 
-All ripples below are measured on the dense grid ($\tau = 0.2$):
+All ripples below are measured on the dense grid ($\tau = 0.2$), with the stop band $[1 + \tau, \sqrt{2}(1 + \tau)]$.
+The ripples in sections 6 and 7 were re-measured on this grid; they match the earlier results to the precision
+shown, except where noted. The timings and browser results were measured with the earlier grid, which
+extended the stop band to about $1 + \tau + \ln N$, and are somewhat outdated.
 
 | Kernel | Ripple |
 |---|---|
-| 2 components, found by DE | ±0.07595 |
+| 2 components, found by DE | ±0.07597 |
 | Article's 2-component set | ±0.07729 |
 | Article's 3-component set | ±0.02745 |
-| Article's 3-component set, perturbed by ±1% and then fine-tuned | ±0.02666 |
+| Article's 3-component set, perturbed by ±1% and then fine-tuned | ±0.02669 |
 | Article's 5-component set | ±0.004116 |
-| Article's 5-component set, fine-tuned | ±0.004084 |
+| Article's 5-component set, fine-tuned | ±0.004086 |
 | Article's 5-component set, Remez refined | ±0.003592 |
 | Article's 6-component set, Remez refined | ±0.001359 |
 
@@ -962,28 +983,37 @@ The article's own ripple figures were measured on its sparser 200 + 200 grid, wh
 look slightly better.
 
 **Ripple per number of rendering terms.** Best of three projected-DE runs (population 48, 250
-generations, 200 + 200 grid), each Remez refined on 1000 + 1000 points. A later search without the
-frequency-range constraint (four seeds, 300 generations) found the same optima for the mixed and
-all-single structures; with the constraint as it is now, differential evolution alone comes within
-$10^{-4}$ of them:
+generations, 200 + 200 grid), each Remez refined on 1000 + 1000 points. Each structure was searched both
+with and without the frequency-range constraint; both found the same optima, and with the constraint,
+differential evolution alone came within $10^{-4}$ of them (without it, up to $3 \cdot 10^{-3}$ worse):
 
 | Terms | Multiplicities | Rate types | Ripple |
 |---|---|---|---|
 | 2 | 1 | c | ±0.2324 |
 | 2 | 2 (or 1, 1) | r (r, r) | ±0.3261 |
 | 3 | 1, 1 | c, r | ±0.1315 |
-| 3 | 3 (or 1, 1, 1) | r (r, r, r) | ±0.2683 |
+| 3 | 3 (or 1, 1, 1) | r (r, r, r) | ±0.2682 |
 | 4 | 1, 1 | c, c | ±0.07593 |
 | 4 | 1, 2 (or 1, 1, 1) | c, r (c, r, r) | ±0.09050 |
 | 4 | 2 | c | ±0.1165 |
 | 4 | 4 (or 1, 1, 1, 1) | r (r, r, r, r) | ±0.1982 |
 | 5 | 1, 1, 1 | c, c, r | ±0.04459 |
 | 5 | 2, 1 | c, r | ±0.06241 |
+| 5 | 1, 3 | c, r | ±0.06623 |
 | 6 | 1, 1, 1 | c, c, c | ±0.02653 |
 | 6 | 1, 1, 2 (or 1, 1, 1, 1) | c, c, r (c, c, r, r) | ±0.03023 |
+| 6 | 2, 2 | c, r | ±0.04364 |
+| 6 | 1, 4 | c, r | ±0.05032 |
+| 7 | 1, 1, 1, 1 | c, c, c, r | ±0.01594 |
+| 7 | 1, 1, 3 | c, c, r | ±0.02141 |
+| 7 | 1, 5 | c, r | ±0.03922 |
+| 8 | 1, 1, 1, 1 | c, c, c, c | ±0.009646 (the article's set, Remez refined on 2000 + 2000) |
+| 8 | 1, 1, 1, 2 | c, c, c, r | ±0.01063 |
+| 8 | 1, 1, 4 | c, c, r | ±0.01571 |
+| 8 | 1, 6 | c, r | ±0.03057 |
 
 In these runs, all-complex single components stay best for even numbers of terms. A real Gaussian
-fills an odd budget well: 3 and 5 terms lie between their even neighbors. Separate real rates
+fills an odd budget well: 3, 5 and 7 terms lie between their even neighbors. Separate real rates
 converge to a common rate, so real multiplicity does as well as several real components. An odd
 number of terms saves work in the varying-radius blur, which filters real terms in groups
 (the last group can be smaller). The uniform-radius blur filters complex pairs, so there its
@@ -1020,8 +1050,8 @@ candidates per second.
 | `src/projected-de.js`, `src/weight-worker.js`, `src/population.js` | Differential evolution with exact weights (variable projection) on CPU workers; shared population initialization |
 | `src/remez.js` | Exchange (simplex on the dual linear program) minimax solver and Remez refinement of all parameters |
 | `src/blur.js` | WebGPU blur: WGSL compute and display shaders |
-| `src/world.js` | Animated 3D night street ray-cast on the GPU: procedural textures, puddles with traced reflections, glossy highlights; adaptive 4× antialiasing and procedural patterns box-filtered over the pixel footprint; the circle of confusion from the z-buffer (in edge pixels, the samples' 1 / depth averaged with luminance weights, so a bright in-focus light's edge isn't partly blurred into bumps) |
-| `src/shapes.js` | Test scene ("Tetras"): three tetrahedra in a row against a black, starry background at infinity, ray-cast with 4× antialiasing; drag the picture to turn the view; the Scale slider (or the wheel over the picture) scales the tetrahedra about the middle one |
+| `src/world.js` | Animated 3D night street ray-cast on the GPU: procedural textures, puddles with traced reflections, glossy highlights; optional adaptive 4× subpixel sampling of edges (off by default) and procedural patterns box-filtered over the pixel footprint (always); the circle of confusion from the z-buffer (in subpixel-sampled edge pixels, the samples' 1 / depth averaged with luminance weights, so a bright in-focus light's edge isn't partly blurred into bumps) |
+| `src/shapes.js` | Test scene ("Tetras"): three tetrahedra in a row against a black, starry background at infinity, ray-cast with optional 4× subpixel sampling (off by default); drag the picture to turn the view; the Scale slider (or the wheel over the picture) scales the tetrahedra about the middle one |
 | `src/video.js` | RGB-D video as a depth-of-field source: color over grayscale depth, or a color video with an inferno-coded depth video |
 | `tools/tum_rgbd_video.py` | Converts a [TUM RGB-D](https://cvg.cit.tum.de/data/datasets/rgbd-dataset) sequence to that format (fills depth holes, H.264) |
 | `public/tum-sitting-rgbd.mp4` | 15 s of TUM RGB-D fr3/sitting_static, converted with the tool above |
