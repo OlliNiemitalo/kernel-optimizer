@@ -4,7 +4,8 @@ Interactive optimizer and WebGPU reference implementation for **circularly symme
 built from complex Gaussians**: disc ("bokeh") blurs computed with a horizontal and a vertical 1-D
 pass, at a cost proportional to the blur radius rather than its area.
 
-- **Optimizer**: differential evolution (global search) with exact minimax weights solved by
+- **Optimizer**: differential evolution (a population-based global-search heuristic, without a
+  guarantee of finding the global optimum) with minimax weights solved exactly on the sample grid by
   Remez exchange on CPU workers, or over all parameters on the GPU; gradient fine-tuning on
   [jax-js-nonconsuming](https://github.com/hamk-uas/jax-js-nonconsuming) (WebGPU, with a WebAssembly
   fallback); and a Remez exchange refinement (float64 on the CPU) that converges to a local minimax
@@ -27,8 +28,8 @@ pass, at a cost proportional to the blur radius rather than its area.
 Based on Olli Niemitalo,
 [Circularly symmetric convolution and lens blur](https://yehar.com/blog/?p=1495) (2010), extended
 with repeated rates (components of multiplicity up to 10) and real rates. With both, the components
-characterize exactly the circularly symmetric kernels of finite separable rank, each at its minimum
-number of rendering terms (see [Universality](#universality)). This is exact representability, not a
+characterize exactly the continuous circularly symmetric kernels of finite separable rank, each at its
+minimum number of real rendering terms (see [Universality](#universality)). This is exact representability, not a
 universal approximation theorem.
 
 ## Running
@@ -381,7 +382,7 @@ $$
 $$
 
 with complex polynomials $P_u$ and real polynomials $R_u$ of degree $m_u - 1$. Then
-$N = \sum_{c_u > 0} 2m_u + \sum_{c_u = 0} m_u$, the app's count of rendering terms. ($K$ is integrable exactly when every $b_u > 0$.)
+$N = \sum_{c_u > 0} 2m_u + \sum_{c_u = 0} m_u$, the app's count of rendering terms. ($K$ is absolutely integrable over the plane exactly when every $b_u > 0$.)
 
 *Proof.* (1) *Reduce to φ(u + v).* Since $x^2, y^2 \ge 0$, a decomposition $\varphi(u + v) = \sum_n F_n(u) G_n(v)$ on
 $[0, \infty)^2$ gives $K = \sum_n F_n(x^2) G_n(y^2)$, and restricting a decomposition of $K$ to $x, y \ge 0$ with
@@ -891,9 +892,15 @@ $$
 
 A real rate has only the functions $s^q e^{-bs}$, weights $r_q$ and rate $b$; its $c$ and $i_q$ stay zero.
 
-*1. Optimal weights for fixed rates* are a discrete linear Chebyshev problem,
-$\min_w \max_j W_j |t_j - \Phi_j w|$, with the negative-value penalty as a sign-dependent weight
-($W_j = w_-$ where $e_j = t_j - K_j > 0$ in the stop band, i.e. where $K < 0$; else 1). Its LP dual is
+*1. Optimal weights for fixed rates* are a discrete linear Chebyshev problem on the sample grid,
+$\min_w \max_j W_j |t_j - \Phi_j w|$, with the negative-value penalty $w_- \ge 1$ as a sign-dependent weight:
+$W_j = w_-$ where $e_j = t_j - K_j > 0$ in the stop band, i.e. where $K < 0$; else 1. In the pass band
+($t = 1$), a negative $K$ would have error $e > 1$ and get weight 1 here instead of $w_-$, which can only
+lower the objective, yet the optimum is exact for the penalized objective: all-zero weights ($K = 0$)
+have weighted error 1, so the optimum is at most 1, has no pass-band error above 1 and hence no negative
+pass-band values, where both weightings agree. This holds for every candidate, whatever its rates.
+The weights are exact for this discrete problem; the continuous profile's maximum error between the
+grid points can be slightly larger (see Reference results). Its LP dual is
 
 $$
 \delta = \max_\lambda \sum_j \lambda_j t_j \quad \text{s.t.} \quad \sum_j \lambda_j \Phi_j = 0,\quad \sum_j |\lambda_j| / W_j(\mathrm{sign}\lambda_j) = 1,
@@ -967,6 +974,12 @@ All ripples below are measured on the dense grid ($\tau = 0.2$), with the stop b
 The ripples in sections 6 and 7 were re-measured on this grid; they match the earlier results to the precision
 shown, except where noted. The timings and browser results were measured with the earlier grid, which
 extended the stop band to about $1 + \tau + \ln N$, and are somewhat outdated.
+
+The ripples are maxima over the grid points (2000 + 2000 unless stated), not certified maxima of the
+continuous profile; the Remez-refined kernels, re-checked on a 20× denser grid, changed by less than
+$10^{-6}$. They were re-measured in Node 24.13.0 with the optimizer code of commit `f0a01d0`, which introduced
+this stop band, using the settings stated with each table. Timings were measured on a laptop with an Intel Core i7-10510U CPU and its Intel UHD
+Graphics 620 (Gen9) GPU, under Windows 11; the Node and browser versions of those runs were not recorded.
 
 | Kernel | Ripple |
 |---|---|

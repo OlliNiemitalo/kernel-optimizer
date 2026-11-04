@@ -257,8 +257,11 @@ function scaledRows(cols, n, extra = 0) {
   return { rows, scale };
 }
 
-// The negative-value weight applies where K < 0, i.e. where e = t − K > t. With t ∈ {0, 1} and
-// ripple below 1, that is e > 0 in the stop band and never in the pass band.
+// The negative-value weight w ≥ 1 applies where K < 0, i.e. where e = t − K > t: in the stop band
+// (t = 0) that is e > 0, so wPlus = w there. In the pass band (t = 1), K < 0 means e > 1; it gets weight
+// 1 here, which can only lower the objective. That is still exact at the optimum: all-zero weights
+// (K = 0) give weighted error 1, so the optimum is at most 1, has no pass-band errors above 1 and
+// thus no negative pass-band values, where both weightings agree.
 function errorWeights(grid) {
   const w = grid.negativeWeight ?? 1;
   return {

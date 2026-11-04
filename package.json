@@ -10,7 +10,7 @@
     "smoke": "vite-node test/smoke.js",
     "test:video": "node --test test/video-playback.js"
   },
-  "license": "MIT",
+  "license": "CC0-1.0",
   "type": "module",
   "devDependencies": {
     "vite": "^6.4.4",

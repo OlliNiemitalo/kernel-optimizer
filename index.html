@@ -211,7 +211,7 @@
 
             <fieldset>
               <legend>Differential evolution</legend>
-              <p class="note">Global search. With exact weights, it searches the decays <i>b</i> and frequencies <i>c</i> (only
+              <p class="note">Global-search heuristic (it does not guarantee the global optimum). With exact weights, it searches the decays <i>b</i> and frequencies <i>c</i> (only
                 <i>b</i> for real rates), and each candidate's weights are solved; otherwise it searches all parameters.</p>
               <div class="row">
                 <button id="run" class="primary grow">Start</button>
@@ -224,7 +224,7 @@
                 </div>
                 <label class="check" title="Applies to both buttons above. Checked: the exact current kernel is one member. Unchecked: every member is random or, around the current kernel, perturbed."><input id="seedWithCurrent" type="checkbox" /> Include the current kernel as a member</label>
               </fieldset>
-              <label class="check" title="Search only decays and frequencies; each candidate's weights are the exact minimax optimum, solved by Remez exchange on CPU workers. Unchecked: search all parameters on the GPU."><input id="projected" type="checkbox" checked /> Solve weights exactly (CPU workers)</label>
+              <label class="check" title="Search only decays and frequencies; each candidate's weights are the exact minimax optimum on the sample grid, solved by Remez exchange on CPU workers. Unchecked: search all parameters on the GPU."><input id="projected" type="checkbox" checked /> Solve weights exactly (CPU workers)</label>
               <label>Population <input id="population" type="number" min="8" max="16384" step="8" value="32" data-auto="1" /></label>
               <label title="Scale of the difference between two members, added to a third to form a mutant">Differential weight F <input id="F" type="number" min="0.05" max="2" step="0.01" value="0.76" /></label>
               <label title="Probability of taking each further parameter from the mutant (exponential crossover)">Crossover rate CR <input id="CR" type="number" min="0" max="1" step="0.001" value="0.999" /></label>
