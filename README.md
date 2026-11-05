@@ -416,9 +416,12 @@ largest rank of its sample matrices). The per-component channels above attain th
 
 *Machine-checked proof.* The theorem is formalized in Lean 4 with Mathlib in
 [kernel-rank-lean](https://github.com/OlliNiemitalo/kernel-rank-lean) (`separableRank_radial_eq_iff`), with
-no unproved steps. Its proof follows the steps above: in step (3), the matrix semigroup is shown to be
-$e^{tA}$ by smoothing with an integral, and $\varphi$ is split along the generalized eigenvectors of $A$. In step (4),
-it works over $\mathbb{R}$ directly: the real and imaginary parts of $u^k e^{\mu u}$, and of their Hasse-derivative
+no unproved steps. Its proof follows the steps above: in step (3), continuity of the translation
+matrices follows from the pointwise topology and automatic continuity of linear maps on
+finite-dimensional spaces. The matrix semigroup is shown to be $e^{tA}$ by smoothing with an
+integral: normalized averages tend to the identity, so are invertible for small positive intervals.
+Then $\varphi$ is split along the generalized eigenvectors of $A$. In step (4), the proof works over
+$\mathbb{R}$ directly: the real and imaginary parts of $u^k e^{\mu u}$, and of their Hasse-derivative
 partners in $v$, are shown to be linearly independent, which replaces the anti-triangular blocks.
 
 *Measurable kernels.* Continuity can be weakened to measurability, except at the center. Laczkovich
