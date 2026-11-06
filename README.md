@@ -414,15 +414,15 @@ independent, so the rank over $\mathbb{C}$ is $\sum_\mu m_\mu$, which counts $2m
 for a real-rate one. A real kernel has the same rank over $\mathbb{R}$ as over $\mathbb{C}$ (both are the
 largest rank of its sample matrices). The per-component channels above attain this rank. ∎
 
-*Machine-checked proof.* The theorem is formalized in Lean 4 with Mathlib in
-[kernel-rank-lean](https://github.com/OlliNiemitalo/kernel-rank-lean) (`separableRank_radial_eq_iff`), with
-no unproved steps. Its proof follows the steps above: in step (3), continuity of the translation
-matrices follows from the pointwise topology and automatic continuity of linear maps on
-finite-dimensional spaces. The matrix semigroup is shown to be $e^{tA}$ by smoothing with an
-integral: normalized averages tend to the identity, so are invertible for small positive intervals.
-Then $\varphi$ is split along the generalized eigenvectors of $A$. In step (4), the proof works over
-$\mathbb{R}$ directly: the real and imaginary parts of $u^k e^{\mu u}$, and of their Hasse-derivative
-partners in $v$, are shown to be linearly independent, which replaces the anti-triangular blocks.
+> *Machine-checked proof.* The theorem is formalized in Lean 4 with Mathlib in
+> [kernel-rank-lean at commit `240dea0`](https://github.com/OlliNiemitalo/kernel-rank-lean/tree/240dea077b40a8aa9ce0e90ea13d8e546614f594)
+> ([`KernelRank.separableRank_radial_eq_iff`](https://github.com/OlliNiemitalo/kernel-rank-lean/blob/240dea077b40a8aa9ce0e90ea13d8e546614f594/KernelRankLean/Main.lean)),
+> with no unproved steps. In step (3), continuity uses the pointwise topology and automatic
+> continuity of finite-dimensional linear maps; integral smoothing shows that the translation
+> semigroup is $e^{tA}$, and generalized eigenvectors give exponential polynomials. In step (4),
+> independent monomial and Hasse-derivative factor families give the exact rank over
+> $\mathbb{C}$. Nonreal components are expanded into conjugate pairs, and complexification
+> preserves the rank of the real-valued kernel.
 
 *Measurable kernels.* Continuity can be weakened to measurability, except at the center. Laczkovich
 (2020) extends Theorem A to measurable functions. On the semigroup $[0, \infty)$ there is one exponential
